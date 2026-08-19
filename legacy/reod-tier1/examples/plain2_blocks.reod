@@ -1,0 +1,57 @@
+% ブロックは値を持つ。つまり「引数のない無名関数を、その場で呼んだもの」として使える。
+
+% (1) 作業用の名前を外に漏らさずに値を組み立てる。
+let area := {
+    let w := 3;
+    let h := 4;
+    w * h
+};
+
+print(area);
+
+% (2) 外側の名前は隠されるだけで、ブロックを出れば戻る。
+let x := 10;
+
+let y := {
+    let x := 2;
+    x * x
+};
+
+print(x);
+print(y);
+
+% (3) 途中で抜けたいときは break。無名関数の return にあたる。
+fn sign (n : i64) {
+    {
+        if n < 0 { break (0 - 1); }
+        if n == 0 { break 0; }
+        1
+    }
+} -> i64;
+
+print(sign(0 - 7));
+print(sign(0));
+print(sign(7));
+
+% (4) 式の途中にそのまま置ける。
+print(1 + { let t := 20; t * 2 });
+
+% (5) 小さな選択を並べる。
+fn max3 (a : i64, b : i64, c : i64) {
+    let m := { if a > b { break a; } b };
+    { if m > c { break m; } c }
+} -> i64;
+
+print(max3(3, 9, 5));
+print(max3(9, 3, 5));
+print(max3(3, 5, 9));
+
+% (6) ループの本体もブロックなので、同じ書き方が通る。
+let total := 0;
+let i := 1;
+loop {
+    if i > 5 break;
+    total += { let sq := i * i; sq + 1 };
+    i += 1;
+}
+print(total);

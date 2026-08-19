@@ -1,0 +1,21 @@
+% 例6：goto を暗黙のチェックポイント・リセットとして使う
+%
+% x は global でないため、jump が発火するたびにベースライン（0）まで巻き戻る。
+% cnt は global なのでこの影響を受けず、単調に増え続ける。
+%
+% 設計書の例からの差分：`let` は `;` で終端する（設計書の例は省略している）。
+
+let x := 0;
+let cnt := 0;
+
+#[immediate]
+let foo := loop {
+    if cnt == 2 break x;
+    if x == 1 goto A;
+    label A;
+    x += 1;
+    #[global]
+    cnt += 1;
+};
+
+print(foo);

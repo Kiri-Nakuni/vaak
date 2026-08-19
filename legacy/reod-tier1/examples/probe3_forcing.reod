@@ -1,0 +1,62 @@
+% (1)
+
+let z := 5 / 0;
+print(1);
+
+% (2)
+
+let never := print(9);
+print(2);
+
+% (3)
+
+let a := 1;
+let b := a + 10;
+a := 2;
+print(b);
+
+% (4)
+
+a := 100;
+print(b);
+
+% (5)
+
+fn twice () { k + k } -> i64;
+fn caller (k : i64) { twice() } -> i64;
+
+print(caller(21));
+
+% (6)
+
+let d := 2;
+d += 1;
+print(d);
+
+% (7)
+
+comment;
+    d := d + 1;
+label _comment_;
+
+% (8)
+
+let n := 1;
+fn g (v : i64) { v } -> i64;
+let r := g(n);
+n := 100;
+print(r);
+
+print(0);
+
+% (9)
+
+let a2 := 1;
+let b2 := a2 + 10;
+a2 := 2;
+a2 := 100;
+print(b2);
+
+% (10) 最後の行はエラーになる
+
+print(z);

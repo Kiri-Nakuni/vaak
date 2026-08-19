@@ -1,0 +1,15 @@
+id = "reod"
+name = "REod"
+description = "REod（PraTeX 埋め込みスクリプト言語）のシンタックスハイライト"
+version = "0.0.1"
+schema_version = 1
+authors = []
+
+# Zed はローカルパスを受け付けず、必ず git から clone する。
+# そのため editors/tree-sitter-reod 自体をローカル git リポジトリにしてある。
+# grammar.js を編集したら:
+#   cd editors/tree-sitter-reod && npx tree-sitter-cli generate && git add -A && git commit -m ...
+# そのうえで下の rev を新しい SHA に更新すること（scripts/sync-zed-grammar.sh が自動化する）。
+[grammars.reod]
+repository = "file:///home/suima/Documents/mydsl/editors/tree-sitter-reod"
+rev = "af76badd54aa439768523ba584b08f63f00184cb"

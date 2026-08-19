@@ -1,0 +1,78 @@
+% 早期リターン——C++ の `return true` を2重ループの内側から撃つ、あの形。
+%
+% REod では `return` は組み込みではない。無名標準ライブラリの1行:
+%
+%     flow return = $repeat(break, getdepth());
+%
+% つまり早期リターンとは「今いる深さぶんだけブロックを抜ける」ことであり、
+% その「深さ」は getdepth() で読める値でしかない。C++ が隠しているのは
+% まさにこの数である——`return` が何段の scope を巻き戻すかは書けないし訊けない。
+
+% Tier 1 にはまだ配列がないので、グリッドは関数で表す。
+fn at (r : i64, c : i64) {
+    r * 3 + c + 1
+} -> i64;
+
+% (1) 脱糖した形。何段抜けるかが目に見える。
+fn contains_raw (rows : i64, cols : i64, target : i64) {
+    let r := 0;
+    loop {
+        if r == rows break;
+        let c := 0;
+        loop {
+            if c == cols break;
+            if at(r, c) == target {
+                % 関数本体(1) + 外ループ(2) + 内ループ(3) = 3段。
+                % `if` の本体はスコープを作らないので数に入らない。
+                $repeat(break, getdepth()) 1;
+            }
+            c += 1;
+        }
+        r += 1;
+    }
+    0
+} -> i64;
+
+% (2) 別名を使った形。まったく同じものを指している。
+fn contains (rows : i64, cols : i64, target : i64) {
+    let r := 0;
+    loop {
+        if r == rows break;
+        let c := 0;
+        loop {
+            if c == cols break;
+            if at(r, c) == target { return 1; }
+            c += 1;
+        }
+        r += 1;
+    }
+    0
+} -> i64;
+
+print(contains_raw(2, 3, 5));
+print(contains(2, 3, 5));
+print(contains_raw(2, 3, 99));
+print(contains(2, 3, 99));
+
+% (3) 段数はリテラルでも書ける。内ループだけ抜けたいなら 1、
+%     外ループまでなら 2、関数ごとなら 3。
+fn first_row_containing (rows : i64, cols : i64, target : i64) {
+    let r := 0;
+    let found := 0 - 1;
+    loop {
+        if r == rows break;
+        let c := 0;
+        loop {
+            if c == cols break;
+            if at(r, c) == target {
+                found := r;
+                break break;      % 内ループと外ループを抜ける。関数は抜けない
+            }
+            c += 1;
+        }
+        r += 1;
+    }
+    found
+} -> i64;
+
+print(first_row_containing(2, 3, 5));

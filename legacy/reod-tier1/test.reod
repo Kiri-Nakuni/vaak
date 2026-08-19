@@ -1,0 +1,4 @@
+#[immediate]
+let NM : u8 array := read();
+#[immediate]
+print(cat("Of",NM.lower()));
