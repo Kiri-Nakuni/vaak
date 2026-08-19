@@ -1,0 +1,14 @@
+{
+  "name": "tree-sitter-reod",
+  "version": "0.0.1",
+  "description": "tree-sitter grammar for REod",
+  "main": "bindings/node",
+  "tree-sitter": [
+    {
+      "scope": "source.reod",
+      "file-types": [
+        "reod"
+      ]
+    }
+  ]
+}

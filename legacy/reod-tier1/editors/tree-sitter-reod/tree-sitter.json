@@ -1,0 +1,17 @@
+{
+  "grammars": [
+    {
+      "name": "reod",
+      "camelcase": "Reod",
+      "scope": "source.reod",
+      "file-types": [
+        "reod"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.0.1",
+    "license": "MIT",
+    "description": "tree-sitter grammar for REod"
+  }
+}
