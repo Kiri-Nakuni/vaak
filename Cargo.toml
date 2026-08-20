@@ -14,3 +14,7 @@ path = "src/main.rs"
 [[bin]]
 name = "vaak-lsp"
 path = "src/bin/vaak-lsp.rs"
+
+[[bin]]
+name = "steel"
+path = "src/bin/steel.rs"
