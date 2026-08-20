@@ -19,7 +19,7 @@
 | 4 | LICENSE（MIT / 有村陽大） | **済**。`LICENSE` `docs/LICENSING.md` |
 | 5 | **STEEL vaak**（LLVM IR スタンドアロン） | **第一段完了**（S-12）。整数・制御・関数。枝 `steel`、`speculative` に併合済み |
 | 6 | e-upTeX 移植可否 | **済**。`rtex/docs/euptex-port-notes.md` に八段の段取り |
-| 7 | e-upTeX 移植 | **段 0 完了**（Q/H/zw/zh）。次は段 1（`\numexpr` 系） |
+| 7 | e-upTeX 移植 | **段 0・1a 完了**（Q/H/zw/zh、`\numexpr` 系）。次は 1b（疎レジスタ）→ 2（字句系） |
 | 8 | 寸法の鍵語 H / Q / zw / zh | **済**。rtex 枝 `jdimen`、試験 7 本 |
 | 9 | LaTeX2e が動くか（7 が済んだら） | 未 |
 | 10 | LuaTeX のコールバック再現（意味論を変えずに） | 方針は **S-11**。実装は凍結解除待ち |
@@ -33,6 +33,13 @@
 ## 記録
 
 ### 2026-08-21
+
+- **rtex e-TeX 段 1a**：`\numexpr` `\dimexpr` `\glueexpr` `\muexpr`。枝 `etex-expr`
+  - 掛けと割りを溜めてから一度に行う——**中間結果を 32 ビットに落とさない**
+  - `\numexpr 7*8/3\relax` = 19（`\multiply\divide` を並べると 18）
+  - 内部量として実装（`InternalCommand::Expr`）。値が要る場所ならどこでも
+  - `\dimexpr 4Q*2\relax` が通る——段 0 の和文単位と組み合わさる
+  - 試験 12 本。rtex 全体で 84 通過
 
 - **S-14**：設計質問二つに回答。
   - 剥がされたホスト別名の検出責任 → **問い自体が消えていた。**
