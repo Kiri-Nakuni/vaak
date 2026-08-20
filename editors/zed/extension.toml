@@ -5,13 +5,25 @@ version = "0.1.0"
 schema_version = 1
 authors = ["Arimura Akihiro"]
 
-# **tree-sitter 文法は持たない。**
+# **Zed は LSP の意味トークンで色を付けない。** tree-sitter 文法が要る。
 #
-# 色分けは言語サーバの意味トークンから出す。`.scm` を別に書けば、
-# 一つの決定を二箇所で実装することになり、二箇所で間違えられる——
-# この設計で二度やった誤りである（C-61 / C-93）。
+# だから文法を置いた。ただし**色分けに要る分だけ**である——
+# 式の優先順位も領域の規則も段の数え方も入っていない。
+# **入れれば一つの決定を二箇所で実装することになり、二箇所で間違えられる**
+# （C-61 / C-93 で二度やった誤りである）。
 #
-# 字句器は一つ。**Zed が見る色も、検査器が見る字句も、同じ実装から出る。**
+# 意味は言語サーバが持つ。診断・説明・記号一覧・補完はそちらから来る。
+#
+# **鍵語の一覧だけは `src/lexer.rs` と一致していなければならない。**
+# `tests/grammar.rs` がそれを確かめている。
+#
+# Zed は文法をローカルの道からは読めず、必ず git から取る。
+# だから `editors/tree-sitter-vaak` 自体が git の版方になっている。
+# 文法を直したら `scripts/sync-grammar.sh` を走らせて下の rev を新しくすること。
+
+[grammars.vaak]
+repository = "file:///home/suima/Documents/mydsl/editors/tree-sitter-vaak"
+rev = "cb8fbe8d7735e9c01692b9bbd83441e59d62c5bf"
 
 [language_servers.vaak-lsp]
 name = "Vaak"

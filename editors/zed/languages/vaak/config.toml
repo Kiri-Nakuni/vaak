@@ -1,4 +1,5 @@
 name = "Vaak"
+grammar = "vaak"
 path_suffixes = ["vaak", "vk"]
 line_comments = ["% "]
 block_comment = ["%{ ", " }%"]
