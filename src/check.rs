@@ -59,6 +59,9 @@ struct Checker {
     stages: Vec<Stage>,
     /// 名前が見える範囲の上限。**`continue` の被演算子は本体の先頭で見える名前だけ**（C-81）。
     visible_limit: Option<usize>,
+    /// ホストが見せている名前。**関数の中からは見えない**（C-96）——
+    /// 見えないことを、見えない理由とともに言うために持つ。
+    host_names: HashSet<String>,
 }
 
 pub fn check(prog: &Program) -> Vec<StaticError> {
@@ -77,6 +80,7 @@ pub fn check_with_host(prog: &Program, host: &[(String, ValueType)]) -> Vec<Stat
         flows: HashSet::new(),
         stages: vec![Stage { is_loop: false, is_frame: true }],
         visible_limit: None,
+        host_names: host.iter().map(|(n, _)| n.clone()).collect(),
     };
     for (n, _) in host {
         c.scopes[0].insert(n.clone(), (BindKind::Var, false));
@@ -97,6 +101,24 @@ enum RegionKind {
 }
 
 impl Checker {
+    /// 知らない名前。**ホストの名前なら、なぜ見えないかを言う。**
+    ///
+    /// 「知らない」で済ませると、書き手は綴りを疑う。
+    /// **見えているはずのものが見えないときは、規則を言うべきである。**
+    fn unknown(&mut self, n: &str, span: Span) {
+        if self.host_names.contains(n) {
+            self.err(
+                format!(
+                    "`{n}` はホストの名前で、**関数の中からは見えない**（C-96）。\
+引数で受ける: `fn f (x : … alias) {{ … }}` と書いて `f({n})` と呼ぶ"
+                ),
+                span,
+            );
+        } else {
+            self.err(format!("知らない名前 `{n}`"), span);
+        }
+    }
+
     fn err(&mut self, msg: impl Into<String>, span: Span) {
         self.errs.push(StaticError { msg: msg.into(), span });
     }
@@ -221,7 +243,7 @@ impl Checker {
 
             ExprKind::Name(n) => {
                 if self.lookup(n).is_none() {
-                    self.err(format!("知らない名前 `{n}`"), e.span);
+                    self.unknown(n, e.span);
                 }
                 Places::Value
             }
@@ -465,7 +487,7 @@ impl Checker {
                         self.err("`&=` で束縛するなら型に `alias` が要る", b.span);
                     }
                     match self.lookup(t) {
-                        None => self.err(format!("知らない名前 `{t}`"), b.span),
+                        None => self.unknown(t, b.span),
                         Some((k, _)) => {
                             if !can_narrow(k, d.kind) {
                                 self.err("経路の権限は増やせない", b.span);
@@ -488,7 +510,7 @@ impl Checker {
                 return Places::Paradox;
             };
             match self.lookup(n) {
-                None => self.err(format!("知らない名前 `{n}`"), lhs.span),
+                None => self.unknown(n, lhs.span),
                 Some((k, is_alias)) => {
                     if !is_alias {
                         self.err(format!("`{n}` は別名ではないので指し直せない"), span);
@@ -498,7 +520,7 @@ impl Checker {
                 }
             }
             if self.lookup(t).is_none() {
-                self.err(format!("知らない名前 `{t}`"), rhs.span);
+                self.unknown(t, rhs.span);
             }
             return Places::Paradox;
         }
@@ -510,7 +532,7 @@ impl Checker {
         match root_of(lhs) {
             None => self.err("代入の左辺は経路でなければならない", lhs.span),
             Some(n) => match self.lookup(n) {
-                None => self.err(format!("知らない名前 `{n}`"), lhs.span),
+                None => self.unknown(n, lhs.span),
                 Some((k, _)) => {
                     if k != BindKind::Var {
                         self.err(format!("`{n}` は書けない（`{k:?}` で束縛されている）"), lhs.span);
@@ -575,7 +597,7 @@ impl Checker {
                             format!("破壊的メンバ関数はレシーバに `var` を要求する（`{n}`）"),
                             span,
                         ),
-                        None => self.err(format!("知らない名前 `{n}`"), base.span),
+                        None => self.unknown(n, base.span),
                     },
                     None => self.err("レシーバは経路でなければならない", base.span),
                 }
@@ -613,7 +635,7 @@ impl Checker {
                     continue;
                 };
                 match self.lookup(n) {
-                    None => self.err(format!("知らない名前 `{n}`"), a.span),
+                    None => self.unknown(n, a.span),
                     Some((k, _)) => {
                         if !can_narrow(k, p.kind) {
                             self.err("経路の権限は増やせない", a.span);
