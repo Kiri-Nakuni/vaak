@@ -155,3 +155,11 @@ let p := new Point ( x := 1, y := 2 );
 let pos := find(xs, 42) ?? -1;
 ");
 }
+
+#[test]
+fn 注釈は集合体の中まで届く() {
+    // C-94：`i32 array` と書いたなら、要素も `i32`
+    ok("var a : i32 array := [1, 2, 3]; var x : i32 := a[0];");
+    bad("var a : i32 array := [1]; var x : i64 := a[0];", "型が合わない");
+    ok("var m : str i32 map := ( \"a\" => 1 ); var v : i32 := m[\"a\"];");
+}

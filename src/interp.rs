@@ -939,6 +939,16 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
         *v = new;
         return true;
     };
+    // **集合体は自分の要素の型を知っている。** 書き込む値をそれに揃える（C-94）
+    let new = if rest.is_empty() {
+        match v {
+            Value::Array { elem, .. } => coerce_to(new, elem),
+            Value::Map { val, .. } => coerce_to(new, val),
+            _ => new,
+        }
+    } else {
+        new
+    };
     match (v, first) {
         (Value::Struct { fields, .. }, Step::Field(n)) => {
             match fields.iter_mut().find(|(k, _)| k == n) {
@@ -1006,6 +1016,10 @@ fn can_narrow(from: BindKind, to: BindKind) -> bool {
 }
 
 /// 注釈があればリテラルの型を決める（C-31：インタプリタは型を解決するが検査はしない）。
+///
+/// **集合体の中まで降りる。** `i32 array` と書いたなら、要素も `i32` でなければならない——
+/// 型検査は「リテラルは置かれた場所の型を受け取る」として通すので、
+/// ここで降りないと**検査器と評価器で食い違う**（C-94）。
 pub fn coerce_pub(v: Value, ty: Option<&Type>) -> Value {
     coerce(v, ty)
 }
@@ -1020,6 +1034,36 @@ fn coerce(v: Value, ty: Option<&Type>) -> Value {
             }
         }
     }
+    // 配列と写像は中へ降りる
+    match (&t.value, v) {
+        (ValueType::Array(el), Value::Array { items, .. }) => {
+            let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
+            return Value::Array {
+                elem: (**el).clone(),
+                items: items.into_iter().map(|x| coerce(x, Some(&et))).collect(),
+            };
+        }
+        (ValueType::Map(kt, vt), Value::Map { entries, .. }) => {
+            let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
+            return Value::Map {
+                key: (**kt).clone(),
+                val: (**vt).clone(),
+                entries: entries
+                    .into_iter()
+                    .map(|(k, x)| (k, coerce(x, Some(&vty))))
+                    .collect(),
+            };
+        }
+        (_, other) => return coerce_scalar(other, t),
+    }
+}
+
+/// 型を一つ与えて揃える。`coerce` の型だけ版。
+pub fn coerce_to(v: Value, t: &ValueType) -> Value {
+    coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
+}
+
+fn coerce_scalar(v: Value, t: &Type) -> Value {
     match (&t.value, &v) {
         (ValueType::U1, _) => v.as_int().map(|i| Value::U1(i != 0)).unwrap_or(v),
         (ValueType::U8, _) => v.as_int().map(|i| Value::U8(i as u8)).unwrap_or(v),
@@ -1405,6 +1449,8 @@ impl Interp {
                         (n.max(0), f)
                     }
                 };
+                // 充填値も**要素の型**でなければならない（C-94）
+                let fill = coerce_to(fill, elem);
                 Ok(Eval::Value(Value::Array {
                     elem: (**elem).clone(),
                     items: vec![fill; n as usize],
