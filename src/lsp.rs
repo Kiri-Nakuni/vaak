@@ -144,6 +144,7 @@ fn kind_of(t: &Tok, next: Option<&Tok>, prev: Option<&Tok>) -> Option<u32> {
     use Tok::*;
     Some(match t {
         Int(_) | Float(_) => T_NUMBER,
+        True | False => T_KEYWORD,
         Str(_) => T_STRING,
         FlowName(_) => T_MACRO,
         Ident(_) => {
@@ -172,7 +173,7 @@ fn kind_of(t: &Tok, next: Option<&Tok>, prev: Option<&Tok>) -> Option<u32> {
 
 /// 組み込みの型の名前。**字句器は鍵語にしていない**（識別子である）ので、ここで拾う。
 fn is_builtin_type(name: &str) -> bool {
-    matches!(name, "u1" | "u8" | "u16" | "u32" | "i32" | "i64" | "f32" | "f64" | "str")
+    matches!(name, "bool" | "u1" | "u8" | "u16" | "u32" | "i32" | "i64" | "f32" | "f64" | "str")
 }
 
 pub fn semantic_tokens(doc: &Doc) -> Vec<i64> {
@@ -442,7 +443,7 @@ fn show_vt(t: &crate::ast::ValueType) -> String {
 const KEYWORDS: &[&str] = &[
     "var", "let", "const", "fn", "flow", "struct", "wrap", "new", "if", "elif", "else", "fi",
     "loop", "while", "nfor", "switch", "case", "break", "continue", "outward", "mod", "array",
-    "map", "alias", "u1", "u8", "u16", "u32", "i32", "i64", "f32", "f64", "str",
+    "map", "alias", "true", "false", "bool", "u1", "u8", "u16", "u32", "i32", "i64", "f32", "f64", "str",
 ];
 
 pub fn completions(doc: &Doc) -> Vec<J> {

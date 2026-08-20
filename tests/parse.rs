@@ -9,6 +9,8 @@ fn sexp(e: &Expr) -> String {
     match &e.kind {
         ExprKind::Int(s) | ExprKind::Float(s) => s.clone(),
         ExprKind::Str(s) => format!("{s:?}"),
+        ExprKind::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
+        ExprKind::Ascribe { expr, ty: tv } => format!("(-> {} {})", sexp(expr), ty(&tv.value)),
         ExprKind::Name(s) => s.clone(),
         ExprKind::Paren(v) => format!("(paren{})", items(v)),
         ExprKind::Block(v) => format!("(block{})", items(v)),
@@ -335,4 +337,25 @@ fn 構造体と作用素式() {
         "flow $return = $repeat(break, getdepth());",
         "(; (flow $return ($repeat((break) (call getdepth)))))",
     );
+}
+
+// ===== C-97：真偽と後置の型注釈 =====
+
+#[test]
+fn 真偽のリテラル() {
+    t("true", "true");
+    t("! false", "(! false)");
+}
+
+#[test]
+fn 後置の型注釈は最も強く結合する() {
+    // **`->` は領域に付く**（C-30）。後置なので算術より先に取る
+    t("200 -> u8 + 100", "(+ (-> 200 u8) 100)");
+    t("1 -> u1", "(-> 1 u1)");
+}
+
+#[test]
+fn boolはu1の別綴り() {
+    // **包み型ではない。** 型としては同じものになる
+    t("1 -> bool", "(-> 1 u1)");
 }

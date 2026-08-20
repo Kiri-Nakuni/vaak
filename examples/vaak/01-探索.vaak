@@ -1,0 +1,31 @@
+%{ 二分探索。
+   見つからないことは**誤りではない**——値が無いだけである。 }%
+
+flow $return = $repeat(break, getdepth());
+
+%{ 見つかれば添字、無ければ paradox。
+   「見つからなかった」を -1 で表さない。**-1 は添字である。** }%
+fn search (a : i64 array alias, x : i64) {
+    var lo := 0;
+    var hi := a.len() - 1;
+    while (lo <= hi) {
+        let mid := (lo + hi) / 2;
+        if (a[mid] == x) $return mid;
+        elif (a[mid] < x) lo := mid + 1;
+        else hi := mid - 1;
+        fi;
+    };
+} -> i64;
+
+let xs := [ 2, 3, 5, 7, 11, 13, 17, 19, 23, 29 ];
+
+%{ 呼ぶ側が `??` で受ける。**受けなければ領域に paradox が残り、`;` が要る。** }%
+var found := 0;
+nfor (i, 0, xs.len()) {
+    found += search(xs, xs[i]) ?? 0 - 1;
+};
+
+%{ 無い値を引くと paradox。`??` の右は緩いので括弧が要らない }%
+let missing := search(xs, 4) ?? 0 - 1;
+
+found * 100 + missing

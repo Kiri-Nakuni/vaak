@@ -264,6 +264,18 @@ impl Parser {
                         lhs = self.node(ExprKind::Field { base: Box::new(lhs), name }, span);
                         continue;
                     }
+                    // `E -> T` — **領域に型を付ける**（C-30）。
+                    // 後置なので、`200 -> u8 + 100` は `(200 -> u8) + 100`
+                    Tok::Arrow => {
+                        self.bump();
+                        let ty = self.ty()?;
+                        let span = lhs.span.to(self.prev_span());
+                        lhs = self.node(
+                            ExprKind::Ascribe { expr: Box::new(lhs), ty },
+                            span,
+                        );
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -336,6 +348,15 @@ impl Parser {
             Tok::Str(s) => {
                 self.bump();
                 self.node(ExprKind::Str(s), start)
+            }
+            // **型は `u1` で確定している。** 置かれた場所を見ない（C-97）
+            Tok::True => {
+                self.bump();
+                self.node(ExprKind::Bool(true), start)
+            }
+            Tok::False => {
+                self.bump();
+                self.node(ExprKind::Bool(false), start)
             }
             Tok::Ident(s) => {
                 self.bump();
@@ -737,6 +758,8 @@ impl Parser {
             Tok::Int(_)
                 | Tok::Float(_)
                 | Tok::Str(_)
+                | Tok::True
+                | Tok::False
                 | Tok::Ident(_)
                 | Tok::FlowName(_)
                 | Tok::LParen
@@ -892,6 +915,9 @@ impl Parser {
 fn base_type(name: &str) -> ValueType {
     match name {
         "u1" => ValueType::U1,
+        // **`bool` は `u1` の別綴りである。** 包み型ではない——構文糖であり、
+        // 型としては同じものになる。`\show` しても `u1` と出る
+        "bool" => ValueType::U1,
         "u8" => ValueType::U8,
         "u16" => ValueType::U16,
         "u32" => ValueType::U32,

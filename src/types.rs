@@ -124,6 +124,14 @@ impl TypeChecker {
                 _ => ValueType::F64,
             }),
             ExprKind::Str(_) => Some(ValueType::Str),
+            // **`u1` で確定。** 文脈を見ない——真偽は数ではない（C-97）
+            ExprKind::Bool(_) => Some(ValueType::U1),
+
+            // **`->` が求める型になる。** リテラルはここで型が決まる（C-30 / C-25）
+            ExprKind::Ascribe { expr, ty } => {
+                self.expr(expr, Some(&ty.value));
+                Some(ty.value.clone())
+            }
 
             ExprKind::Name(n) => self.lookup(n),
 

@@ -368,6 +368,16 @@ impl Compiler {
                 let k = self.konst(Value::str(s.as_bytes().to_vec()));
                 self.emit(Op::Const(k));
             }
+            &ExprKind::Bool(b) => {
+                let k = self.konst(Value::U1(b));
+                self.emit(Op::Const(k));
+            }
+            ExprKind::Ascribe { expr, ty } => {
+                self.expr(expr)?;
+                self.emit(Op::NeedValue(e.span));
+                let k = self.type_idx(ty);
+                self.emit(Op::Coerce(k));
+            }
             ExprKind::Name(n) => {
                 let Some(s) = self.lookup(n) else {
                     return self.err(format!("知らない名前 `{n}`"), e.span);

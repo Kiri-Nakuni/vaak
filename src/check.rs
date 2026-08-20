@@ -239,7 +239,15 @@ impl Checker {
 
     fn expr(&mut self, e: &Expr, env: Env) -> Places {
         match &e.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) => Places::Value,
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {
+                Places::Value
+            }
+
+            // `E -> T` は**中の領域を検査してから**型を付ける
+            ExprKind::Ascribe { expr, .. } => {
+                self.operand(expr, env);
+                Places::Value
+            }
 
             ExprKind::Name(n) => {
                 if self.lookup(n).is_none() {

@@ -19,6 +19,8 @@ pub enum ExprKind {
     // --- 一次式 ---
     Int(String),
     Float(String),
+    /// `true` / `false`。**型は `u1` で確定している**——文脈を見ない（C-97）
+    Bool(bool),
     Str(String),
     Name(String),
 
@@ -53,6 +55,12 @@ pub enum ExprKind {
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     /// `;` — 左の領域を潰し、内面を空にする。**左辺は無くてもよい**（C-80）。
     Discard(Option<Box<Expr>>),
+    /// `E -> T` — **領域に型を付ける**（C-30）。
+    ///
+    /// 「`:` は識別子に、`->` は領域に」の後半である。
+    /// **リテラルは型が決まるまでソースの表現を保持する**ので、
+    /// これがその型を決める道になる——`1 -> u1`、`300 -> u8`。
+    Ascribe { expr: Box<Expr>, ty: Type },
     /// `a.m`
     Field { base: Box<Expr>, name: String },
     /// `a[i]`

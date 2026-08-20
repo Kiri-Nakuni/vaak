@@ -487,6 +487,13 @@ impl Steel {
                 Ok(Some(self.konst(&ValueType::I64, v)))
             }
 
+            // **`u1` で確定。** 文脈を見ない（C-97）
+            &E::Bool(b) => Ok(Some(Val {
+                ok: "true".into(),
+                v: (if b { "1" } else { "0" }).into(),
+                ty: ValueType::U1,
+            })),
+
             E::Name(n) => {
                 let Some((p, ty)) = self.lookup(n) else {
                     return err(format!("知らない名前 `{n}`"), e.span);

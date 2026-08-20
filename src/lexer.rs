@@ -39,6 +39,9 @@ pub enum Tok {
     Continue,
     Outward,
     Mod,
+    /// **真偽の literal。** `u1` の 1 と 0（C-97）
+    True,
+    False,
     Array,
     Map,
     Alias,
@@ -253,6 +256,9 @@ impl<'a> Lexer<'a> {
             "array" => Tok::Array,
             "map" => Tok::Map,
             "alias" => Tok::Alias,
+            // **真偽の literal。`u1` である**（C-97）
+            "true" => Tok::True,
+            "false" => Tok::False,
             // `mod` だけは直後の `=` を取り込む（`mod=` は複合代入）
             "mod" => {
                 if self.peek() == Some(b'=') && self.peek_at(1) != Some(b'=') {

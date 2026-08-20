@@ -1,0 +1,93 @@
+%{ 逆ポーランド記法の電卓。
+   **誤りは全部 paradox で表す。** 例外も返り値の符号も使わない。 }%
+
+flow $return = $repeat(break, getdepth());
+
+%{ 一語を数として読む。読めなければ paradox。
+   **「読めなかった」に値を割り当てない**——0 でも -1 でもない }%
+fn to_int (w : str alias) {
+    if (w.len() == 0) $return; fi;
+    var neg := false;
+    var i := 0;
+    if (w[0] == 45) { neg := true; i := 1; } fi;
+    if (i >= w.len()) $return; fi;
+    var n := 0;
+    while (i < w.len()) {
+        let c := w[i] ?? 48;
+        %{ 数字でなければ**そこで打ち切る**。段を二つ抜けて関数を出る }%
+        if (c < 48 || c > 57) $return;
+        fi;
+        %{ **型は混ぜられない。** `u8` を `i64` にするのは `new` である }%
+        n := n * 10 + new i64 ( c - 48 );
+        i += 1;
+    };
+    if (neg) 0 - n else n fi
+} -> i64;
+
+%{ 数として読めそうか。**読めるかどうかと、読んだ結果は別の問い**である }%
+fn numeric (w : str alias) {
+    if (w.len() == 0) $return false; fi;
+    let c := w[0] ?? 32;
+    if (c == 45) w.len() > 1 else c >= 48 && c <= 57 fi
+} -> u1;
+
+%{ 空白で切る }%
+fn split (s : str alias) {
+    var out : str array := new str array(0, "");
+    var cur : str := "";
+    nfor (i, 0, s.len() + 1) {
+        let c := s[i] ?? 32;
+        if (c == 32) {
+            if (cur.len() > 0) { out.push(cur); cur := ""; } fi;
+        } else {
+            cur.push(c);
+        } fi;
+    };
+    out
+} -> str array;
+
+%{ 積みを使って畳む。**積みが足りなければ paradox** }%
+fn eval_rpn (src : str alias) {
+    let ws := split(src);
+    var st : i64 array := new i64 array(0, 0);
+
+    nfor (i, 0, ws.len()) {
+        let w := ws[i];
+        %{ 数字で始まるかで見分ける。**paradox を「見分けの道具」に使わない**——
+           `??` は回復のためのものであって、条件分岐の代わりではない }%
+        if (numeric(w)) {
+            %{ ここで paradox なら本当に読めないということ。$return で降りる }%
+            st.push(to_int(w) ?? $return);
+        } else {
+            %{ 二つ降ろす。足りなければ pop が paradox を返し、`$return` する }%
+            let b := st.pop() ?? $return;
+            let a := st.pop() ?? $return;
+            let c := w[0] ?? 0;
+            %{ どの腕にも当たらなければ switch は paradox。`$return` で受ける }%
+            st.push(
+                switch (c)
+                    case 43 => a + b
+                    case 45 => a - b
+                    case 42 => a * b
+                    case 47 => a / b
+                ?? $return
+            );
+        } fi;
+    };
+
+    %{ ちょうど一つ残っていなければ誤り }%
+    if (st.len() == 1) st[0] fi
+} -> i64;
+
+%{ 通る式と、通らない式。
+   **`alias` に渡せるのは名前だけ**（C-87）なので、いったん束縛する }%
+let s1 := "3 4 + 2 *";
+let s2 := "1 0 /";
+let s3 := "1 +";
+let s4 := "1 2";
+let good := eval_rpn(s1) ?? 0 - 1;
+let divzero := eval_rpn(s2) ?? 0 - 1;
+let short := eval_rpn(s3) ?? 0 - 1;
+let extra := eval_rpn(s4) ?? 0 - 1;
+
+good * 1000 + divzero * 100 + short * 10 + extra

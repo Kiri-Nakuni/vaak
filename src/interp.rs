@@ -293,6 +293,14 @@ impl Interp {
             ExprKind::Int(s) => Ok(Eval::Value(parse_int(s, e.span)?)),
             ExprKind::Float(s) => Ok(Eval::Value(parse_float(s, e.span)?)),
             ExprKind::Str(s) => Ok(Eval::Value(Value::str(s.as_bytes().to_vec()))),
+            ExprKind::Bool(b) => Ok(Eval::Value(Value::U1(*b))),
+
+            // **注釈はその領域の値の型を決める**（C-30）。
+            // インタプリタは型を解決する——検査はしない
+            ExprKind::Ascribe { expr, ty } => match self.need_value(expr)? {
+                Ok(v) => Ok(Eval::Value(coerce_to(v, &ty.value))),
+                Err(x) => Ok(Eval::Escape(x)),
+            },
 
             ExprKind::Name(n) => {
                 let Some(b) = self.lookup(n).cloned() else {
@@ -1917,14 +1925,17 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
     Ok(match (name, cur) {
         ("push", Value::Array(ar)) => {
             let Some(v) = args.first() else { return rt("`push` は値を一つ取る", span) };
-            ar.items.push(v.clone());
+            // **集合体は自分の要素の型を知っている**（C-94）。書き込む値をそれに揃える
+            let el = ar.elem.clone();
+            ar.items.push(coerce_to(v.clone(), &el));
             paradox
         }
         ("push", Value::Str(b)) => {
-            let Some(Value::U8(x)) = args.first() else {
+            // `str` は `u8 array` を包んだ型（C-77）。要素は `u8` である
+            let Some(x) = args.first().and_then(|v| v.as_int()) else {
                 return rt("`str` の `push` は `u8` を取る", span);
             };
-            b.push(*x);
+            b.push(x as u8);
             paradox
         }
         // **空なら paradox**
@@ -1955,7 +1966,8 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
             if i < 0 || i as usize > ar.items.len() {
                 return Ok(paradox);
             }
-            ar.items.insert(i as usize, v.clone());
+            let el = ar.elem.clone();
+            ar.items.insert(i as usize, coerce_to(v.clone(), &el));
             paradox
         }
         // **範囲外は paradox**
