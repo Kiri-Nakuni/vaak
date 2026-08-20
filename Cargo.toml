@@ -10,3 +10,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "vaak"
 path = "src/main.rs"
+
+[[bin]]
+name = "vaak-lsp"
+path = "src/bin/vaak-lsp.rs"

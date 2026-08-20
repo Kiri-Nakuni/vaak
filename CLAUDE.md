@@ -837,3 +837,101 @@ GPTより
 
 
 CLAUDEへ
+
+これをあなたが読んでいるころには私は寝ています。
+
+あと、GPTくんが次のように言っています
+
+ああ、ここは少しややこしいです。結論からいうと、**e-upTeX の「本体」と `uptex-base` はライセンス上もリポジトリ上も分けて考えた方がいい**です。
+
+e-upTeX は、現在の TeX Live では独立した GitHub リポジトリを持つというより、TeX Live のソースツリーにある
+
+`Build/source/texk/web2c/uptexdir`
+
+を中心に管理されています。CTAN も upTeX の Repository としてこの TeX Live SVN の `uptexdir` を指しています。
+
+そして系譜としては、
+
+> pTeX → upTeX → e-upTeX
+
+で、**e-upTeX は北川弘典氏が upTeX に e-TeX を merge したもの**です。現在は Japanese TeX Development Community のコミュニティ版 `(e-)upTeX` として TeX Live に統合されています。
+
+ライセンスについて重要なのはここで、**e-upTeX 本体は単純に「BSD-3-Clause のソフト」と考えるのは正確ではありません**。CTAN の `uptex` エントリでは license が `Free license not otherwise listed` になっています。
+
+一方、`uptex-base` は明確に **3-clause BSD** です。これは e-upTeX/upTeX 用の plain TeX format、文書、サンプル等の bundle で、GitHub の `texjporg/uptex-base` に独立リポジトリがあります。
+
+つまり大雑把には、
+
+```text
+TeX Live
+└── Build/source/texk/web2c/
+    ├── ptexdir/
+    └── uptexdir/        ← upTeX / e-upTeX 本体
+         ↑
+         └── TeX Live SVN で管理
+
+texjporg/
+└── uptex-base/          ← format / docs / samples
+                         ← BSD-3-Clause
+```
+
+という構造です。
+
+さらに `ptexdir` 側の `COPYRIGHT` は ASCII MEDIA WORKS と Japanese TeX Development Community の著作権表示＋独自の redistribution 条項になっており、TeX 系の「単純な SPDX 一発」ではありません。たとえば現在のコミュニティ版 pTeX の copyright は ASCII MEDIA WORKS と Japanese TeX Development Community に帰属しています。
+
+なので、**PraTeX/rTeX に e-upTeX のコードを直接持ってくることを考えているなら、「e-upTeX は BSD だからOK」と判断するのは危険**です。むしろ `uptexdir` 内の各ソースの `COPYRIGHT` / `LICENSE` を見て、pTeX由来部分、upTeX由来部分、e-TeX由来部分を切り分ける必要があります。
+
+この辺、PraTeX が「TeX の意味論を保存しつつ Rust で再実装」という方向なら、**コードを移植するより仕様・アルゴリズムを参照して clean-room 的に再実装する方がかなり綺麗**だと思います。特に e-upTeX の日本語処理を持ってくる場合はそうです。
+
+ユーザーより。ごめんね。
+
+追伸、rTeXのライセンスも舐めるように確認してね。
+
+CLAUDEへ
+
+e-upTeXが無理でもキーワード(ディメンション周り)にH(歯)とQ(級)とzw(全角幅)とzh(全角高)を追加してほしいな
+
+ユーザーより
+
+CLAUDEへ
+
+万が一e-upTeXが完成したら、LaTeX2eが動くか確認してほしいな。
+
+ユーザーより
+
+追伸
+
+vaakの意味論を変えない範囲でLuaTeXのコールバックを再現してパフォーマンスをとってほしいな
+
+追追伸
+
+あとは、pdfTeXの方も参考にして、pdf直接出力をできるようにしてほしいな。OTFの対応はそこまで優先してない。HarfBuzzとかRustyBuzzは入れなくていいよ
+
+無茶言ってごめんね
+
+ユーザーより。
+
+CLAUDEへ
+
+スタンドアロン系vaakのライセンスはMITのつもりだよ。権利者名は有村陽大(Arimura Akihiro)にしておいてね。
+
+ユーザーより。
+
+追伸
+
+それ以外のところのLICENSEは任せるよ。既存のものを見て、適切なかたちにしてね。私はMITが好きだから、何でもいいならMITにしてね。
+
+CLAUDEへ
+
+億が一、ここまで処理ができるなら、人間向けのリファレンスと付録を書いておいてね。付録ではAkashaという名称やvaakの語源、メンタルモデルなどに触れてね。
+リファレンス本文は、https://doc.rust-jp.rs/book-ja/ を参考に、より簡潔なかたちで作ってくれると嬉しいな。この優先度は最低だよ。
+
+ユーザーより。
+
+CLAUDEへ
+
+兆が一、ここまで読めているのなら、rtexのリポジトリのワーキングツリーを読んで、名前空間の雰囲気を掴んで、ブランチを切って実装してみてほしい。
+
+また、それも終わったら、rtex vaakが差し込める範囲を増やしてほしい。また、それらがほぼゼロコストかどうか(つまり、使わない機能はオーバーヘッドをほとんど持たないか)を調べてほしい
+
+ユーザーより。

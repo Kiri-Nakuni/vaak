@@ -13,3 +13,5 @@ pub mod span;
 pub mod types;
 pub mod value;
 pub mod vm;
+pub mod json;
+pub mod lsp;
