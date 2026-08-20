@@ -1,0 +1,12 @@
+[package]
+name = "vaak"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "vaak"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vaak"
+path = "src/main.rs"
