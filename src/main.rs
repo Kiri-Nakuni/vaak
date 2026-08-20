@@ -22,6 +22,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // **標準実装は検査を通したプログラムを受け取ることを前提とする**（C-31）。
+    // ここでは検査してから走らせる。`--no-check` で飛ばせる
+    if !std::env::args().any(|a| a == "--no-check") {
+        let errs = vaak::check::check(&prog);
+        if !errs.is_empty() {
+            for e in &errs {
+                let (l, c) = vaak::span::line_col(&src, e.span.start);
+                eprintln!("{path}:{l}:{c}: {}", e.msg);
+            }
+            return ExitCode::FAILURE;
+        }
+    }
+
     let mut it = Interp::new();
     match it.run(&prog) {
         // 最上位の領域の**外界面は言語の意味論ではない**。ホストに委ねる
