@@ -10,7 +10,10 @@
 ## rtex は **GPL-3.0** である。向きが決まっている
 
 **確認した。** `~/Documents/rtex/LICENSE` は GNU General Public License v3 の全文である。
-著作者は tyti 氏および Nakuni Kiri 氏。
+著作者は tyti 氏および Kiri Nakuni 氏（＝有村陽大。この版方の権利者と同一人物）。
+
+**同一人物であっても、向きは変わらない。** rtex 全体の権利は tyti 氏との共有であり、
+片方の寄与だけを MIT で持ち出すことはできない。
 
 これは**一方通行**を意味する。
 
