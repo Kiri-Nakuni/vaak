@@ -11,16 +11,24 @@
 ## 入れ方
 
 ```bash
-cargo build --release          # vaak-lsp を作る
+cargo install --path .
 ```
 
-Zed で `zed: install dev extension` を選び、この `editors/zed` を指す。
+**`cargo build --release` では足りないことがある。**
+Zed の拡張は **WASI の砂場の中で動く**ので、ホストの任意の道を覗けない——
+`PATH` から見つかるところに置くのが確実である。
+
+そのうえで Zed の `zed: install dev extension` でこの `editors/zed` を指す。
 
 言語サーバは次の順に探す:
 
-1. `PATH` の `vaak-lsp`
-2. 開いているワークツリーの `target/release/vaak-lsp`
-3. 同 `target/debug/vaak-lsp`
+1. **設定で明示された道**
+
+   ```json
+   "lsp": { "vaak-lsp": { "binary": { "path": "/…/vaak-lsp" } } }
+   ```
+2. `PATH` の `vaak-lsp`
+3. 開いているワークツリーの `target/release/vaak-lsp` / `target/debug/vaak-lsp`
 
 ## 出るもの
 
