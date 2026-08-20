@@ -5,5 +5,7 @@
 
 pub mod ast;
 pub mod lexer;
+pub mod interp;
 pub mod parser;
 pub mod span;
+pub mod value;
