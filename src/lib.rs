@@ -15,3 +15,4 @@ pub mod value;
 pub mod vm;
 pub mod json;
 pub mod lsp;
+pub mod steel;
