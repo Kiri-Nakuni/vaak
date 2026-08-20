@@ -61,6 +61,9 @@ pub enum Op {
     LoadField(u16, u32, Span),
     /// 名前の長さを一命令で。集合体を写さない。
     LoadLen(u16, Span),
+    /// 名前への添字に**一命令で書く**。**`[]` はアクセスであり複製しない**（C-20）——
+    /// 集合体をスタックへ写して書き戻す、ということをしない。
+    StoreIndex(u16, Span),
     /// 経路への書き込み。深さは添字・欄の列。
     SetIndex(Span),
     SetField(u32, Span),
@@ -600,6 +603,28 @@ impl Compiler {
                 }
                 self.emit(Op::NeedValue(span));
                 self.emit(Op::Store(s));
+            }
+            // 名前への添字なら一命令で書く。**複製しない**（C-20）
+            ExprKind::Index { base, index } if matches!(base.kind, ExprKind::Name(_)) => {
+                let ExprKind::Name(n) = &base.kind else { unreachable!() };
+                let Some(slot) = self.lookup(n) else {
+                    return self.err(format!("知らない名前 `{n}`"), base.span);
+                };
+                if let Some(b) = bop {
+                    self.expr(index)?;
+                    self.emit(Op::NeedValue(index.span));
+                    self.emit(Op::LoadIndex(slot, span));
+                    self.expr(rhs)?;
+                    self.emit(Op::NeedValue(rhs.span));
+                    self.emit(Op::Bin(b, span));
+                    self.emit(Op::NeedValue(span));
+                } else {
+                    self.expr(rhs)?;
+                    self.emit(Op::NeedValue(rhs.span));
+                }
+                self.expr(index)?;
+                self.emit(Op::NeedValue(index.span));
+                self.emit(Op::StoreIndex(slot, span));
             }
             ExprKind::Index { base, index } => {
                 self.expr(base)?;
@@ -1212,6 +1237,76 @@ pub fn run_program_with_host(
     Ok((ev, after))
 }
 
+impl Program2 {
+    /// **ホストの名前を実際に使っているか**を、組んだ命令列から見る。
+    ///
+    /// 使っていない名前に値を作って渡すのは無駄である——
+    /// ホストは**これを見て、要るものだけ用意すればよい。**
+    ///
+    /// 別名で受け直しても（`var c &= count;`）、`Alias` の元として現れるので数える。
+    /// **どの添字を見ているか。**
+    ///
+    /// 「別名として見えている」ことと「実際に見ている」ことは別である。
+    /// `count[5] * 2` は `count` が見えているが、**見ているのは 5 番だけ**——
+    /// ホストは 256 個を用意する必要が無い。
+    ///
+    /// - `None` — **全部要る。** 動く添字、長さ以外の丸ごとの用途、別名で受け直し
+    /// - `Some(v)` — **その添字だけ要る。** 定数の添字しか使っていない
+    ///
+    /// 長さ（`LoadLen`）は**値を要求しない**ので、ここには入らない。
+    pub fn host_touched(&self, i: usize) -> Option<Vec<i128>> {
+        let top = &self.chunks[self.top as usize];
+        let slot = *top.host_slots.get(i)?;
+        let mut idx = Vec::new();
+        for c in &self.chunks {
+            for (k, op) in c.ops.iter().enumerate() {
+                match op {
+                    // 長さだけなら値は要らない
+                    Op::LoadLen(x, _) if *x == slot => {}
+                    // 定数の添字なら、その一個だけ
+                    Op::LoadIndex(x, _) | Op::StoreIndex(x, _) if *x == slot => {
+                        match const_index_before(c, k) {
+                            Some(n) => idx.push(n),
+                            // 動く添字。**全部要る**
+                            None => return None,
+                        }
+                    }
+                    // 丸ごと読む・書く・別名にする → 全部要る
+                    Op::Load(x) | Op::Store(x) | Op::Declare(x) if *x == slot => return None,
+                    Op::LoadField(x, _, _) if *x == slot => return None,
+                    Op::Alias(a, b) if *a == slot || *b == slot => return None,
+                    _ => {}
+                }
+            }
+        }
+        idx.sort_unstable();
+        idx.dedup();
+        Some(idx)
+    }
+
+    pub fn host_used(&self) -> Vec<bool> {
+        let top = &self.chunks[self.top as usize];
+        let mut used = vec![false; top.host_slots.len()];
+        for (i, slot) in top.host_slots.iter().enumerate() {
+            let s = *slot;
+            used[i] = self.chunks.iter().any(|c| {
+                c.ops.iter().any(|op| match op {
+                    Op::Load(x)
+                    | Op::Store(x)
+                    | Op::Declare(x)
+                    | Op::LoadIndex(x, _)
+                    | Op::StoreIndex(x, _)
+                    | Op::LoadLen(x, _) => *x == s,
+                    Op::LoadField(x, _, _) => *x == s,
+                    Op::Alias(a, b) => *a == s || *b == s,
+                    _ => false,
+                })
+            });
+        }
+        used
+    }
+}
+
 impl<'a> Vm<'a> {
     fn push_frame(&mut self, chunk: u32, args: Vec<(CellId, bool)>, depth: u32) {
         let ch = &self.p.chunks[chunk as usize];
@@ -1434,6 +1529,17 @@ impl<'a> Vm<'a> {
                 match crate::interp::get_field(&b, &name) {
                     Some(v) => self.stack.push(Slot::Value(v)),
                     None => return self.err(format!("欄 `{name}` が無い"), sp),
+                }
+            }
+            Op::StoreIndex(slot, sp) => {
+                let i = self.pop().value(sp)?;
+                let v = self.pop().value(sp)?;
+                let c = self.cell(slot);
+                let Some(coll) = self.arena.get_mut(c) else {
+                    return self.err("まだ束縛されていない", sp);
+                };
+                if !crate::interp::set_index(coll, &i, v) {
+                    return self.err("経路がたどれない", sp);
                 }
             }
             Op::LoadIndex(slot, sp) => {
@@ -1936,4 +2042,18 @@ pub fn run(src: &str) -> Result<crate::interp::Eval, String> {
     let prog = crate::parser::parse(src).map_err(|e| format!("構文: {}", e.msg))?;
     let p = compile(&prog).map_err(|e| e.msg)?;
     run_program(&p).map_err(|e| e.msg)
+}
+
+/// 添字が定数か。`Const(k); NeedValue; LoadIndex(..)` という並びを見る。
+fn const_index_before(c: &Chunk, at: usize) -> Option<i128> {
+    // 直前は NeedValue、その前が Const のはず
+    let prev = at.checked_sub(1)?;
+    if !matches!(c.ops[prev], Op::NeedValue(_)) {
+        return None;
+    }
+    let prev2 = prev.checked_sub(1)?;
+    let Op::Const(k) = c.ops[prev2] else {
+        return None;
+    };
+    c.consts.get(k as usize)?.as_int()
 }
