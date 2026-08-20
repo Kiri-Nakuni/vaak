@@ -9,4 +9,5 @@ pub mod check;
 pub mod interp;
 pub mod parser;
 pub mod span;
+pub mod types;
 pub mod value;
