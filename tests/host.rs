@@ -11,14 +11,11 @@ impl HostBinding for Bytes {
         ValueType::Array(Box::new(ValueType::U8))
     }
     fn read(&self) -> Value {
-        Value::Array {
-            elem: ValueType::U8,
-            items: self.0.iter().map(|b| Value::U8(*b)).collect(),
-        }
+        Value::array(ValueType::U8, self.0.iter().map(|b| Value::U8(*b)).collect())
     }
     fn write(&mut self, v: &Value) {
-        if let Value::Array { items, .. } = v {
-            self.0 = items.iter().filter_map(|x| x.as_int()).map(|x| x as u8).collect();
+        if let Value::Array(ar) = v {
+            self.0 = ar.items.iter().filter_map(|x| x.as_int()).map(|x| x as u8).collect();
         }
     }
 }
@@ -55,8 +52,8 @@ fn s4_配列を書き換えられる() {
     );
     assert!(matches!(out, Outcome::Empty | Outcome::Paradox { .. }), "{out:?}");
     match h.get("buf").map(|b| b.read()) {
-        Some(Value::Array { items, .. }) => {
-            assert_eq!(items.iter().filter_map(|x| x.as_int()).collect::<Vec<_>>(), vec![0, 0, 0]);
+        Some(Value::Array(ar)) => {
+            assert_eq!(ar.items.iter().filter_map(|x| x.as_int()).collect::<Vec<_>>(), vec![0, 0, 0]);
         }
         other => panic!("{other:?}"),
     }
@@ -127,15 +124,12 @@ fn s4_vm_でも配列を書き換えられる() {
         h.use_vm = use_vm;
         h.expose_value(
             "count",
-            Value::Array {
-                elem: ValueType::I32,
-                items: vec![Value::I32(0); 4],
-            },
+            Value::array(ValueType::I32, vec![Value::I32(0); 4]),
         );
         h.run("count[2] := 7;");
         match h.get("count").map(|b| b.read()) {
-            Some(Value::Array { items, .. }) => {
-                assert_eq!(items[2].as_int(), Some(7), "use_vm={use_vm}")
+            Some(Value::Array(ar)) => {
+                assert_eq!(ar.items[2].as_int(), Some(7), "use_vm={use_vm}")
             }
             other => panic!("use_vm={use_vm}: {other:?}"),
         }

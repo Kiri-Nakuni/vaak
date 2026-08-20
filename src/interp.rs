@@ -292,7 +292,7 @@ impl Interp {
         match &e.kind {
             ExprKind::Int(s) => Ok(Eval::Value(parse_int(s, e.span)?)),
             ExprKind::Float(s) => Ok(Eval::Value(parse_float(s, e.span)?)),
-            ExprKind::Str(s) => Ok(Eval::Value(Value::Str(s.as_bytes().to_vec()))),
+            ExprKind::Str(s) => Ok(Eval::Value(Value::str(s.as_bytes().to_vec()))),
 
             ExprKind::Name(n) => {
                 let Some(b) = self.lookup(n).cloned() else {
@@ -365,7 +365,7 @@ impl Interp {
                     }
                 }
                 let elem = out.first().map(|v| v.type_of()).unwrap_or(ValueType::I64);
-                Ok(Eval::Value(Value::Array { elem, items: out }))
+                Ok(Eval::Value(Value::array(elem, out)))
             }
 
             ExprKind::MapLit(pairs) => {
@@ -388,7 +388,7 @@ impl Interp {
                     };
                     entries.insert(key, vv);
                 }
-                Ok(Eval::Value(Value::Map { key: kt, val: vt, entries }))
+                Ok(Eval::Value(Value::map(kt, vt, entries)))
             }
 
             ExprKind::Construct { ty, args } => self.construct(ty, args, e.span),
@@ -911,14 +911,14 @@ fn push_step(p: Place, s: Step) -> Place {
 
 fn step_get(v: &Value, s: &Step) -> Option<Value> {
     match (v, s) {
-        (Value::Struct { fields, .. }, Step::Field(n)) => {
-            fields.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())
+        (Value::Struct(sv), Step::Field(n)) => {
+            sv.fields.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())
         }
-        (Value::Array { items, .. }, Step::Index(i)) => {
+        (Value::Array(ar), Step::Index(i)) => {
             if *i < 0 {
                 None
             } else {
-                items.get(*i as usize).cloned()
+                ar.items.get(*i as usize).cloned()
             }
         }
         (Value::Str(b), Step::Index(i)) => {
@@ -928,8 +928,8 @@ fn step_get(v: &Value, s: &Step) -> Option<Value> {
                 b.get(*i as usize).map(|x| Value::U8(*x))
             }
         }
-        (Value::Map { entries, .. }, Step::Key(k)) => entries.get(k).cloned(),
-        (Value::Map { entries, .. }, Step::Index(i)) => entries.get(&MapKey::Int(*i)).cloned(),
+        (Value::Map(mp), Step::Key(k)) => mp.entries.get(k).cloned(),
+        (Value::Map(mp), Step::Index(i)) => mp.entries.get(&MapKey::Int(*i)).cloned(),
         _ => None,
     }
 }
@@ -942,25 +942,25 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
     // **集合体は自分の要素の型を知っている。** 書き込む値をそれに揃える（C-94）
     let new = if rest.is_empty() {
         match v {
-            Value::Array { elem, .. } => coerce_to(new, elem),
-            Value::Map { val, .. } => coerce_to(new, val),
+            Value::Array(ar) => coerce_to(new, &ar.elem),
+            Value::Map(mp) => coerce_to(new, &mp.val),
             _ => new,
         }
     } else {
         new
     };
     match (v, first) {
-        (Value::Struct { fields, .. }, Step::Field(n)) => {
-            match fields.iter_mut().find(|(k, _)| k == n) {
+        (Value::Struct(sv), Step::Field(n)) => {
+            match sv.fields.iter_mut().find(|(k, _)| k == n) {
                 Some((_, slot)) => step_set(slot, rest, new),
                 None => false,
             }
         }
-        (Value::Array { items, .. }, Step::Index(i)) => {
+        (Value::Array(ar), Step::Index(i)) => {
             if *i < 0 {
                 return false;
             }
-            match items.get_mut(*i as usize) {
+            match ar.items.get_mut(*i as usize) {
                 Some(slot) => step_set(slot, rest, new),
                 None => false,
             }
@@ -977,24 +977,24 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
                 _ => false,
             }
         }
-        (Value::Map { entries, .. }, Step::Key(k)) => {
+        (Value::Map(mp), Step::Key(k)) => {
             if rest.is_empty() {
-                entries.insert(k.clone(), new);
+                mp.entries.insert(k.clone(), new);
                 true
             } else {
-                match entries.get_mut(k) {
+                match mp.entries.get_mut(k) {
                     Some(slot) => step_set(slot, rest, new),
                     None => false,
                 }
             }
         }
-        (Value::Map { entries, .. }, Step::Index(i)) => {
+        (Value::Map(mp), Step::Index(i)) => {
             let k = MapKey::Int(*i);
             if rest.is_empty() {
-                entries.insert(k, new);
+                mp.entries.insert(k, new);
                 true
             } else {
-                match entries.get_mut(&k) {
+                match mp.entries.get_mut(&k) {
                     Some(slot) => step_set(slot, rest, new),
                     None => false,
                 }
@@ -1028,31 +1028,24 @@ fn coerce(v: Value, ty: Option<&Type>) -> Value {
     let Some(t) = ty else { return v };
     // ラップ型を基底型で構築したら**剥がす**（S-2）。包みの欄は名前を持たない
     if !matches!(t.value, ValueType::Named(_)) {
-        if let Value::Struct { fields, .. } = &v {
-            if fields.len() == 1 && fields[0].0.is_empty() {
-                return coerce(fields[0].1.clone(), ty);
+        if let Value::Struct(sv) = &v {
+            if sv.fields.len() == 1 && sv.fields[0].0.is_empty() {
+                return coerce(sv.fields[0].1.clone(), ty);
             }
         }
     }
     // 配列と写像は中へ降りる
     match (&t.value, v) {
-        (ValueType::Array(el), Value::Array { items, .. }) => {
+        (ValueType::Array(el), Value::Array(ar)) => {
             let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
-            return Value::Array {
-                elem: (**el).clone(),
-                items: items.into_iter().map(|x| coerce(x, Some(&et))).collect(),
-            };
+            return Value::array((**el).clone(), ar.items.into_iter().map(|x| coerce(x, Some(&et))).collect());
         }
-        (ValueType::Map(kt, vt), Value::Map { entries, .. }) => {
+        (ValueType::Map(kt, vt), Value::Map(mp)) => {
             let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
-            return Value::Map {
-                key: (**kt).clone(),
-                val: (**vt).clone(),
-                entries: entries
+            return Value::map((**kt).clone(), (**vt).clone(), mp.entries
                     .into_iter()
                     .map(|(k, x)| (k, coerce(x, Some(&vty))))
-                    .collect(),
-            };
+                    .collect());
         }
         (_, other) => return coerce_scalar(other, t),
     }
@@ -1428,7 +1421,7 @@ impl Interp {
                     };
                     out.push((f.name.clone(), coerce(v, Some(&f.ty))));
                 }
-                Ok(Eval::Value(Value::Struct { name: name.clone(), fields: out }))
+                Ok(Eval::Value(Value::strukt(name.clone(), out)))
             }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
                 let (n, fill) = match a.len() {
@@ -1451,10 +1444,7 @@ impl Interp {
                 };
                 // 充填値も**要素の型**でなければならない（C-94）
                 let fill = coerce_to(fill, elem);
-                Ok(Eval::Value(Value::Array {
-                    elem: (**elem).clone(),
-                    items: vec![fill; n as usize],
-                }))
+                Ok(Eval::Value(Value::array((**elem).clone(), vec![fill; n as usize])))
             }
             // ラップを剥がす：`new i64 ( m )` のように基底型で構築する
             (base, CtorArgs::Positional(a))
@@ -1462,25 +1452,21 @@ impl Interp {
                     && !matches!(base, ValueType::Named(_) | ValueType::Array(_)) =>
             {
                 match self.need_value(&a[0])? {
-                    Ok(Value::Struct { fields, .. }) if fields.len() == 1 && fields[0].0.is_empty() => {
-                        Ok(Eval::Value(fields[0].1.clone()))
+                    Ok(Value::Struct(sv)) if sv.fields.len() == 1 && sv.fields[0].0.is_empty() => {
+                        Ok(Eval::Value(sv.fields[0].1.clone()))
                     }
                     Ok(v) => Ok(Eval::Value(coerce(v, Some(ty)))),
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
-            (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::Map {
-                key: (**k).clone(),
-                val: (**v).clone(),
-                entries: Default::default(),
-            })),
+            (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::map((**k).clone(), (**v).clone(), Default::default()))),
             // ラップ型：包むのも剥がすのも `new`（C-78）
             (ValueType::Str, CtorArgs::Positional(a)) if a.len() == 1 => {
                 match self.need_value(&a[0])? {
-                    Ok(Value::Array { items, .. }) => {
+                    Ok(Value::Array(ar)) => {
                         let b: Vec<u8> =
-                            items.iter().filter_map(|v| v.as_int()).map(|i| i as u8).collect();
-                        Ok(Eval::Value(Value::Str(b)))
+                            ar.items.iter().filter_map(|v| v.as_int()).map(|i| i as u8).collect();
+                        Ok(Eval::Value(Value::str(b)))
                     }
                     Ok(Value::Str(b)) => Ok(Eval::Value(Value::Str(b))),
                     Ok(_) => rt("`str` は `u8 array` から作る", span),
@@ -1492,10 +1478,7 @@ impl Interp {
                 if self.wraps.contains_key(name) && a.len() == 1 =>
             {
                 match self.need_value(&a[0])? {
-                    Ok(v) => Ok(Eval::Value(Value::Struct {
-                        name: name.clone(),
-                        fields: vec![("".to_string(), v)],
-                    })),
+                    Ok(v) => Ok(Eval::Value(Value::strukt(name.clone(), vec![("".to_string(), v)]))),
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
@@ -1515,7 +1498,7 @@ impl Interp {
                     };
                     out.push((f.name.clone(), coerce(v, Some(&f.ty))));
                 }
-                Ok(Eval::Value(Value::Struct { name: name.clone(), fields: out }))
+                Ok(Eval::Value(Value::strukt(name.clone(), out)))
             }
             (ValueType::Array(_), CtorArgs::Named(_)) | (_, CtorArgs::Named(_)) => {
                 rt("この型は欄を名前で取らない", span)
@@ -1561,7 +1544,7 @@ impl Interp {
             };
             if let Some(coll) = self.arena.get(b.cell) {
                 let step = match (coll, &i) {
-                    (Value::Map { .. }, _) => match i.as_key() {
+                    (Value::Map(_), _) => match i.as_key() {
                         Some(k) => Step::Key(k),
                         None => return rt("写像の鍵にできない値", index.span),
                     },
@@ -1586,7 +1569,7 @@ impl Interp {
             Err(x) => return Ok(Eval::Escape(x)),
         };
         let step = match (&b, &i) {
-            (Value::Map { .. }, _) => match i.as_key() {
+            (Value::Map(_), _) => match i.as_key() {
                 Some(k) => Step::Key(k),
                 None => return rt("写像の鍵にできない値", index.span),
             },
@@ -1813,9 +1796,9 @@ impl Interp {
                 if let Some(b) = self.lookup(n).cloned() {
                     if let Some(v) = self.arena.get(b.cell) {
                         let len = match v {
-                            Value::Array { items, .. } => Some(items.len()),
+                            Value::Array(ar) => Some(ar.items.len()),
                             Value::Str(s) => Some(s.len()),
-                            Value::Map { entries, .. } => Some(entries.len()),
+                            Value::Map(mp) => Some(mp.entries.len()),
                             _ => None,
                         };
                         if let Some(len) = len {
@@ -1889,21 +1872,18 @@ pub fn read_method_pub(b: &Value, name: &str, args: &[Value], span: Span) -> R<E
 
 fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
     Ok(match (name, b) {
-        ("len", Value::Array { items, .. }) => Eval::Value(Value::I64(items.len() as i64)),
+        ("len", Value::Array(ar)) => Eval::Value(Value::I64(ar.items.len() as i64)),
         ("len", Value::Str(s)) => Eval::Value(Value::I64(s.len() as i64)),
-        ("len", Value::Map { entries, .. }) => Eval::Value(Value::I64(entries.len() as i64)),
+        ("len", Value::Map(mp)) => Eval::Value(Value::I64(mp.entries.len() as i64)),
 
-        ("has", Value::Map { entries, .. }) => {
+        ("has", Value::Map(mp)) => {
             let Some(k) = args.first().and_then(|v| v.as_key()) else {
                 return rt("`has` は鍵を一つ取る", span);
             };
-            Eval::Value(Value::U1(entries.contains_key(&k)))
+            Eval::Value(Value::U1(mp.entries.contains_key(&k)))
         }
         // 並びは鍵の順。**全順序なので決まる**（C-75）
-        ("keys", Value::Map { key, entries, .. }) => Eval::Value(Value::Array {
-            elem: key.clone(),
-            items: entries.keys().map(|k| key_to_value(k, key)).collect(),
-        }),
+        ("keys", Value::Map(mp)) => Eval::Value(Value::array(mp.key.clone(), mp.entries.keys().map(|k| key_to_value(k, &mp.key)).collect())),
 
         // **符号位置の数。**「1文字」とは言わない
         ("utf8_len", Value::Str(s)) => match std::str::from_utf8(s) {
@@ -1935,9 +1915,9 @@ pub fn write_method_pub(cur: &mut Value, name: &str, args: &[Value], span: Span)
 fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
     let paradox = Eval::Paradox(span);
     Ok(match (name, cur) {
-        ("push", Value::Array { items, .. }) => {
+        ("push", Value::Array(ar)) => {
             let Some(v) = args.first() else { return rt("`push` は値を一つ取る", span) };
-            items.push(v.clone());
+            ar.items.push(v.clone());
             paradox
         }
         ("push", Value::Str(b)) => {
@@ -1948,7 +1928,7 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
             paradox
         }
         // **空なら paradox**
-        ("pop", Value::Array { items, .. }) => match items.pop() {
+        ("pop", Value::Array(ar)) => match ar.items.pop() {
             Some(v) => Eval::Value(v),
             None => paradox,
         },
@@ -1956,43 +1936,43 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
             Some(v) => Eval::Value(Value::U8(v)),
             None => paradox,
         },
-        ("clear", Value::Array { items, .. }) => {
-            items.clear();
+        ("clear", Value::Array(ar)) => {
+            ar.items.clear();
             paradox
         }
         ("clear", Value::Str(b)) => {
             b.clear();
             paradox
         }
-        ("clear", Value::Map { entries, .. }) => {
-            entries.clear();
+        ("clear", Value::Map(mp)) => {
+            mp.entries.clear();
             paradox
         }
-        ("insert", Value::Array { items, .. }) => {
+        ("insert", Value::Array(ar)) => {
             let (Some(i), Some(v)) = (args.first().and_then(|x| x.as_int()), args.get(1)) else {
                 return rt("`insert` は添字と値を取る", span);
             };
-            if i < 0 || i as usize > items.len() {
+            if i < 0 || i as usize > ar.items.len() {
                 return Ok(paradox);
             }
-            items.insert(i as usize, v.clone());
+            ar.items.insert(i as usize, v.clone());
             paradox
         }
         // **範囲外は paradox**
-        ("remove", Value::Array { items, .. }) => {
+        ("remove", Value::Array(ar)) => {
             let Some(i) = args.first().and_then(|x| x.as_int()) else {
                 return rt("`remove` は添字を一つ取る", span);
             };
-            if i < 0 || i as usize >= items.len() {
+            if i < 0 || i as usize >= ar.items.len() {
                 return Ok(paradox);
             }
-            Eval::Value(items.remove(i as usize))
+            Eval::Value(ar.items.remove(i as usize))
         }
-        ("remove", Value::Map { entries, .. }) => {
+        ("remove", Value::Map(mp)) => {
             let Some(k) = args.first().and_then(|v| v.as_key()) else {
                 return rt("`remove` は鍵を一つ取る", span);
             };
-            match entries.remove(&k) {
+            match mp.entries.remove(&k) {
                 Some(v) => Eval::Value(v),
                 None => paradox,
             }
@@ -2003,7 +1983,7 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
 
 fn key_to_value(k: &MapKey, t: &ValueType) -> Value {
     match k {
-        MapKey::Bytes(b) => Value::Str(b.clone()),
+        MapKey::Bytes(b) => Value::str(b.clone()),
         MapKey::Float(bits) => match t {
             ValueType::F32 => Value::F32(f64::from_bits(*bits) as f32),
             _ => Value::F64(f64::from_bits(*bits)),
@@ -2027,7 +2007,7 @@ pub fn get_field(v: &Value, name: &str) -> Option<Value> {
 
 pub fn get_index(base: &Value, i: &Value) -> Option<Value> {
     let step = match base {
-        Value::Map { .. } => Step::Key(i.as_key()?),
+        Value::Map(_) => Step::Key(i.as_key()?),
         _ => Step::Index(i.as_int()?),
     };
     step_get(base, &step)
@@ -2039,7 +2019,7 @@ pub fn set_field(base: &mut Value, name: &str, v: Value) -> bool {
 
 pub fn set_index(base: &mut Value, i: &Value, v: Value) -> bool {
     let step = match base {
-        Value::Map { .. } => match i.as_key() {
+        Value::Map(_) => match i.as_key() {
             Some(k) => Step::Key(k),
             None => return false,
         },

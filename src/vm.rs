@@ -365,7 +365,7 @@ impl Compiler {
                 self.emit(Op::Const(k));
             }
             ExprKind::Str(s) => {
-                let k = self.konst(Value::Str(s.as_bytes().to_vec()));
+                let k = self.konst(Value::str(s.as_bytes().to_vec()));
                 self.emit(Op::Const(k));
             }
             ExprKind::Name(n) => {
@@ -803,7 +803,7 @@ impl Compiler {
             }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
                 if a.is_empty() {
-                    let k = self.konst(Value::Array { elem: (**elem).clone(), items: vec![] });
+                    let k = self.konst(Value::array((**elem).clone(), vec![]));
                     self.emit(Op::Const(k));
                 } else {
                     self.expr(&a[0])?;
@@ -821,11 +821,7 @@ impl Compiler {
                 }
             }
             (ValueType::Map(k, v), CtorArgs::Positional(_)) => {
-                let c = self.konst(Value::Map {
-                    key: (**k).clone(),
-                    val: (**v).clone(),
-                    entries: BTreeMap::new(),
-                });
+                let c = self.konst(Value::map((**k).clone(), (**v).clone(), BTreeMap::new()));
                 self.emit(Op::Const(c));
             }
             // ラップを剥がす
@@ -1450,6 +1446,7 @@ impl<'a> Vm<'a> {
     }
 
     /// 一命令。脱出が起きたら返す。
+    #[inline]
     fn step(&mut self, op: Op) -> Result<Option<Esc>, RtErr> {
         match op {
             Op::Const(k) => {
@@ -1537,10 +1534,7 @@ impl<'a> Vm<'a> {
                     // 回数と値から作る
                     let fill = self.pop().value(Span::NONE)?;
                     let cnt = self.pop().value(Span::NONE)?.as_int().unwrap_or(0).max(0);
-                    self.stack.push(Slot::Value(Value::Array {
-                        elem: fill.type_of(),
-                        items: vec![fill; cnt as usize],
-                    }));
+                    self.stack.push(Slot::Value(Value::array(fill.type_of(), vec![fill; cnt as usize])));
                 } else {
                     let mut items = Vec::with_capacity(n as usize);
                     for _ in 0..n {
@@ -1548,7 +1542,7 @@ impl<'a> Vm<'a> {
                     }
                     items.reverse();
                     let elem = items.first().map(|v| v.type_of()).unwrap_or(ValueType::I64);
-                    self.stack.push(Slot::Value(Value::Array { elem, items }));
+                    self.stack.push(Slot::Value(Value::array(elem, items)));
                 }
             }
             Op::MakeMap(n) => {
@@ -1569,7 +1563,7 @@ impl<'a> Vm<'a> {
                     };
                     entries.insert(key, v);
                 }
-                self.stack.push(Slot::Value(Value::Map { key: kt, val: vt, entries }));
+                self.stack.push(Slot::Value(Value::map(kt, vt, entries)));
             }
             Op::MakeStruct(ni, n) => {
                 let name = self.p.chunks[self.cur()].names[ni as usize].clone();
@@ -1583,7 +1577,7 @@ impl<'a> Vm<'a> {
                     // ラップ型（S-2）：欄の名前は空
                     None => vec![(String::new(), vals.into_iter().next().unwrap())],
                 };
-                self.stack.push(Slot::Value(Value::Struct { name, fields }));
+                self.stack.push(Slot::Value(Value::strukt(name, fields)));
             }
             Op::Field(ni, sp) => {
                 let name = self.p.chunks[self.cur()].names[ni as usize].clone();
@@ -1632,9 +1626,9 @@ impl<'a> Vm<'a> {
                     return self.err("まだ束縛されていない", sp);
                 };
                 let n = match v {
-                    Value::Array { items, .. } => items.len(),
+                    Value::Array(ar) => ar.items.len(),
                     Value::Str(s) => s.len(),
-                    Value::Map { entries, .. } => entries.len(),
+                    Value::Map(mp) => mp.entries.len(),
                     _ => return self.err("`len` は集合体にしか使えない", sp),
                 };
                 self.stack.push(Slot::Value(Value::I64(n as i64)));
