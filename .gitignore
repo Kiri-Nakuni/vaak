@@ -1,3 +1,6 @@
 /target
 node_modules/
 .git-frozen/
+
+# Zed 拡張の成果物
+editors/zed/target/

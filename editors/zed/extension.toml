@@ -1,0 +1,18 @@
+id = "vaak"
+name = "Vaak"
+description = "Vaak（PraTeX 埋め込みスクリプト言語）の言語サーバと色分け"
+version = "0.1.0"
+schema_version = 1
+authors = ["Arimura Akihiro"]
+
+# **tree-sitter 文法は持たない。**
+#
+# 色分けは言語サーバの意味トークンから出す。`.scm` を別に書けば、
+# 一つの決定を二箇所で実装することになり、二箇所で間違えられる——
+# この設計で二度やった誤りである（C-61 / C-93）。
+#
+# 字句器は一つ。**Zed が見る色も、検査器が見る字句も、同じ実装から出る。**
+
+[language_servers.vaak-lsp]
+name = "Vaak"
+languages = ["Vaak"]
