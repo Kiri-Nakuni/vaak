@@ -12,3 +12,4 @@ pub mod parser;
 pub mod span;
 pub mod types;
 pub mod value;
+pub mod vm;

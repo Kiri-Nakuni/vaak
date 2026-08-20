@@ -554,6 +554,10 @@ impl Interp {
 
 // ================= 数値 =================
 
+pub fn parse_int_pub(src: &str, span: Span) -> R<Value> {
+    parse_int(src, span)
+}
+
 fn parse_int(src: &str, span: Span) -> R<Value> {
     let clean: String = src.chars().filter(|c| *c != '_').collect();
     let v = if let Some(h) = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")) {
@@ -572,6 +576,10 @@ fn parse_int(src: &str, span: Span) -> R<Value> {
     }
 }
 
+pub fn parse_float_pub(src: &str, span: Span) -> R<Value> {
+    parse_float(src, span)
+}
+
 fn parse_float(src: &str, span: Span) -> R<Value> {
     let clean: String = src.chars().filter(|c| *c != '_').collect();
     match clean.parse::<f64>() {
@@ -579,6 +587,10 @@ fn parse_float(src: &str, span: Span) -> R<Value> {
         Ok(v) if v.is_finite() => Ok(Value::F64(v)),
         _ => rt("浮動小数として読めない（非有限な値は書けない）", span),
     }
+}
+
+pub fn unary_pub(op: UnOp, v: Value, span: Span) -> R<Value> {
+    unary(op, v, span)
 }
 
 fn unary(op: UnOp, v: Value, span: Span) -> R<Value> {
@@ -994,8 +1006,20 @@ fn can_narrow(from: BindKind, to: BindKind) -> bool {
 }
 
 /// 注釈があればリテラルの型を決める（C-31：インタプリタは型を解決するが検査はしない）。
+pub fn coerce_pub(v: Value, ty: Option<&Type>) -> Value {
+    coerce(v, ty)
+}
+
 fn coerce(v: Value, ty: Option<&Type>) -> Value {
     let Some(t) = ty else { return v };
+    // ラップ型を基底型で構築したら**剥がす**（S-2）。包みの欄は名前を持たない
+    if !matches!(t.value, ValueType::Named(_)) {
+        if let Value::Struct { fields, .. } = &v {
+            if fields.len() == 1 && fields[0].0.is_empty() {
+                return coerce(fields[0].1.clone(), ty);
+            }
+        }
+    }
     match (&t.value, &v) {
         (ValueType::U1, _) => v.as_int().map(|i| Value::U1(i != 0)).unwrap_or(v),
         (ValueType::U8, _) => v.as_int().map(|i| Value::U8(i as u8)).unwrap_or(v),
@@ -1010,6 +1034,10 @@ fn coerce(v: Value, ty: Option<&Type>) -> Value {
 }
 
 /// 算術。**0 除算は paradox。浮動小数の非有限な結果もすべて paradox**（C-84）。
+pub fn arith_pub(op: BinOp, a: Value, b: Value, span: Span) -> R<Eval> {
+    arith(op, a, b, span)
+}
+
 fn arith(op: BinOp, a: Value, b: Value, span: Span) -> R<Eval> {
     use BinOp::*;
     // 比較の結果は `u1`
@@ -1751,6 +1779,10 @@ pub fn run(src: &str) -> Result<Eval, String> {
 // **言語が知るのはバイトまで。文字は標準ライブラリが数える**（C-7）。
 // メソッドの名前が**何を数えているか**を言っている。
 
+pub fn read_method_pub(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    read_method(b, name, args, span)
+}
+
 fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
     Ok(match (name, b) {
         ("len", Value::Array { items, .. }) => Eval::Value(Value::I64(items.len() as i64)),
@@ -1790,6 +1822,10 @@ fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
 
         _ => return rt(format!("`{name}` はこの型に使えない"), span),
     })
+}
+
+pub fn write_method_pub(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    write_method(cur, name, args, span)
 }
 
 fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
@@ -1877,4 +1913,36 @@ fn key_to_value(k: &MapKey, t: &ValueType) -> Value {
             _ => Value::I64(*i as i64),
         },
     }
+}
+
+// ---- 経路の操作。VM と共有する（意味論を二度実装しない） ----
+
+pub fn get_field(v: &Value, name: &str) -> Option<Value> {
+    step_get(v, &Step::Field(name.to_string()))
+}
+
+pub fn get_index(base: &Value, i: &Value) -> Option<Value> {
+    let step = match base {
+        Value::Map { .. } => Step::Key(i.as_key()?),
+        _ => Step::Index(i.as_int()?),
+    };
+    step_get(base, &step)
+}
+
+pub fn set_field(base: &mut Value, name: &str, v: Value) -> bool {
+    step_set(base, &[Step::Field(name.to_string())], v)
+}
+
+pub fn set_index(base: &mut Value, i: &Value, v: Value) -> bool {
+    let step = match base {
+        Value::Map { .. } => match i.as_key() {
+            Some(k) => Step::Key(k),
+            None => return false,
+        },
+        _ => match i.as_int() {
+            Some(n) => Step::Index(n),
+            None => return false,
+        },
+    };
+    step_set(base, &[step], v)
 }

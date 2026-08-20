@@ -2,7 +2,7 @@
 //! 値にもエラーにも位置が要る。
 
 /// ソース内のバイト範囲。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
