@@ -365,6 +365,7 @@ impl Parser {
             Tok::Fn => self.fn_decl()?,
             Tok::Flow => self.flow_decl()?,
             Tok::Struct => self.struct_decl()?,
+            Tok::Wrap => self.wrap_decl()?,
             Tok::New => self.construct()?,
             Tok::If => self.if_expr()?,
             Tok::Loop => {
@@ -510,7 +511,13 @@ impl Parser {
     fn fn_decl(&mut self) -> Result<Expr, ParseError> {
         let start = self.span();
         self.expect(Tok::Fn)?;
-        let name = self.ident()?;
+        let first = self.ident()?;
+        // `fn T.m` なら型の名前空間に入る（S-1）
+        let (owner, name) = if self.eat(Tok::Dot) {
+            (Some(first), self.ident()?)
+        } else {
+            (None, first)
+        };
         self.expect(Tok::LParen)?;
         let mut params = Vec::new();
         if *self.peek() != Tok::RParen {
@@ -532,8 +539,18 @@ impl Parser {
                     _ => BindKind::Let, // 既定は let（C-40）
                 };
                 let pname = self.ident()?;
-                self.expect(Tok::Colon)?; // 注釈は省けない
-                let ty = self.ty()?;
+                // **`self` にだけ型注釈を書かない**（型が `fn T.m` から決まる。S-1）
+                let ty = if pname == "self" && owner.is_some() && params.is_empty() {
+                    let t = owner.clone().unwrap();
+                    Type {
+                        value: ValueType::Named(t),
+                        is_alias: true,
+                        span: pstart.to(self.prev_span()),
+                    }
+                } else {
+                    self.expect(Tok::Colon)?; // 注釈は省けない
+                    self.ty()?
+                };
                 params.push(Param { kind, name: pname, ty, span: pstart.to(self.prev_span()) });
                 if !self.eat(Tok::Comma) {
                     break;
@@ -546,7 +563,7 @@ impl Parser {
         let ret = if self.eat(Tok::Arrow) { Some(self.ty()?) } else { None };
         let span = start.to(self.prev_span());
         Ok(self.node(
-            ExprKind::FnDecl(FnDecl { name, params, body: Box::new(body), ret, span }),
+            ExprKind::FnDecl(FnDecl { owner, name, params, body: Box::new(body), ret, span }),
             span,
         ))
     }
@@ -568,6 +585,17 @@ impl Parser {
         let body = self.escape()?;
         let span = start.to(self.prev_span());
         Ok(self.node(ExprKind::FlowDecl(FlowDecl { name, body: Box::new(body), span }), span))
+    }
+
+    /// `wrap 名前 = 型;`（S-2）。`=` は定義であって束縛演算子ではない
+    fn wrap_decl(&mut self) -> Result<Expr, ParseError> {
+        let start = self.span();
+        self.expect(Tok::Wrap)?;
+        let name = self.ident()?;
+        self.expect(Tok::Define)?;
+        let base = self.ty()?;
+        let span = start.to(self.prev_span());
+        Ok(self.node(ExprKind::WrapDecl(WrapDecl { name, base, span }), span))
     }
 
     fn struct_decl(&mut self) -> Result<Expr, ParseError> {

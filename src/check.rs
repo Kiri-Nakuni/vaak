@@ -53,6 +53,7 @@ struct Checker {
     frame_base: usize,
     fns: HashMap<String, FnDecl>,
     structs: HashMap<String, StructDecl>,
+    wraps: HashMap<String, ValueType>,
     flows: HashSet<String>,
     /// 内側から外へ。段送りはこの順に起きる（C-70）。
     stages: Vec<Stage>,
@@ -61,16 +62,25 @@ struct Checker {
 }
 
 pub fn check(prog: &Program) -> Vec<StaticError> {
+    check_with_host(prog, &[])
+}
+
+/// ホストが見せている名前を添えて検査する（S-4）。**`var` で見える。**
+pub fn check_with_host(prog: &Program, host: &[(String, ValueType)]) -> Vec<StaticError> {
     let mut c = Checker {
         errs: Vec::new(),
         scopes: vec![HashMap::new()],
         frame_base: 0,
         fns: HashMap::new(),
         structs: HashMap::new(),
+        wraps: HashMap::new(),
         flows: HashSet::new(),
         stages: vec![Stage { is_loop: false, is_frame: true }],
         visible_limit: None,
     };
+    for (n, _) in host {
+        c.scopes[0].insert(n.clone(), (BindKind::Var, false));
+    }
     c.flows.insert("$return".into());
     c.flows.insert("$repeat".into());
     c.collect(&prog.body);
@@ -99,10 +109,13 @@ impl Checker {
             }
             match &e.kind {
                 ExprKind::FnDecl(f) => {
-                    self.fns.insert(f.name.clone(), f.clone());
+                    self.fns.insert(crate::ast::fn_key(f), f.clone());
                 }
                 ExprKind::StructDecl(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
+                }
+                ExprKind::WrapDecl(w) => {
+                    self.wraps.insert(w.name.clone(), w.base.value.clone());
                 }
                 ExprKind::FlowDecl(f) => {
                     self.flows.insert(f.name.clone());
@@ -299,7 +312,9 @@ impl Checker {
                 self.fn_decl(f);
                 Places::Paradox
             }
-            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) => Places::Paradox,
+            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) | ExprKind::WrapDecl(_) => {
+                Places::Paradox
+            }
 
             ExprKind::If(i) => {
                 let mut any_value = false;
@@ -405,7 +420,11 @@ impl Checker {
         }
         if matches!(
             e.kind,
-            ExprKind::Decl(_) | ExprKind::FnDecl(_) | ExprKind::StructDecl(_) | ExprKind::FlowDecl(_)
+            ExprKind::Decl(_)
+                | ExprKind::FnDecl(_)
+                | ExprKind::StructDecl(_)
+                | ExprKind::FlowDecl(_)
+                | ExprKind::WrapDecl(_)
         ) {
             self.err(msg.to_string(), e.span);
         }
@@ -540,8 +559,15 @@ impl Checker {
             for a in args {
                 self.operand(a, env);
             }
-            // **破壊的メンバ関数はレシーバに `var` を要求する**（C-64）
-            if name == "push" {
+            // **破壊的メンバ関数はレシーバに `var` を要求する**（C-64）。
+            // 利用者定義（S-1）なら `var self` かで決まる
+            let destructive = matches!(name.as_str(), "push" | "pop" | "clear" | "insert" | "remove")
+                || self
+                    .fns
+                    .values()
+                    .any(|f| f.owner.is_some() && &f.name == name
+                        && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false));
+            if destructive {
                 match root_of(base) {
                     Some(n) => match self.lookup(n) {
                         Some((BindKind::Var, _)) => {}
@@ -607,7 +633,8 @@ impl Checker {
 
     fn construct(&mut self, ty: &Type, args: &CtorArgs, env: Env, span: Span) -> Places {
         if let ValueType::Named(n) = &ty.value {
-            if !self.structs.contains_key(n) {
+            // 構造体かラップ型（S-2）
+            if !self.structs.contains_key(n) && !self.wraps.contains_key(n) {
                 self.err(format!("知らない型 `{n}`"), span);
             }
         }

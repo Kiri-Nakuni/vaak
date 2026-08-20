@@ -38,6 +38,7 @@ pub enum ExprKind {
     FnDecl(FnDecl),
     FlowDecl(FlowDecl),
     StructDecl(StructDecl),
+    WrapDecl(WrapDecl),
 
     If(If),
     Loop(Box<Expr>),
@@ -129,6 +130,8 @@ pub enum BindInit {
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
+    /// `fn T.m` のときの `T`。**型の名前空間に入る**（S-1）。
+    pub owner: Option<String>,
     pub name: String,
     pub params: Vec<Param>,
     pub body: Box<Expr>,
@@ -151,6 +154,14 @@ pub struct FlowDecl {
     pub name: String,
     /// 本体は**使用位置で読み直される**（C-15）。ここでは構文木を保持するだけ。
     pub body: Box<Escape>,
+    pub span: Span,
+}
+
+/// `wrap 名前 = 型;`（S-2）。**包むのも剥がすのも `new`。**
+#[derive(Clone, Debug)]
+pub struct WrapDecl {
+    pub name: String,
+    pub base: Type,
     pub span: Span,
 }
 
@@ -254,4 +265,12 @@ pub enum CtorArgs {
 #[derive(Clone, Debug)]
 pub struct Program {
     pub body: Vec<Expr>,
+}
+
+/// 関数を引く鍵。メンバ関数は**型の名前空間に入る**（S-1）。
+pub fn fn_key(f: &FnDecl) -> String {
+    match &f.owner {
+        Some(t) => format!("{t}.{}", f.name),
+        None => f.name.clone(),
+    }
 }

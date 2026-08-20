@@ -90,6 +90,8 @@ pub struct Interp {
     /// 関数の可視範囲はスコープを越える（C-36）。フレームを跨いでも見える。
     fns: HashMap<String, FnEntry>,
     structs: HashMap<String, StructDecl>,
+    /// ラップ型（S-2）。名前 → 包んだ型。
+    wraps: HashMap<String, ValueType>,
     flows: HashMap<String, FlowDecl>,
     /// 変数の探索はこの位置より外へ行かない。**関数は局所変数を見ない**（C-86）。
     frame_base: usize,
@@ -109,6 +111,7 @@ impl Interp {
             scopes: Vec::new(),
             fns: HashMap::new(),
             structs: HashMap::new(),
+            wraps: HashMap::new(),
             flows: HashMap::new(),
             frame_base: 0,
             frozen: Vec::new(),
@@ -119,6 +122,18 @@ impl Interp {
         let prelude = crate::parser::parse(PRELUDE).expect("無名標準ライブラリの解析に失敗");
         it.collect_decls(&prelude.body);
         it
+    }
+
+    /// ホストのセルを最上位のスコープに置く（S-4）。**`var` で見せる。**
+    pub fn expose(&mut self, name: &str, v: Value) {
+        let cell = self.arena.alloc(Some(v));
+        self.declare(name, Binding { cell, kind: BindKind::Var, is_alias: false });
+    }
+
+    /// 走り終わったあと、ホストのセルの値を読む。
+    pub fn host_value(&self, name: &str) -> Option<Value> {
+        let b = self.scopes.first()?.vars.get(name)?;
+        self.arena.get(b.cell).cloned()
     }
 
     /// プログラムを走らせ、最上位の外界面を返す。
@@ -191,10 +206,13 @@ impl Interp {
             }
             match &e.kind {
                 ExprKind::FnDecl(f) => {
-                    self.fns.insert(f.name.clone(), FnEntry { decl: f.clone() });
+                    self.fns.insert(fn_key(f), FnEntry { decl: f.clone() });
                 }
                 ExprKind::StructDecl(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
+                }
+                ExprKind::WrapDecl(w) => {
+                    self.wraps.insert(w.name.clone(), w.base.value.clone());
                 }
                 ExprKind::FlowDecl(f) => {
                     self.flows.insert(f.name.clone(), f.clone());
@@ -325,9 +343,10 @@ impl Interp {
             ExprKind::Assign { op, lhs, rhs } => self.assign(*op, lhs, rhs, e.span),
 
             // 宣言は値を置かない。外界面は paradox
-            ExprKind::FnDecl(_) | ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) => {
-                Ok(Eval::Paradox(e.span))
-            }
+            ExprKind::FnDecl(_)
+            | ExprKind::StructDecl(_)
+            | ExprKind::FlowDecl(_)
+            | ExprKind::WrapDecl(_) => Ok(Eval::Paradox(e.span)),
 
             ExprKind::If(i) => self.if_expr(i, e.span),
             ExprKind::Loop(body) => self.loop_expr(body, None, e.span),
@@ -1363,6 +1382,19 @@ impl Interp {
                     items: vec![fill; n as usize],
                 }))
             }
+            // ラップを剥がす：`new i64 ( m )` のように基底型で構築する
+            (base, CtorArgs::Positional(a))
+                if a.len() == 1
+                    && !matches!(base, ValueType::Named(_) | ValueType::Array(_)) =>
+            {
+                match self.need_value(&a[0])? {
+                    Ok(Value::Struct { fields, .. }) if fields.len() == 1 && fields[0].0.is_empty() => {
+                        Ok(Eval::Value(fields[0].1.clone()))
+                    }
+                    Ok(v) => Ok(Eval::Value(coerce(v, Some(ty)))),
+                    Err(x) => Ok(Eval::Escape(x)),
+                }
+            }
             (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::Map {
                 key: (**k).clone(),
                 val: (**v).clone(),
@@ -1378,6 +1410,18 @@ impl Interp {
                     }
                     Ok(Value::Str(b)) => Ok(Eval::Value(Value::Str(b))),
                     Ok(_) => rt("`str` は `u8 array` から作る", span),
+                    Err(x) => Ok(Eval::Escape(x)),
+                }
+            }
+            // ラップ型（S-2）。包むのも剥がすのも `new`
+            (ValueType::Named(name), CtorArgs::Positional(a))
+                if self.wraps.contains_key(name) && a.len() == 1 =>
+            {
+                match self.need_value(&a[0])? {
+                    Ok(v) => Ok(Eval::Value(Value::Struct {
+                        name: name.clone(),
+                        fields: vec![("".to_string(), v)],
+                    })),
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
@@ -1545,24 +1589,127 @@ impl Interp {
         })
     }
 
-    /// 組み込みのメンバ関数。**レシーバは複製されない。破壊的である**（C-20）。
+    /// メンバ関数。**レシーバは複製されない。破壊的である**（C-20）。
+    ///
+    /// 利用者定義（S-1）を先に探し、無ければ標準ライブラリ（S-3）。
     fn method(&mut self, base: &Expr, name: &str, args: &[Expr], span: Span) -> R<Eval> {
-        // 読むだけのもの
-        if name == "len" {
+        if let Ok(Ok(recv)) = self.need_value(base) {
+            let key = match recv.type_of() {
+                ValueType::Named(t) => format!("{t}.{name}"),
+                _ => String::new(),
+            };
+            if let Some(f) = self.fns.get(&key).cloned() {
+                return self.call_method(f, base, args, span);
+            }
+        }
+        self.builtin_method(base, name, args, span)
+    }
+
+    /// 利用者定義のメンバ関数。**第一引数 `self` はレシーバの別名**（S-1）。
+    fn call_method(&mut self, f: FnEntry, base: &Expr, args: &[Expr], span: Span) -> R<Eval> {
+        let d = f.decl.clone();
+        if d.params.len() != args.len() + 1 {
+            return rt(format!("`{}` は引数を {} 個取る", d.name, d.params.len() - 1), span);
+        }
+        let self_param = d.params[0].clone();
+        // 破壊するなら `var self`。書き戻す先を先に押さえる
+        let recv_place = if self_param.kind == BindKind::Var {
+            Some(self.resolve_place(base)?)
+        } else {
+            None
+        };
+        let recv = match self.need_value(base)? {
+            Ok(v) => v,
+            Err(x) => return Ok(Eval::Escape(x)),
+        };
+        let self_cell = self.arena.alloc(Some(recv));
+
+        let mut bound = vec![(self_param.name.clone(), self_param.kind, self_cell, true)];
+        for (p, a) in d.params[1..].iter().zip(args) {
+            if p.ty.is_alias {
+                let ExprKind::Name(n) = &a.kind else {
+                    return rt("`alias` 引数に渡せるのは名前だけ", a.span);
+                };
+                let Some(b) = self.lookup(n).cloned() else {
+                    return rt(format!("知らない名前 `{n}`"), a.span);
+                };
+                bound.push((p.name.clone(), p.kind, b.cell, true));
+            } else {
+                let v = match self.need_value(a)? {
+                    Ok(v) => v,
+                    Err(x) => return Ok(Eval::Escape(x)),
+                };
+                let cell = self.arena.alloc(Some(coerce(v, Some(&p.ty))));
+                bound.push((p.name.clone(), p.kind, cell, false));
+            }
+        }
+
+        let saved = self.frame_base;
+        self.push_scope(true, false, true);
+        self.frame_base = self.scopes.len() - 1;
+        for (n, k, c, is_alias) in bound {
+            self.declare(&n, Binding { cell: c, kind: k, is_alias });
+        }
+        let ExprKind::Block(items) = &d.body.kind else {
+            self.frame_base = saved;
+            self.pop_scope();
+            return rt("関数の本体はブロックでなければならない", span);
+        };
+        self.collect_decls(items);
+        let r = self.region(items, d.body.span);
+        let written = self.arena.get(self_cell).cloned();
+        self.frame_base = saved;
+        self.pop_scope();
+        // **レシーバは複製されない。** 書き換えたなら戻す
+        if let (Some(place), Some(v)) = (recv_place, written) {
+            self.write_place(&place, v, span)?;
+        }
+
+        let r = r?;
+        Ok(match r {
+            Eval::Escape(mut x) => {
+                if x.stages > 1 {
+                    if x.outward & 1 != 0 {
+                        x.stages -= 1;
+                        x.outward >>= 1;
+                        Eval::Escape(x)
+                    } else {
+                        return rt("フレームを越える脱出", x.span);
+                    }
+                } else {
+                    match x.kind {
+                        EKind::Break => match x.payload.take() {
+                            Some(v) => Eval::Value(v),
+                            None => Eval::Paradox(x.span),
+                        },
+                        EKind::Continue => return rt("再開できるものが無い", x.span),
+                    }
+                }
+            }
+            Eval::Akasha => Eval::Paradox(span),
+            other => other,
+        })
+    }
+
+    /// 標準ライブラリのメンバ関数（S-3）。**言語が知るのはバイトまで。**
+    fn builtin_method(&mut self, base: &Expr, name: &str, args: &[Expr], span: Span) -> R<Eval> {
+        // ---- 読むだけのもの ----
+        if matches!(name, "len" | "has" | "keys" | "utf8_len" | "utf8_at" | "utf8_valid") {
             let b = match self.need_value(base)? {
                 Ok(v) => v,
                 Err(x) => return Ok(Eval::Escape(x)),
             };
-            let n = match &b {
-                Value::Array { items, .. } => items.len(),
-                Value::Str(s) => s.len(),
-                Value::Map { entries, .. } => entries.len(),
-                _ => return rt("`len` は集合体にしか使えない", span),
-            };
-            return Ok(Eval::Value(Value::I64(n as i64)));
+            let mut argv = Vec::new();
+            for a in args {
+                match self.need_value(a)? {
+                    Ok(v) => argv.push(v),
+                    Err(x) => return Ok(Eval::Escape(x)),
+                }
+            }
+            return read_method(&b, name, &argv, span);
         }
-        // 破壊的なもの。**レシーバに `var` を要求する**（C-64）
-        if name == "push" {
+        // ---- 破壊的なもの。**レシーバに `var` を要求する**（C-64）----
+        if matches!(name, "push" | "pop" | "clear" | "insert" | "remove") {
             let place = self.resolve_place(base)?;
             let cell = match &place {
                 Place::Cell(c) | Place::Field(c, _) => *c,
@@ -1570,21 +1717,17 @@ impl Interp {
             if self.frozen.contains(&cell) {
                 return rt("凍っているセルには書けない", span);
             }
-            let [a] = args else {
-                return rt("`push` は値を一つ取る", span);
-            };
-            let v = match self.need_value(a)? {
-                Ok(v) => v,
-                Err(x) => return Ok(Eval::Escape(x)),
-            };
-            let mut cur = self.read_place(&place, span)?;
-            match (&mut cur, &v) {
-                (Value::Array { items, .. }, _) => items.push(v.clone()),
-                (Value::Str(b), Value::U8(x)) => b.push(*x),
-                _ => return rt("`push` は配列か `str` にしか使えない", span),
+            let mut argv = Vec::new();
+            for a in args {
+                match self.need_value(a)? {
+                    Ok(v) => argv.push(v),
+                    Err(x) => return Ok(Eval::Escape(x)),
+                }
             }
+            let mut cur = self.read_place(&place, span)?;
+            let out = write_method(&mut cur, name, &argv, span)?;
             self.write_place(&place, cur, span)?;
-            return Ok(Eval::Paradox(span));
+            return Ok(out);
         }
         rt(format!("知らないメンバ関数 `{name}`"), span)
     }
@@ -1601,4 +1744,137 @@ pub fn run(src: &str) -> Result<Eval, String> {
     let prog = crate::parser::parse(src).map_err(|e| format!("構文: {}", e.msg))?;
     let mut it = Interp::new();
     it.run(&prog).map_err(|e| e.msg)
+}
+
+// ================= 標準ライブラリ（S-3） =================
+//
+// **言語が知るのはバイトまで。文字は標準ライブラリが数える**（C-7）。
+// メソッドの名前が**何を数えているか**を言っている。
+
+fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    Ok(match (name, b) {
+        ("len", Value::Array { items, .. }) => Eval::Value(Value::I64(items.len() as i64)),
+        ("len", Value::Str(s)) => Eval::Value(Value::I64(s.len() as i64)),
+        ("len", Value::Map { entries, .. }) => Eval::Value(Value::I64(entries.len() as i64)),
+
+        ("has", Value::Map { entries, .. }) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`has` は鍵を一つ取る", span);
+            };
+            Eval::Value(Value::U1(entries.contains_key(&k)))
+        }
+        // 並びは鍵の順。**全順序なので決まる**（C-75）
+        ("keys", Value::Map { key, entries, .. }) => Eval::Value(Value::Array {
+            elem: key.clone(),
+            items: entries.keys().map(|k| key_to_value(k, key)).collect(),
+        }),
+
+        // **符号位置の数。**「1文字」とは言わない
+        ("utf8_len", Value::Str(s)) => match std::str::from_utf8(s) {
+            Ok(t) => Eval::Value(Value::I64(t.chars().count() as i64)),
+            Err(_) => Eval::Paradox(span),
+        },
+        ("utf8_at", Value::Str(s)) => {
+            let Some(i) = args.first().and_then(|v| v.as_int()) else {
+                return rt("`utf8_at` は添字を一つ取る", span);
+            };
+            match std::str::from_utf8(s) {
+                Ok(t) if i >= 0 => match t.chars().nth(i as usize) {
+                    Some(c) => Eval::Value(Value::I32(c as i32)),
+                    None => Eval::Paradox(span),
+                },
+                _ => Eval::Paradox(span),
+            }
+        }
+        ("utf8_valid", Value::Str(s)) => Eval::Value(Value::U1(std::str::from_utf8(s).is_ok())),
+
+        _ => return rt(format!("`{name}` はこの型に使えない"), span),
+    })
+}
+
+fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    let paradox = Eval::Paradox(span);
+    Ok(match (name, cur) {
+        ("push", Value::Array { items, .. }) => {
+            let Some(v) = args.first() else { return rt("`push` は値を一つ取る", span) };
+            items.push(v.clone());
+            paradox
+        }
+        ("push", Value::Str(b)) => {
+            let Some(Value::U8(x)) = args.first() else {
+                return rt("`str` の `push` は `u8` を取る", span);
+            };
+            b.push(*x);
+            paradox
+        }
+        // **空なら paradox**
+        ("pop", Value::Array { items, .. }) => match items.pop() {
+            Some(v) => Eval::Value(v),
+            None => paradox,
+        },
+        ("pop", Value::Str(b)) => match b.pop() {
+            Some(v) => Eval::Value(Value::U8(v)),
+            None => paradox,
+        },
+        ("clear", Value::Array { items, .. }) => {
+            items.clear();
+            paradox
+        }
+        ("clear", Value::Str(b)) => {
+            b.clear();
+            paradox
+        }
+        ("clear", Value::Map { entries, .. }) => {
+            entries.clear();
+            paradox
+        }
+        ("insert", Value::Array { items, .. }) => {
+            let (Some(i), Some(v)) = (args.first().and_then(|x| x.as_int()), args.get(1)) else {
+                return rt("`insert` は添字と値を取る", span);
+            };
+            if i < 0 || i as usize > items.len() {
+                return Ok(paradox);
+            }
+            items.insert(i as usize, v.clone());
+            paradox
+        }
+        // **範囲外は paradox**
+        ("remove", Value::Array { items, .. }) => {
+            let Some(i) = args.first().and_then(|x| x.as_int()) else {
+                return rt("`remove` は添字を一つ取る", span);
+            };
+            if i < 0 || i as usize >= items.len() {
+                return Ok(paradox);
+            }
+            Eval::Value(items.remove(i as usize))
+        }
+        ("remove", Value::Map { entries, .. }) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`remove` は鍵を一つ取る", span);
+            };
+            match entries.remove(&k) {
+                Some(v) => Eval::Value(v),
+                None => paradox,
+            }
+        }
+        (n, _) => return rt(format!("`{n}` はこの型に使えない"), span),
+    })
+}
+
+fn key_to_value(k: &MapKey, t: &ValueType) -> Value {
+    match k {
+        MapKey::Bytes(b) => Value::Str(b.clone()),
+        MapKey::Float(bits) => match t {
+            ValueType::F32 => Value::F32(f64::from_bits(*bits) as f32),
+            _ => Value::F64(f64::from_bits(*bits)),
+        },
+        MapKey::Int(i) => match t {
+            ValueType::U1 => Value::U1(*i != 0),
+            ValueType::U8 => Value::U8(*i as u8),
+            ValueType::U16 => Value::U16(*i as u16),
+            ValueType::U32 => Value::U32(*i as u32),
+            ValueType::I32 => Value::I32(*i as i32),
+            _ => Value::I64(*i as i64),
+        },
+    }
 }

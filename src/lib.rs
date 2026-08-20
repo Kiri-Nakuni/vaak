@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod lexer;
 pub mod check;
+pub mod host;
 pub mod interp;
 pub mod parser;
 pub mod span;

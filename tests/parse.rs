@@ -49,13 +49,14 @@ fn sexp(e: &Expr) -> String {
         }
         ExprKind::FnDecl(f) => format!(
             "(fn {}{} {}{})",
-            f.name,
+            match &f.owner { Some(t) => format!("{t}.{}", f.name), None => f.name.clone() },
             f.params.iter().map(|p| format!(" {}", p.name)).collect::<String>(),
             sexp(&f.body),
             f.ret.as_ref().map(|t| format!(" -> {}", ty(&t.value))).unwrap_or_default()
         ),
         ExprKind::FlowDecl(f) => format!("(flow {} {})", f.name, esc_s(&f.body)),
         ExprKind::StructDecl(s) => format!("(struct {})", s.name),
+        ExprKind::WrapDecl(w) => format!("(wrap {})", w.name),
         ExprKind::Construct { ty: t, args } => {
             let a = match args {
                 CtorArgs::Named(v) => {
