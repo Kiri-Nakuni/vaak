@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 
 // ================= 命令 =================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Op {
     /// 定数を積む。
     Const(u32),
@@ -1197,6 +1197,8 @@ pub struct Vm<'a> {
     arena: Arena,
     stack: Vec<Slot>,
     frames: Vec<Frame>,
+    /// 枠のセル表の使い回し。`Runner` から借りる
+    pool: Vec<Vec<CellId>>,
 }
 
 /// 実行の結果。木を辿る実装と同じ形（`interp::Eval` に合わせる）。
@@ -1211,30 +1213,90 @@ pub fn run_program_with_host(
     p: &Program2,
     host: Vec<Value>,
 ) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
-    let mut vm = Vm { p, arena: Arena::new(), stack: Vec::new(), frames: Vec::new() };
-    // ホストの値をセルに置き、最上位の枠へ結び付ける
-    let cells: Vec<CellId> = host.into_iter().map(|v| vm.arena.alloc(Some(v))).collect();
-    vm.push_frame(p.top, Vec::new(), 1);
-    {
-        let slots = p.chunks[p.top as usize].host_slots.clone();
-        let f = vm.frames.last_mut().unwrap();
+    Runner::new().run(p, host)
+}
+
+/// **一度きりでない実行のための入れ物。**
+///
+/// ホストが同じ組み立てを何千回も走らせるとき、走るたびに
+/// 場（`Arena`）・積み（`stack`）・枠（`frames`）を作り直すのは無駄である——
+/// **容量は前回と同じだけ要る。**
+///
+/// 中身は毎回捨てる。**捨てるのは値であって、場所ではない。**
+/// 字句アリーナが領域の出口で一括解放するのと同じ原理を、実行そのものに掛ける。
+#[derive(Default)]
+pub struct Runner {
+    arena: Arena,
+    stack: Vec<Slot>,
+    frames: Vec<Frame>,
+    /// 枠のセル表を使い回す。関数呼び出しのたびに確保しない
+    pool: Vec<Vec<CellId>>,
+}
+
+impl Runner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn run(
+        &mut self,
+        p: &Program2,
+        host: Vec<Value>,
+    ) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
+        let mut vm = Vm {
+            p,
+            arena: std::mem::take(&mut self.arena),
+            stack: std::mem::take(&mut self.stack),
+            frames: std::mem::take(&mut self.frames),
+            pool: std::mem::take(&mut self.pool),
+        };
+        let r = vm.run_top(p, host);
+        // **返ってくる道は一つ。** 誤りで抜けても入れ物は戻す
+        vm.arena.clear();
+        vm.stack.clear();
+        for f in vm.frames.drain(..) {
+            vm.pool.push(f.cells);
+        }
+        self.arena = vm.arena;
+        self.stack = vm.stack;
+        self.frames = vm.frames;
+        self.pool = vm.pool;
+        r
+    }
+}
+
+impl Vm<'_> {
+    fn run_top(
+        &mut self,
+        p: &Program2,
+        host: Vec<Value>,
+    ) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
+        // ホストの値をセルに置き、最上位の枠へ結び付ける
+        let base = self.arena.mark();
+        let n = host.len();
+        for v in host {
+            self.arena.alloc(Some(v));
+        }
+        self.push_frame(p.top, Vec::new(), 1);
+        // **写さない。** `host_slots` は組み立ての結果であり、走るたびに複製する理由が無い
+        let slots = &p.chunks[p.top as usize].host_slots;
+        let f = self.frames.last_mut().unwrap();
         for (i, s) in slots.iter().enumerate() {
-            if let Some(c) = cells.get(i) {
-                f.cells[*s as usize] = *c;
+            if i < n {
+                f.cells[*s as usize] = CellId((base + i) as u32);
             }
         }
+        let out = self.run()?;
+        // 走り終わってから**取り出す**。写さない——セルはもう要らない
+        let after: Vec<Value> = (0..n)
+            .map(|i| self.arena.take(CellId((base + i) as u32)).unwrap_or(Value::I64(0)))
+            .collect();
+        let ev = match out {
+            Slot::Value(v) => crate::interp::Eval::Value(v),
+            Slot::Paradox(sp) => crate::interp::Eval::Paradox(sp),
+        };
+        Ok((ev, after))
     }
-    let out = vm.run()?;
-    // 走り終わってから**取り出す**。写さない——セルはもう要らない
-    let after: Vec<Value> = cells
-        .iter()
-        .map(|c| vm.arena.take(*c).unwrap_or(Value::I64(0)))
-        .collect();
-    let ev = match out {
-        Slot::Value(v) => crate::interp::Eval::Value(v),
-        Slot::Paradox(sp) => crate::interp::Eval::Paradox(sp),
-    };
-    Ok((ev, after))
 }
 
 impl Program2 {
@@ -1310,10 +1372,9 @@ impl Program2 {
 impl<'a> Vm<'a> {
     fn push_frame(&mut self, chunk: u32, args: Vec<(CellId, bool)>, depth: u32) {
         let ch = &self.p.chunks[chunk as usize];
-        let mut cells = Vec::with_capacity(ch.nslots as usize);
-        for _ in 0..ch.nslots {
-            cells.push(CellId(u32::MAX));
-        }
+        let mut cells = self.pool.pop().unwrap_or_default();
+        cells.clear();
+        cells.resize(ch.nslots as usize, CellId(u32::MAX));
         for (i, (cell, _)) in args.iter().enumerate() {
             if let Some((slot, _)) = ch.params.get(i) {
                 cells[*slot as usize] = *cell;
@@ -1360,6 +1421,8 @@ impl<'a> Vm<'a> {
 
 impl<'a> Vm<'a> {
     fn run(&mut self) -> Result<Slot, RtErr> {
+        // **組み立ての結果は動かない。** 借りを一度取れば、毎回引き直さずに済む
+        let p = self.p;
         let mut steps: u64 = 0;
         loop {
             steps += 1;
@@ -1367,16 +1430,15 @@ impl<'a> Vm<'a> {
                 return self.err("実行が長すぎる", Span::NONE);
             }
             // 最上位のフレームが返ったら終わり
-            let Some(f) = self.frames.last() else {
+            let Some(f) = self.frames.last_mut() else {
                 return Ok(self.pop());
             };
-            let (chunk, pc) = (f.chunk, f.pc);
-            let ops_len = self.p.chunks[chunk as usize].ops.len();
-            if pc >= ops_len {
+            // **命令は写さない。** `Op` は平らな 24 バイトであり、
+            // 借りて読めば済む——一命令ごとに写す理由が無い
+            let Some(&op) = p.chunks[f.chunk as usize].ops.get(f.pc) else {
                 return self.err("命令の終端を越えた", Span::NONE);
-            }
-            let op = self.p.chunks[chunk as usize].ops[pc].clone();
-            self.frames.last_mut().unwrap().pc += 1;
+            };
+            f.pc += 1;
 
             if let Some(esc) = self.step(op)? {
                 // 脱出が起きた。段を送る
@@ -2056,4 +2118,19 @@ fn const_index_before(c: &Chunk, at: usize) -> Option<i128> {
         return None;
     };
     c.consts.get(k as usize)?.as_int()
+}
+
+/// 大きさを測る。**遅さの多くは、動かしている塊の大きさである。**
+pub fn sizes() -> Vec<(&'static str, usize)> {
+    use std::mem::size_of;
+    vec![
+        ("Value", size_of::<Value>()),
+        ("Slot", size_of::<Slot>()),
+        ("Op", size_of::<Op>()),
+        ("Esc", size_of::<Esc>()),
+        ("RtErr", size_of::<RtErr>()),
+        ("Result<Option<Esc>,RtErr>", size_of::<Result<Option<Esc>, RtErr>>()),
+        ("Eval", size_of::<crate::interp::Eval>()),
+        ("ValueType", size_of::<ValueType>()),
+    ]
 }

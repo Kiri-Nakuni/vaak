@@ -157,6 +157,14 @@ impl Arena {
         Self { cells: Vec::new() }
     }
 
+    /// **中身だけ捨てる。** 容量は残す——次の実行で同じだけ要る。
+    ///
+    /// ホストが繰り返し呼ぶとき、毎回の確保が積み上がる。
+    /// 領域の一括解放（`release`）と同じ原理を、**実行そのものにも掛ける。**
+    pub fn clear(&mut self) {
+        self.cells.clear();
+    }
+
     /// 印を付ける。スコープの入口で取り、出口で `release` に渡す。
     pub fn mark(&self) -> usize {
         self.cells.len()
