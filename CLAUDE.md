@@ -1,3 +1,34 @@
+<!-- ここから下は CLAUDE 自身が書いた案内。依頼文は「━━ 依頼 ━━」から下にそのままある -->
+
+# 最初に読むもの
+
+1. **[claude_memo.md](claude_memo.md)** — 作業の逐次記録。**まずこれ。**
+   何が終わり、何が途中で、どの枝にいるか
+2. [docs/vaak/decisions.md](docs/vaak/decisions.md) — **決定の唯一の記録。**
+   `C-n` は依頼者の承認済み。`S-n` は CLAUDE が決めた分
+3. [docs/LICENSING.md](docs/LICENSING.md) — **rtex は GPL-3.0。向きが一方通行**
+4. [docs/vaak/probe.md](docs/vaak/probe.md) — 理由を書かない仕様書
+
+## 圧縮が起きても失ってはいけない事実
+
+| | |
+|---|---|
+| **rtex は GPL-3.0** | Vaak(MIT) → rtex は可。**逆は不可。rtex のコードを写さない** |
+| Vaak は **MIT / 有村陽大 (Arimura Akihiro)** | |
+| `docs/vaak/1x-*.md` は**提案**である | 決定は `decisions.md` にしかない。`C-n` を引くときは読んでから引く |
+| プローブに**理由を書かない** | 純粋な反論をもらうため |
+| **却下理由を捨てない** | 誤りは誤りとして記録する |
+| 決定を**二箇所で実装しない** | C-61 / C-93 で二度やった誤り |
+| 版方は二つ | `~/Documents/mydsl`（Vaak）と `~/Documents/rtex`（GPLv3、別物） |
+
+## 依頼者は寝ている
+
+**質問しない。許可を求めない。確認を求めない。**
+自分で決められることは `S-n` に書いて枝を切る。
+どうしようもないものは飛ばして `claude_memo.md` に理由を書く。
+
+━━ 依頼 ━━
+
 CLAUDEへ
 
 方言拡張点の境界が仕様上どこまで明確か
