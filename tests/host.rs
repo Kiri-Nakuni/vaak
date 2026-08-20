@@ -1,11 +1,32 @@
 //! ホスト界面（S-4）の契約。
 
-use vaak::host::{Host, HostCell, Outcome};
+use vaak::ast::ValueType;
+use vaak::host::{Host, HostBinding, Outcome};
+use vaak::value::Value;
+
+/// テスト用：`u8 array` を見せる。
+struct Bytes(Vec<u8>);
+impl HostBinding for Bytes {
+    fn type_of(&self) -> ValueType {
+        ValueType::Array(Box::new(ValueType::U8))
+    }
+    fn read(&self) -> Value {
+        Value::Array {
+            elem: ValueType::U8,
+            items: self.0.iter().map(|b| Value::U8(*b)).collect(),
+        }
+    }
+    fn write(&mut self, v: &Value) {
+        if let Value::Array { items, .. } = v {
+            self.0 = items.iter().filter_map(|x| x.as_int()).map(|x| x as u8).collect();
+        }
+    }
+}
 
 #[test]
 fn s4_ホストのセルに張れる() {
     let mut h = Host::new();
-    h.expose("buf", HostCell::U8Array(vec![1, 2, 3]));
+    h.expose("buf", Box::new(Bytes(vec![1, 2, 3])));
     let out = h.run("var b : u8 array alias &= buf; b.len()");
     match out {
         Outcome::Value(v) => assert_eq!(v.show(), "3"),
@@ -16,10 +37,10 @@ fn s4_ホストのセルに張れる() {
 #[test]
 fn s4_書き戻される() {
     let mut h = Host::new();
-    h.expose("n", HostCell::I64(1));
+    h.expose_value("n", Value::I64(1));
     h.run("var x : i64 alias &= n; x := 42;");
-    match h.get("n") {
-        Some(HostCell::I64(v)) => assert_eq!(*v, 42),
+    match h.get("n").map(|b| b.read()) {
+        Some(Value::I64(v)) => assert_eq!(v, 42),
         other => panic!("{other:?}"),
     }
 }
@@ -27,14 +48,16 @@ fn s4_書き戻される() {
 #[test]
 fn s4_配列を書き換えられる() {
     let mut h = Host::new();
-    h.expose("buf", HostCell::U8Array(vec![9, 9, 9]));
+    h.expose("buf", Box::new(Bytes(vec![9, 9, 9])));
     let out = h.run(
         "var b : u8 array alias &= buf;
          nfor (i, 0, b.len()) { b[i] := 0; };",
     );
     assert!(matches!(out, Outcome::Empty | Outcome::Paradox { .. }), "{out:?}");
-    match h.get("buf") {
-        Some(HostCell::U8Array(v)) => assert_eq!(v, &vec![0, 0, 0]),
+    match h.get("buf").map(|b| b.read()) {
+        Some(Value::Array { items, .. }) => {
+            assert_eq!(items.iter().filter_map(|x| x.as_int()).collect::<Vec<_>>(), vec![0, 0, 0]);
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -42,7 +65,7 @@ fn s4_配列を書き換えられる() {
 #[test]
 fn s4_剥がされたセルは見えない() {
     let mut h = Host::new();
-    h.expose("n", HostCell::I64(1));
+    h.expose_value("n", Value::I64(1));
     h.invalidate("n");
     // 名前ごと消えるので、名前解決で落ちる
     assert!(matches!(h.run("var x : i64 alias &= n; x"), Outcome::Static(_)));
