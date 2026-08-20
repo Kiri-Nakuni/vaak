@@ -1,0 +1,50 @@
+{
+  "name": "vaak",
+  "displayName": "Vaak",
+  "description": "Vaak（PraTeX 埋め込みスクリプト言語）の言語サーバと色分け",
+  "version": "0.1.0",
+  "publisher": "arimura-akihiro",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:vaak"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "vaak",
+        "aliases": ["Vaak", "vaak"],
+        "extensions": [".vaak", ".vk"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vaak",
+        "scopeName": "source.vaak",
+        "path": "./syntaxes/vaak.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Vaak",
+      "properties": {
+        "vaak.server.path": {
+          "type": "string",
+          "default": "vaak-lsp",
+          "description": "言語サーバの道。PATH から見つかるなら既定のままでよい"
+        },
+        "vaak.server.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "言語サーバを使うか。false なら色分けだけになる"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p ."
+  },
+  "dependencies": { "vscode-languageclient": "^9.0.1" },
+  "devDependencies": { "@types/node": "^20", "@types/vscode": "^1.75.0", "typescript": "^5.4.0" }
+}

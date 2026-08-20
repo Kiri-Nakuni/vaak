@@ -91,3 +91,17 @@ fn 組み込みの型が一致する() {
     }
     assert_eq!(from_grammar, from_parser, "組み込みの型が食い違っている");
 }
+
+#[test]
+fn textmate_文法も一致する() {
+    // **VS Code の文法は生成物である。** `scripts/gen-tm-grammar.py` が
+    // `src/lexer.rs` と `src/parser.rs` から作る。**手で直さない。**
+    let out = std::process::Command::new("python3")
+        .args(["scripts/gen-tm-grammar.py", "--check"])
+        .output()
+        .expect("python3 が要る");
+    assert!(
+        out.status.success(),
+        "TextMate 文法が古い。`python3 scripts/gen-tm-grammar.py` を走らせること"
+    );
+}

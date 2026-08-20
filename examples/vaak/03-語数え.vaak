@@ -9,8 +9,8 @@ fn is_space (c : u8) {
 
 %{ 空白で切って数える。**戻り値は「語 → 回数」の写像** }%
 fn count_words (s : str alias) {
-    var out : str i64 map := ( );
-    var cur : str := new str ( );
+    var out : str i64 map := new str i64 map ( );
+    var cur : str := "";
 
     %{ 終端の語も拾えるように、一つ余分に回す }%
     nfor (i, 0, s.len() + 1) {
@@ -20,7 +20,7 @@ fn count_words (s : str alias) {
             if (cur.len() > 0) {
                 %{ 欠損キーは paradox。`?? 0` が「初めて見た」を意味する }%
                 out[cur] := (out[cur] ?? 0) + 1;
-                cur := new str ( );
+                cur := "";
             } fi;
         } else {
             cur.push(s[i] ?? 32);
