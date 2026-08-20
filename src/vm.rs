@@ -77,6 +77,12 @@ pub enum Op {
     /// フレームの深さを積む。`getdepth()`。
     Depth,
     Ret,
+    /// 領域の始まり。**その領域の底を控える。**
+    ///
+    /// 領域は脱出段ではない（C-20）ので、段の底では代用できない——
+    /// `1 + (2)` の `(2)` は被演算子位置の領域であり、
+    /// **そこには既に左辺が積まれている。**
+    RegionBegin,
     /// 領域の終わり。空なら paradox を積む。
     EndRegion(Span),
 
@@ -386,7 +392,12 @@ impl Compiler {
             }
 
             // `( )` は領域を作る。スコープでも脱出段でもない
-            ExprKind::Paren(b) => self.region(b, e.span)?,
+            ExprKind::Paren(b) => {
+                // **被演算子位置の領域は、自分の底を持たねばならない。**
+                // 段の底では足りない——左辺が既に積まれていることがある
+                self.emit(Op::RegionBegin);
+                self.region(b, e.span)?;
+            }
 
             // 裸のブロックは領域・スコープ・**脱出段**の三つ（C-64）
             ExprKind::Block(b) => {
@@ -1193,6 +1204,8 @@ struct Frame {
     stack_base: usize,
     /// このフレームの中の脱出段。**フレーム自身は含まない。**
     stages: Vec<StageState>,
+    /// 開いている領域の底。**段とは別に数える**（C-20：三つは別の単位）
+    regions: Vec<usize>,
     /// `var self` を取るメンバ関数のとき、レシーバのセル。
     /// **レシーバは複製されない**（C-20）ので、返るときに書き戻す。
     self_cell: Option<CellId>,
@@ -1393,6 +1406,7 @@ impl<'a> Vm<'a> {
             cells,
             stack_base: self.stack.len(),
             stages: Vec::new(),
+            regions: Vec::new(),
             self_cell: None,
         });
     }
@@ -1744,9 +1758,14 @@ impl<'a> Vm<'a> {
                     }
                 }
             }
+            Op::RegionBegin => {
+                let b = self.stack.len();
+                self.frames.last_mut().unwrap().regions.push(b);
+            }
             Op::EndRegion(sp) => {
                 // **一つの領域は値を一つしか持てない。** 空なら外界面は paradox
                 let base = self.region_base();
+                self.frames.last_mut().unwrap().regions.pop();
                 if self.stack.len() > base + 1 {
                     return self.err("一つの領域に値が二つある", sp);
                 }
@@ -1846,6 +1865,10 @@ impl<'a> Vm<'a> {
     /// ここから数えて二つ以上あればエラーになる。
     fn region_base(&self) -> usize {
         let f = self.frames.last().unwrap();
+        // **開いている領域があればその底。** 無ければ段の底
+        if let Some(&b) = f.regions.last() {
+            return b;
+        }
         match f.stages.last() {
             Some(l) => l.base,
             None => f.stack_base,
@@ -1968,6 +1991,13 @@ impl<'a> Vm<'a> {
     /// 返り値が `Some` なら、最上位まで抜けて実行が終わったということ。
     fn unwind(&mut self, mut esc: Esc) -> Result<Option<Slot>, RtErr> {
         loop {
+            // **脱出は領域を閉じてから起きる**（C-43）が、飛び越された領域の底は残る。
+            // 積みより上に残った底を捨てる——**領域は開いたまま消えることがある**
+            {
+                let n = self.stack.len();
+                let f = self.frames.last_mut().unwrap();
+                f.regions.retain(|b| *b <= n);
+            }
             let in_stage = !self.frames.last().unwrap().stages.is_empty();
 
             if in_stage {

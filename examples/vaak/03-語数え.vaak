@@ -5,7 +5,7 @@ flow $return = $repeat(break, getdepth());
 
 fn is_space (c : u8) {
     c == 32 || c == 10 || c == 9 || c == 13
-} -> u1;
+} -> bool;
 
 %{ 空白で切って数える。**戻り値は「語 → 回数」の写像** }%
 fn count_words (s : str alias) {

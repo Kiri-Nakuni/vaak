@@ -18,7 +18,7 @@ fn to_int (w : str alias) {
         if (c < 48 || c > 57) $return;
         fi;
         %{ **型は混ぜられない。** `u8` を `i64` にするのは `new` である }%
-        n := n * 10 + new i64 ( c - 48 );
+        n := n * 10 + (c - 48) -> i64;
         i += 1;
     };
     if (neg) 0 - n else n fi
@@ -29,7 +29,7 @@ fn numeric (w : str alias) {
     if (w.len() == 0) $return false; fi;
     let c := w[0] ?? 32;
     if (c == 45) w.len() > 1 else c >= 48 && c <= 57 fi
-} -> u1;
+} -> bool;
 
 %{ 空白で切る }%
 fn split (s : str alias) {

@@ -3,7 +3,7 @@
 
 fn sieve (n : i64) {
     %{ `new` で作る。**`u1` は真偽であって数ではない** }%
-    var mark : u1 array := new u1 array(n + 1, true);
+    var mark : bool array := new u1 array(n + 1, true);
     var count := 0;
 
     nfor (i, 2, n - 1) {

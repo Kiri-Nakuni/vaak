@@ -32,6 +32,26 @@
 
 ## 記録
 
+### 2026-08-21（続き）
+
+- **C-97**：`true` / `false` / `bool` / `E -> T`。
+  `->` は **C-30 で決まっていたのに構文解析器が知らなかった**
+- **例を書いた**（`examples/vaak/`、5 本＋ README＋試験）。
+  **例が VM のバグを二つ見つけた**
+  - **直した**：`1 + (2)` が落ちていた。括弧の領域が自分の底を持っていなかった
+    （`Op::RegionBegin` を足した）
+  - **未解決（S-16）**：`$repeat` の動的な段数＋`??`＋`+=` の三つが揃うと落ちる。
+    `tests/examples.rs` に `#[ignore]` で残してある
+- **S-15**：C-95 の費用を測った。**撤回しない**——界面は 22ns/添字で VM の四分の一。
+  動く添字だけが高い（512 要素で 1340ns）。塞ぐなら `read_at` / `write_at`
+- **Zed**：`vaak-lsp` が見つからない件を直した（WASI の砂場で `std::fs` が効かない）。
+  `cargo install --path .` が要る。**ただし色分けはまだ出ないかもしれない**——
+  Zed が LSP の意味トークンを使わない可能性があり、tree-sitter 文法が要るかもしれない
+- **rtex**：`VAAK_DEBUG=1` で静的エラーの中身が標準エラーに出るようにした
+- **名前空間**：`.claude/worktrees/review-latest-repo-changes-3b7687/NAMESPACE_ROADMAP.md`
+  に**詳細な設計がある**（Phase 0〜8）。実装差分は入っていない（作業木は綺麗）
+- **権利**：rtex は tyti 氏に全部帰属（依頼者の寄与は本人が無いものと認めた）
+
 ### 2026-08-21
 
 - **rtex e-TeX 段 1a**：`\numexpr` `\dimexpr` `\glueexpr` `\muexpr`。枝 `etex-expr`
