@@ -18,14 +18,14 @@
 | 3 | Zed 拡張に LSP を繋ぐ | **済**。`editors/zed/`。文法定義は持たない |
 | 4 | LICENSE（MIT / 有村陽大） | **済**。`LICENSE` `docs/LICENSING.md` |
 | 5 | **STEEL vaak**（LLVM IR スタンドアロン） | **第一段完了**（S-12）。整数・制御・関数。枝 `steel`、`speculative` に併合済み |
-| 6 | e-upTeX 移植可否 | 未 |
+| 6 | e-upTeX 移植可否 | **済**。`rtex/docs/euptex-port-notes.md` に八段の段取り |
 | 7 | e-upTeX 移植 | 未 |
-| 8 | 寸法の鍵語 H / Q / zw / zh（6 が無理でも） | 未 |
+| 8 | 寸法の鍵語 H / Q / zw / zh | **済**。rtex 枝 `jdimen`、試験 7 本 |
 | 9 | LaTeX2e が動くか（7 が済んだら） | 未 |
 | 10 | LuaTeX のコールバック再現（意味論を変えずに） | 方針は **S-11**。実装は凍結解除待ち |
 | 11 | pdfTeX を参考に PDF 直接出力（OTF は後回し、HarfBuzz 不要） | 未 |
-| 12 | Portable vaak（WASM） | 未 |
-| 13 | rtex の名前空間を掴んで枝を切る | 未 |
+| 12 | Portable vaak（WASM） | **済**（S-13）。WASI と素の WASM の二つ。枝 `portable` |
+| 13 | rtex の名前空間を掴んで枝を切る | **飛ばした**。`main` は 2 コミットで名前空間の作業が無い |
 | 14 | rtex vaak の差し込み範囲を増やす＋ほぼゼロ費用か測る | 未 |
 | 15 | 人間向けリファレンス＋付録（最低優先度） | 未 |
 | 16 | 別 CLAUDE からの設計質問二つに答える | 未 |
@@ -33,6 +33,15 @@
 ## 記録
 
 ### 2026-08-21
+
+- **S-13 / Portable vaak**：WASI 版と素の WASM 版。`src/portable.rs` `src/bin/portable.rs`
+  - 素の側は C の呼び出し規約だけ（`wasm-bindgen` を入れない）
+  - **入口を作ったら食い違いが出た**：`if (0)` を型検査器が通し評価器が落としていた。
+    落とす側に寄せた（`u1` は真偽であって数ではない）
+- **rtex 和文寸法**：`Q` `H`（0.25mm ちょうど）と `zw` `zh`（いまは `em` で代用）。試験 7 本
+- **rtex e-upTeX 評価**：八段の段取り。段 1〜3 で e-TeX 相当 → LaTeX2e を試せる。
+  段 8（縦組）だけ別格。**コードは移植せず仕様から書き直す**
+- **rtex の名前空間**：`main` は 2 コミットしかなく、その作業は入っていない。飛ばした
 
 - **S-12 STEEL vaak**：LLVM IR を吐くようにした。`src/steel.rs` `src/bin/steel.rs`
   - 値は `(i1 ok, iN v)`。`-O2` で `i1` が消える——**paradox の費用は残らない**
