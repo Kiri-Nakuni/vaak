@@ -253,6 +253,8 @@ if (c) 1 else 2 fi                    どちらも値を置く。一つの領域
 
   `continue` が値を取れないのは、**周回を次へ進めても値の置き場所が無い**から。
   `continue continue` は有効。`continue 1` はエラー
+- **合成は外側の脱出で決まる。** `break X` は**段数を足す**（被演算子が即時なので）。
+  `continue X` は**足さない**——X は再開した本体の先頭で実行される
 - **`continue` の被演算子から見えるのは、本体の先頭で見えている名前だけ**——
   ループ変数と外側の名前。**本体で宣言された名前は見えない**（まだ束縛されていない）。
   だから**捕獲もクロージャも要らない**
@@ -635,7 +637,7 @@ break break break;              3 段抜ける（入れ子は段を足すだけ�
 $repeat(break, n);              n 段抜ける
 $repeat(break, 0) 5;            5。作用素を一つも重ねない
 continue 1;                     エラー。continue は値を取れない
-continue continue;              よい。二段進めて、そこを次の周回へ
+continue continue;              よい。周回を一つ余分に飛ばす（遅延した continue が先頭で走る）
 break continue;                 エラー。break が終結させた段を continue が再開しようとする
 break outward;                  エラー。outward は脱出を要求する
 break outward 42;               エラー。break 42 と同じなので outward が無意味
