@@ -1381,6 +1381,24 @@ impl Interp {
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
+            // 欄がすべて既定を持つなら、引数を書かなくてよい
+            (ValueType::Named(name), CtorArgs::Positional(a)) if a.is_empty() => {
+                let Some(decl) = self.structs.get(name).cloned() else {
+                    return rt(format!("知らない型 `{name}`"), span);
+                };
+                let mut out = Vec::new();
+                for f in &decl.fields {
+                    let Some(d) = &f.default else {
+                        return rt(format!("欄 `{}` に値が無い", f.name), span);
+                    };
+                    let v = match self.need_value(d)? {
+                        Ok(v) => v,
+                        Err(x) => return Ok(Eval::Escape(x)),
+                    };
+                    out.push((f.name.clone(), coerce(v, Some(&f.ty))));
+                }
+                Ok(Eval::Value(Value::Struct { name: name.clone(), fields: out }))
+            }
             (ValueType::Array(_), CtorArgs::Named(_)) | (_, CtorArgs::Named(_)) => {
                 rt("この型は欄を名前で取らない", span)
             }

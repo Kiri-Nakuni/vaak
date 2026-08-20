@@ -56,6 +56,8 @@ struct Checker {
     flows: HashSet<String>,
     /// 内側から外へ。段送りはこの順に起きる（C-70）。
     stages: Vec<Stage>,
+    /// 名前が見える範囲の上限。**`continue` の被演算子は本体の先頭で見える名前だけ**（C-81）。
+    visible_limit: Option<usize>,
 }
 
 pub fn check(prog: &Program) -> Vec<StaticError> {
@@ -67,6 +69,7 @@ pub fn check(prog: &Program) -> Vec<StaticError> {
         structs: HashMap::new(),
         flows: HashSet::new(),
         stages: vec![Stage { is_loop: false, is_frame: true }],
+        visible_limit: None,
     };
     c.flows.insert("$return".into());
     c.flows.insert("$repeat".into());
@@ -110,7 +113,11 @@ impl Checker {
     }
 
     fn lookup(&self, n: &str) -> Option<(BindKind, bool)> {
-        for s in self.scopes[self.frame_base..].iter().rev() {
+        let end = self.visible_limit.unwrap_or(self.scopes.len()).min(self.scopes.len());
+        if end <= self.frame_base {
+            return None;
+        }
+        for s in self.scopes[self.frame_base..end].iter().rev() {
             if let Some(b) = s.get(n) {
                 return Some(*b);
             }
@@ -343,9 +350,10 @@ impl Checker {
             ExprKind::NFor { name, start, count, body } => {
                 self.operand(start, env);
                 self.operand(count, env);
+                // ループ変数は**本体の先頭で見えている**。本体の局所とは別のスコープに置く
                 self.scopes.push(HashMap::new());
                 self.declare(name, BindKind::Let, false);
-                self.loop_body_inner(body, env);
+                self.loop_body(body, env);
                 self.scopes.pop();
                 Places::Value
             }
@@ -696,8 +704,18 @@ impl Checker {
                     None => (Some(1), Some(EKind2::Break), base),
                 }
             }
-            // `continue X` は**足さない**。X は再開した本体の先頭で走る
-            EscapeKind::Continue => (Some(1), Some(EKind2::Continue), 0),
+            // `continue X` は**足さない**。X は再開した本体の先頭で走る（C-92）。
+            // したがって**本体の先頭で見えている名前しか見えない**（C-81）
+            EscapeKind::Continue => {
+                if let Some(Operand::Escape(inner)) = &esc.operand {
+                    let saved = self.visible_limit;
+                    // 本体のスコープを外す。ループ変数と外側の名前だけが見える
+                    self.visible_limit = Some(self.scopes.len().saturating_sub(1));
+                    self.escape(inner, env);
+                    self.visible_limit = saved;
+                }
+                (Some(1), Some(EKind2::Continue), 0)
+            }
             EscapeKind::Flow { name, args } => {
                 if !self.flows.contains(name) {
                     self.err(format!("知らない作用素式 `{name}`"), esc.span);
