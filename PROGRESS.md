@@ -22,7 +22,8 @@
 | P2 | AST とパーサ | **済** | `src/ast.rs` `src/parser.rs`。`tests/parse.rs` 18 件 |
 | P3 | 値・セル・アリーナ | **済** | `src/value.rs`。領域ごとのアリーナ（mark/release） |
 | P4 | 評価器 | **済** | `src/interp.rs`。`tests/semantics.rs` 48 件 |
-| P5 | 静的検査器 | **済** | `src/check.rs`。`tests/check.rs` 17 件 |
+| P5 | 静的検査器 | **済** | `src/check.rs`。`tests/check.rs` 19 件 |
+| P5b | 型検査 | **着手** | 検査器に型を足す |
 | P6 | 標準ライブラリ | **一部済** | `$return` `$repeat` `getdepth()` `.len()` `.push()` |
 | P7 | ホスト界面 | **着手** | |
 | P8 | 意味論テスト | **済** | プローブの全項目が `tests/` にある（lex 17 / parse 18 / semantics 48 / check 17）|
@@ -36,12 +37,13 @@
 
 - **宣言は `;` に包まれる。** `fn f () {} ;` は `Discard(FnDecl)` になるので、
   宣言の収集は `Discard` を剥がしてから見る。ここで一度落ちた
-- **`outward` は近似実装。** `EscapeVal.outward` を「越えてよいフレーム数」として持つ。
-  C-70 の「書いた `break` の段送りに掛かる」を厳密には表していない。
-  文書化された例（`break outward break 1`）は正しく動く
+- **`outward` は厳密。** `EscapeVal.outward` は**ビット列**で、
+  「何回目の段送りが越えるか」を持つ（C-70 どおり）。
+  実行時も検査器も位置で見る。**空振りの `outward` は静的エラー**
 - **`loop` の反復回数**は `i64` で折り返す。無限ループはテストに書けないので、
   `break` で抜ける形でしか確かめていない
-- 型の**検査**はしていない（C-31 どおり）。`coerce` が注釈からリテラルの型を決めるだけ
+- **型の検査はまだしていない**（C-31 どおりではあるが、独立検査器としては未完）。
+  `coerce` が注釈からリテラルの型を決めるだけ。**P5b として足す**
 
 ## P5 で分かったこと
 

@@ -33,8 +33,11 @@ pub struct EscapeVal {
     pub kind: EKind,
     /// 残りの段数。**段送りは書いた順（左から右）に起きる**（C-70）。
     pub stages: u32,
-    /// 越えてよいフレームの数。`outward` が与える。
-    pub outward: u32,
+    /// **どの段送りがフレームを越えるか。** ビット 0 が次の段送り。
+    ///
+    /// `outward` は**書いた `break` の段送りに掛かる**（C-70）ので、
+    /// 「何回越えるか」ではなく「何回目が越えるか」を持たねばならない。
+    pub outward: u64,
     pub payload: Option<Value>,
     /// `continue` の**遅延した被演算子**（C-73）。再開した本体の先頭で実行される。
     pub deferred: Option<Box<Escape>>,
@@ -383,7 +386,12 @@ impl Interp {
     fn pass_stage(&mut self, r: Eval, is_loop: bool, span: Span) -> R<Eval> {
         let Eval::Escape(mut x) = r else { return Ok(r) };
         if x.stages > 1 {
+            // この段送りに `outward` が掛かっているなら、フレームでなければ空振り
+            if x.outward & 1 != 0 {
+                return rt("`outward` がフレームを越えていない（空振り）", x.span);
+            }
             x.stages -= 1;
+            x.outward >>= 1;
             return Ok(Eval::Escape(x));
         }
         match x.kind {
@@ -408,15 +416,16 @@ impl Interp {
     fn make_escape(&mut self, esc: &Escape) -> R<Eval> {
         match &esc.kind {
             EscapeKind::Break { outward } => {
-                let base = if *outward { 1 } else { 0 };
+                let base = if *outward { 1u64 } else { 0 };
                 match &esc.operand {
                     // 被演算子が脱出なら**即時に合成する**。段数を足す（C-92）
                     Some(Operand::Escape(inner)) => {
                         let Eval::Escape(mut x) = self.make_escape(inner)? else {
                             return rt("脱出のはず", esc.span);
                         };
+                        // 内側の印は一つ後ろへずれる。**この `break` が最初の段送りになる**
                         x.stages += 1;
-                        x.outward += base;
+                        x.outward = (x.outward << 1) | base;
                         Ok(Eval::Escape(x))
                     }
                     // 値なら**即時に評価する**（C-73）
@@ -1256,7 +1265,11 @@ impl Interp {
         Ok(match out {
             Eval::Escape(mut x) => {
                 if x.stages > 1 {
+                    if x.outward & 1 != 0 {
+                        return rt("`outward` がフレームを越えていない（空振り）", x.span);
+                    }
                     x.stages -= 1;
+                    x.outward >>= 1;
                     BodyOut::Escape(x)
                 } else {
                     match x.kind {
@@ -1491,9 +1504,10 @@ impl Interp {
         Ok(match r {
             Eval::Escape(mut x) => {
                 if x.stages > 1 {
-                    if x.outward > 0 {
-                        x.outward -= 1;
+                    // **この段送りに `outward` が掛かっているときだけ越えられる**
+                    if x.outward & 1 != 0 {
                         x.stages -= 1;
+                        x.outward >>= 1;
                         Eval::Escape(x)
                     } else {
                         return rt("フレームを越える脱出", x.span);

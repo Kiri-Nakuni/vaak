@@ -167,3 +167,23 @@ let p := new Point ( x := 1, y := 2 );
 let pos := find(xs, 42) ?? -1;
 ");
 }
+
+#[test]
+fn outward_は書いた_break_の段送りに掛かる() {
+    // 深さ 1（関数本体の直下）なら、一つ目の break がフレームを越える
+    ok("fn f () { break outward break 1; };
+        loop { f(); };");
+    // 深さ 2（裸のブロックの中）では、一つ目はブロックを抜けるだけ。空振り
+    bad(
+        "fn f () { { break outward break 1; }; };",
+        "空振り",
+    );
+    // 深さ 2 からフレームを越えるなら、二つ目に書く
+    ok("fn f () { { break break outward break 1; }; };
+        loop { f(); };");
+}
+
+#[test]
+fn outward_無しでフレームは越えられない() {
+    bad("fn f () { break break; };", "フレームを越える");
+}

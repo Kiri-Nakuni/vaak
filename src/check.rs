@@ -633,45 +633,71 @@ impl Checker {
     }
 
     /// 段数を静的に数える。**定数個並んでいる場合だけ**（C-88）。
+    ///
+    /// `outward` は**書いた `break` の段送りに掛かる**（C-70）ので、
+    /// 「何回目が越えるか」を位置で見る。**空振りの `outward` は静的エラー。**
     fn escape(&mut self, esc: &Escape, env: Env) {
-        let (stages, kind, outward) = self.escape_shape(esc, env);
+        let (stages, kind, mask) = self.escape_shape(esc, env);
         let Some(stages) = stages else { return }; // 動的なら実行時に検査する
-        if outward {
-            return; // `outward` を含む脱出の段数は静的に検査できない
-        }
         if stages == 0 {
             return;
         }
-        if stages > self.depth() {
-            self.err("フレームを越える脱出", esc.span);
-            return;
-        }
-        // `continue` の**行き先がループでなければ、再開できるものが無い**（C-72）
-        if kind == Some(EKind2::Continue) {
-            let target = self.stages.len() - stages as usize;
-            if !self.stages[target].is_loop {
-                self.err("再開できるものが無い（抜けた先がループではない）", esc.span);
+        // 内側から順に段を送る
+        let mut here = self.stages.len();
+        for k in 0..stages {
+            if here == 0 {
+                self.err("段が足りない", esc.span);
+                return;
             }
+            let st = self.stages[here - 1];
+            let is_last = k + 1 == stages;
+            let crosses = (mask >> k) & 1 != 0;
+
+            if crosses && !st.is_frame {
+                self.err("`outward` がフレームを越えていない（空振り）", esc.span);
+                return;
+            }
+            if !is_last {
+                // 通り抜ける段。フレームなら `outward` が要る
+                if st.is_frame && !crosses {
+                    self.err("フレームを越える脱出", esc.span);
+                    return;
+                }
+                // フレームを越えた先の段数は**呼び出し位置による**ので、ここで打ち切る
+                if crosses {
+                    return;
+                }
+            } else {
+                // 行き先。`continue` はループでなければ再開できるものが無い（C-72）
+                if kind == Some(EKind2::Continue) && !st.is_loop {
+                    self.err("再開できるものが無い（抜けた先がループではない）", esc.span);
+                }
+            }
+            here -= 1;
         }
     }
 
     /// 脱出の形。段数が静的に決まらなければ `None`。
-    fn escape_shape(&mut self, esc: &Escape, env: Env) -> (Option<u32>, Option<EKind2>, bool) {
+    /// 第三の値は**どの段送りがフレームを越えるか**のビット列（ビット 0 が最初）。
+    fn escape_shape(&mut self, esc: &Escape, env: Env) -> (Option<u32>, Option<EKind2>, u64) {
         match &esc.kind {
-            EscapeKind::Break { outward } => match &esc.operand {
-                // `break X` は**段数を足す**（C-92）
-                Some(Operand::Escape(inner)) => {
-                    let (s, k, o) = self.escape_shape(inner, env);
-                    (s.map(|x| x + 1), k, o || *outward)
+            EscapeKind::Break { outward } => {
+                let base = if *outward { 1u64 } else { 0 };
+                match &esc.operand {
+                    // `break X` は**段数を足す**（C-92）。内側の印は一つ後ろへずれる
+                    Some(Operand::Escape(inner)) => {
+                        let (s, k, m) = self.escape_shape(inner, env);
+                        (s.map(|x| x + 1), k, (m << 1) | base)
+                    }
+                    Some(Operand::Value(v)) => {
+                        self.operand(v, env);
+                        (Some(1), Some(EKind2::Break), base)
+                    }
+                    None => (Some(1), Some(EKind2::Break), base),
                 }
-                Some(Operand::Value(v)) => {
-                    self.operand(v, env);
-                    (Some(1), Some(EKind2::Break), *outward)
-                }
-                None => (Some(1), Some(EKind2::Break), *outward),
-            },
+            }
             // `continue X` は**足さない**。X は再開した本体の先頭で走る
-            EscapeKind::Continue => (Some(1), Some(EKind2::Continue), false),
+            EscapeKind::Continue => (Some(1), Some(EKind2::Continue), 0),
             EscapeKind::Flow { name, args } => {
                 if !self.flows.contains(name) {
                     self.err(format!("知らない作用素式 `{name}`"), esc.span);
@@ -689,9 +715,9 @@ impl Checker {
                 }
                 // `$return` は `getdepth()` が字句的に決まるので静的
                 if name == "$return" {
-                    return (Some(self.depth()), Some(EKind2::Break), false);
+                    return (Some(self.depth()), Some(EKind2::Break), 0);
                 }
-                (None, None, false)
+                (None, None, 0)
             }
         }
     }
