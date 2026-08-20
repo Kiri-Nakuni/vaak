@@ -159,18 +159,30 @@ impl Host {
 
         // **木を辿る実装が参照実装である**（S-5）。VM は差し替えで選ぶ
         let out = if self.use_vm {
-            let p = match crate::vm::compile(&prog) {
+            let p = match crate::vm::compile_with_host(&prog, &exposed) {
                 Ok(p) => p,
                 Err(e) => return Outcome::Static(vec![e.msg]),
             };
-            // VM はホストの名前をまだ受け取れない
-            if !exposed.is_empty() {
-                return Outcome::Static(vec![
-                    "VM はホストの名前をまだ受け取れない".into()
-                ]);
+            let values: Vec<Value> = self
+                .bindings
+                .iter()
+                .filter(|(_, _, live)| *live)
+                .map(|(_, b, _)| b.read())
+                .collect();
+            match crate::vm::run_program_with_host(&p, values) {
+                Ok((ev, after)) => {
+                    let mut it = after.into_iter();
+                    for (_, b, live) in self.bindings.iter_mut() {
+                        if *live {
+                            if let Some(v) = it.next() {
+                                b.write(&v);
+                            }
+                        }
+                    }
+                    Ok(ev)
+                }
+                Err(e) => Err(crate::interp::RuntimeError { msg: e.msg, span: e.span }),
             }
-            crate::vm::run_program(&p)
-                .map_err(|e| crate::interp::RuntimeError { msg: e.msg, span: e.span })
         } else {
             let mut it = Interp::new();
             for (name, b, live) in &self.bindings {

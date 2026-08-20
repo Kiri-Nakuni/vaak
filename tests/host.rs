@@ -100,3 +100,44 @@ fn s4_最上位の外界面を受け取る() {
     // 中身が空で終わればホストに委ねる
     assert!(matches!(h.run("var x := 1;"), Outcome::Paradox { .. } | Outcome::Empty));
 }
+
+/// **VM でも同じ結果になる。** ホストの名前を受け取れるようになった。
+#[test]
+fn s4_vm_でもホストの名前を受け取る() {
+    for use_vm in [false, true] {
+        let mut h = Host::new();
+        h.use_vm = use_vm;
+        h.expose_value("n", Value::I64(1));
+        let out = h.run("n := n + 41; n");
+        match out {
+            Outcome::Value(v) => assert_eq!(v.show(), "42", "use_vm={use_vm}"),
+            other => panic!("use_vm={use_vm}: {other:?}"),
+        }
+        match h.get("n").map(|b| b.read()) {
+            Some(Value::I64(v)) => assert_eq!(v, 42, "use_vm={use_vm}"),
+            other => panic!("use_vm={use_vm}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn s4_vm_でも配列を書き換えられる() {
+    for use_vm in [false, true] {
+        let mut h = Host::new();
+        h.use_vm = use_vm;
+        h.expose_value(
+            "count",
+            Value::Array {
+                elem: ValueType::I32,
+                items: vec![Value::I32(0); 4],
+            },
+        );
+        h.run("count[2] := 7;");
+        match h.get("count").map(|b| b.read()) {
+            Some(Value::Array { items, .. }) => {
+                assert_eq!(items[2].as_int(), Some(7), "use_vm={use_vm}")
+            }
+            other => panic!("use_vm={use_vm}: {other:?}"),
+        }
+    }
+}

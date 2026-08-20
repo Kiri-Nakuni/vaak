@@ -54,6 +54,13 @@ pub enum Op {
     MakeStruct(u32, u16),
     Index(Span),
     Field(u32, Span),
+    /// 名前への添字を**一命令で**読む。**`[]` はアクセスであり複製しない**（C-20）——
+    /// 集合体をスタックへ写さず、セルから要素だけを取る。
+    LoadIndex(u16, Span),
+    /// 名前の欄を一命令で読む。同上。
+    LoadField(u16, u32, Span),
+    /// 名前の長さを一命令で。集合体を写さない。
+    LoadLen(u16, Span),
     /// 経路への書き込み。深さは添字・欄の列。
     SetIndex(Span),
     SetField(u32, Span),
@@ -100,6 +107,9 @@ pub struct Chunk {
     pub params: Vec<(u16, bool)>,
     /// メンバ関数のとき、第一引数が `var self` か（S-1）。
     pub self_is_var: bool,
+    /// **ホストが見せている名前**の枠（S-4）。最上位の塊にだけ入る。
+    /// 走らせる前に値を入れ、走り終わってから読み出す。
+    pub host_slots: Vec<u16>,
     pub span: Span,
 }
 
@@ -123,6 +133,17 @@ pub struct CompileError {
 }
 
 pub fn compile(prog: &Program) -> Result<Program2, CompileError> {
+    compile_with_host(prog, &[])
+}
+
+/// ホストが見せている名前を添えて組む（S-4）。
+///
+/// **名前は最上位の枠として先に取る。** 走らせる前に値を入れれば、
+/// スクリプトからは最初から見えている状態で始まる。
+pub fn compile_with_host(
+    prog: &Program,
+    host: &[(String, ValueType)],
+) -> Result<Program2, CompileError> {
     let mut c = Compiler {
         out: Program2::default(),
         chunk: Chunk::default(),
@@ -153,6 +174,11 @@ pub fn compile(prog: &Program) -> Result<Program2, CompileError> {
     }
     // 最上位。**領域でありスコープでありフレームである**
     c.chunk = Chunk::default();
+    // ホストの名前を先に枠へ。**スクリプトからは最初から見えている**
+    for (n, _) in host {
+        let slot = c.slot(n);
+        c.chunk.host_slots.push(slot);
+    }
     c.region(&prog.body, Span::NONE)?;
     c.emit(Op::Ret);
     c.out.chunks[0] = std::mem::take(&mut c.chunk);
@@ -379,12 +405,28 @@ impl Compiler {
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, e.span)?,
 
             ExprKind::Field { base, name } => {
+                let n = self.name_idx(name);
+                // 名前の欄なら一命令で。**複製しない**（C-20）
+                if let ExprKind::Name(v) = &base.kind {
+                    if let Some(slot) = self.lookup(v) {
+                        self.emit(Op::LoadField(slot, n, e.span));
+                        return Ok(());
+                    }
+                }
                 self.expr(base)?;
                 self.emit(Op::NeedValue(base.span));
-                let n = self.name_idx(name);
                 self.emit(Op::Field(n, e.span));
             }
             ExprKind::Index { base, index } => {
+                // 名前への添字なら一命令で。**複製しない**（C-20）
+                if let ExprKind::Name(v) = &base.kind {
+                    if let Some(slot) = self.lookup(v) {
+                        self.expr(index)?;
+                        self.emit(Op::NeedValue(index.span));
+                        self.emit(Op::LoadIndex(slot, e.span));
+                        return Ok(());
+                    }
+                }
                 self.expr(base)?;
                 self.emit(Op::NeedValue(base.span));
                 self.expr(index)?;
@@ -649,6 +691,15 @@ impl Compiler {
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Result<(), CompileError> {
         // メンバ関数。レシーバは経路でよい（C-64）
         if let ExprKind::Field { base, name } = &callee.kind {
+            // `x.len()` は長さだけ要る。**集合体を写さない**
+            if name == "len" && args.is_empty() {
+                if let ExprKind::Name(v) = &base.kind {
+                    if let Some(slot) = self.lookup(v) {
+                        self.emit(Op::LoadLen(slot, span));
+                        return Ok(());
+                    }
+                }
+            }
             self.expr(base)?;
             self.emit(Op::NeedValue(base.span));
             for a in args {
@@ -1125,13 +1176,40 @@ pub struct Vm<'a> {
 
 /// 実行の結果。木を辿る実装と同じ形（`interp::Eval` に合わせる）。
 pub fn run_program(p: &Program2) -> Result<crate::interp::Eval, RtErr> {
+    Ok(run_program_with_host(p, Vec::new())?.0)
+}
+
+/// ホストの値を渡して走らせ、**走り終わった値を返す**（S-4）。
+///
+/// 返る `Vec<Value>` は渡した順に対応する。**変わったかどうかはホストが見る。**
+pub fn run_program_with_host(
+    p: &Program2,
+    host: Vec<Value>,
+) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
     let mut vm = Vm { p, arena: Arena::new(), stack: Vec::new(), frames: Vec::new() };
+    // ホストの値をセルに置き、最上位の枠へ結び付ける
+    let cells: Vec<CellId> = host.into_iter().map(|v| vm.arena.alloc(Some(v))).collect();
     vm.push_frame(p.top, Vec::new(), 1);
+    {
+        let slots = p.chunks[p.top as usize].host_slots.clone();
+        let f = vm.frames.last_mut().unwrap();
+        for (i, s) in slots.iter().enumerate() {
+            if let Some(c) = cells.get(i) {
+                f.cells[*s as usize] = *c;
+            }
+        }
+    }
     let out = vm.run()?;
-    Ok(match out {
+    // 走り終わってから**取り出す**。写さない——セルはもう要らない
+    let after: Vec<Value> = cells
+        .iter()
+        .map(|c| vm.arena.take(*c).unwrap_or(Value::I64(0)))
+        .collect();
+    let ev = match out {
         Slot::Value(v) => crate::interp::Eval::Value(v),
         Slot::Paradox(sp) => crate::interp::Eval::Paradox(sp),
-    })
+    };
+    Ok((ev, after))
 }
 
 impl<'a> Vm<'a> {
@@ -1357,6 +1435,41 @@ impl<'a> Vm<'a> {
                     Some(v) => self.stack.push(Slot::Value(v)),
                     None => return self.err(format!("欄 `{name}` が無い"), sp),
                 }
+            }
+            Op::LoadIndex(slot, sp) => {
+                let i = self.pop().value(sp)?;
+                let c = self.cell(slot);
+                let Some(coll) = self.arena.get(c) else {
+                    return self.err("まだ束縛されていない", sp);
+                };
+                match crate::interp::get_index(coll, &i) {
+                    Some(v) => self.stack.push(Slot::Value(v)),
+                    None => self.stack.push(Slot::Paradox(sp)),
+                }
+            }
+            Op::LoadField(slot, ni, sp) => {
+                let name = self.p.chunks[self.cur()].names[ni as usize].clone();
+                let c = self.cell(slot);
+                let Some(v) = self.arena.get(c) else {
+                    return self.err("まだ束縛されていない", sp);
+                };
+                match crate::interp::get_field(v, &name) {
+                    Some(v) => self.stack.push(Slot::Value(v)),
+                    None => return self.err(format!("欄 `{name}` が無い"), sp),
+                }
+            }
+            Op::LoadLen(slot, sp) => {
+                let c = self.cell(slot);
+                let Some(v) = self.arena.get(c) else {
+                    return self.err("まだ束縛されていない", sp);
+                };
+                let n = match v {
+                    Value::Array { items, .. } => items.len(),
+                    Value::Str(s) => s.len(),
+                    Value::Map { entries, .. } => entries.len(),
+                    _ => return self.err("`len` は集合体にしか使えない", sp),
+                };
+                self.stack.push(Slot::Value(Value::I64(n as i64)));
             }
             Op::Index(sp) => {
                 let i = self.pop().value(sp)?;

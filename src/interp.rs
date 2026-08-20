@@ -130,10 +130,10 @@ impl Interp {
         self.declare(name, Binding { cell, kind: BindKind::Var, is_alias: false });
     }
 
-    /// 走り終わったあと、ホストのセルの値を読む。
-    pub fn host_value(&self, name: &str) -> Option<Value> {
-        let b = self.scopes.first()?.vars.get(name)?;
-        self.arena.get(b.cell).cloned()
+    /// 走り終わったあと、ホストのセルの値を**取り出す**。写さない。
+    pub fn host_value(&mut self, name: &str) -> Option<Value> {
+        let cell = self.scopes.first()?.vars.get(name)?.cell;
+        self.arena.take(cell)
     }
 
     /// プログラムを走らせ、最上位の外界面を返す。
@@ -1526,6 +1526,18 @@ impl Interp {
 
     /// `.` は**アクセスであり複製しない**（C-20）。ここでは値を読むだけ。
     fn field(&mut self, base: &Expr, name: &str, span: Span) -> R<Eval> {
+        // **`.` はアクセスであり複製しない**（C-20）
+        if let ExprKind::Name(n) = &base.kind {
+            let Some(b) = self.lookup(n).cloned() else {
+                return rt(format!("知らない名前 `{n}`"), base.span);
+            };
+            if let Some(v) = self.arena.get(b.cell) {
+                return match step_get(v, &Step::Field(name.to_string())) {
+                    Some(v) => Ok(Eval::Value(v)),
+                    None => rt(format!("欄 `{name}` が無い"), span),
+                };
+            }
+        }
         let b = match self.need_value(base)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
@@ -1537,6 +1549,34 @@ impl Interp {
     }
 
     fn index(&mut self, base: &Expr, index: &Expr, span: Span) -> R<Eval> {
+        // **`[]` はアクセスであり複製しない**（C-20）。
+        // 名前への添字なら、セルから**要素だけ**を取る——集合体ごと写さない
+        if let ExprKind::Name(n) = &base.kind {
+            let i = match self.need_value(index)? {
+                Ok(v) => v,
+                Err(x) => return Ok(Eval::Escape(x)),
+            };
+            let Some(b) = self.lookup(n).cloned() else {
+                return rt(format!("知らない名前 `{n}`"), base.span);
+            };
+            if let Some(coll) = self.arena.get(b.cell) {
+                let step = match (coll, &i) {
+                    (Value::Map { .. }, _) => match i.as_key() {
+                        Some(k) => Step::Key(k),
+                        None => return rt("写像の鍵にできない値", index.span),
+                    },
+                    _ => match i.as_int() {
+                        Some(x) => Step::Index(x),
+                        None => return rt("添字にできない値", index.span),
+                    },
+                };
+                return Ok(match step_get(coll, &step) {
+                    Some(v) => Eval::Value(v),
+                    None => Eval::Paradox(span),
+                });
+            }
+            return rt(format!("`{n}` はまだ束縛されていない"), base.span);
+        }
         let b = match self.need_value(base)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
@@ -1767,6 +1807,24 @@ impl Interp {
 
     /// 標準ライブラリのメンバ関数（S-3）。**言語が知るのはバイトまで。**
     fn builtin_method(&mut self, base: &Expr, name: &str, args: &[Expr], span: Span) -> R<Eval> {
+        // `len` は長さだけ要る。**集合体を写さない**
+        if name == "len" && args.is_empty() {
+            if let ExprKind::Name(n) = &base.kind {
+                if let Some(b) = self.lookup(n).cloned() {
+                    if let Some(v) = self.arena.get(b.cell) {
+                        let len = match v {
+                            Value::Array { items, .. } => Some(items.len()),
+                            Value::Str(s) => Some(s.len()),
+                            Value::Map { entries, .. } => Some(entries.len()),
+                            _ => None,
+                        };
+                        if let Some(len) = len {
+                            return Ok(Eval::Value(Value::I64(len as i64)));
+                        }
+                    }
+                }
+            }
+        }
         // ---- 読むだけのもの ----
         if matches!(name, "len" | "has" | "keys" | "utf8_len" | "utf8_at" | "utf8_valid") {
             let b = match self.need_value(base)? {

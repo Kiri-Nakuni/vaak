@@ -187,6 +187,14 @@ impl Arena {
         }
     }
 
+    /// 値を**取り出す**。写さない。
+    ///
+    /// 走り終わってホストへ返すときに使う——**セルはもう要らない**ので、
+    /// 複製する理由が無い。
+    pub fn take(&mut self, id: CellId) -> Option<Value> {
+        self.cells.get_mut(id.0 as usize).and_then(|v| v.take())
+    }
+
     pub fn is_live(&self, id: CellId) -> bool {
         (id.0 as usize) < self.cells.len()
     }
