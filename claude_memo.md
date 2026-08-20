@@ -17,7 +17,7 @@
 | 2 | LSP（高優先度） | **済**。`src/lsp.rs` `src/json.rs` `src/bin/vaak-lsp.rs` |
 | 3 | Zed 拡張に LSP を繋ぐ | **済**。`editors/zed/`。文法定義は持たない |
 | 4 | LICENSE（MIT / 有村陽大） | **済**。`LICENSE` `docs/LICENSING.md` |
-| 5 | **STEEL vaak**（LLVM IR スタンドアロン） | **途中**。`src/steel.rs` は骨だけ |
+| 5 | **STEEL vaak**（LLVM IR スタンドアロン） | **第一段完了**（S-12）。整数・制御・関数。枝 `steel`、`speculative` に併合済み |
 | 6 | e-upTeX 移植可否 | 未 |
 | 7 | e-upTeX 移植 | 未 |
 | 8 | 寸法の鍵語 H / Q / zw / zh（6 が無理でも） | 未 |
@@ -33,6 +33,14 @@
 ## 記録
 
 ### 2026-08-21
+
+- **S-12 STEEL vaak**：LLVM IR を吐くようにした。`src/steel.rs` `src/bin/steel.rs`
+  - 値は `(i1 ok, iN v)`。`-O2` で `i1` が消える——**paradox の費用は残らない**
+  - `fib(30)`：参照 5178ms → **3ms**
+  - 差分試験 34 本。**`! 0` の食い違いを見つけた**（参照はビット反転。STEEL を直した）
+  - まだ扱わない：配列・写像・構造体・`str`・浮動小数・`alias`・`flow`・
+    `outward`・被演算子つき `continue`・`new`・`|>`・メンバ関数・ホスト界面
+  - 使い方：`steel prog.vaak` → 実行ファイル、`--emit-ir` で IR
 
 - **C-96**：ホストが見せる名前は関数の中からは見えない。
   理由は C-87（`alias` 引数は同じセルに二つ届かない）が破れるから。
