@@ -293,8 +293,16 @@ impl TypeChecker {
             ExprKind::If(i) => {
                 let mut ty: T = want.cloned();
                 for (c, b) in &i.arms {
-                    // 条件は `u1` 一つの領域
-                    self.expect(c, &ValueType::U1);
+                    // 条件は `u1` 一つの領域。
+                    //
+                    // **求める型を渡さない。** 渡せば整数リテラルが `u1` を名乗り、
+                    // `if (0)` が静的に通ってしまう——そして評価器は落とす（S-13）。
+                    //
+                    // `u1` は真偽であって数ではない。`if (0)` と書きたいなら
+                    // `if (1 == 0)` と書く。**`while` が任意の整数を取るのと分けてある**
+                    if let Some(got) = self.expr(c, None) {
+                        self.unify(&ValueType::U1, &got, c.span);
+                    }
                     let t = self.expr(b, ty.as_ref());
                     match (&ty, t) {
                         (None, Some(t)) => ty = Some(t),

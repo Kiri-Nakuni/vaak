@@ -16,3 +16,4 @@ pub mod vm;
 pub mod json;
 pub mod lsp;
 pub mod steel;
+pub mod portable;
