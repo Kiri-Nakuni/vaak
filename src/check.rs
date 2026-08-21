@@ -289,6 +289,18 @@ impl Checker {
 
             ExprKind::Unary { rhs, .. } => self.operand(rhs, env),
             ExprKind::Binary { op, lhs, rhs } => {
+                // **`|>` は構文の水準の糖衣**（C-15）。`x |> f(a)` は `f(x, a)`——
+                // **検査もそう見なければならない。**
+                // 見なければ引数の数が合わず、`|>` が一切使えなくなる
+                if *op == BinOp::Feed {
+                    let ExprKind::Call { callee, args } = &rhs.kind else {
+                        self.err("`|>` の右は呼び出しでなければならない", rhs.span);
+                        return Places::Value;
+                    };
+                    let mut all = vec![(**lhs).clone()];
+                    all.extend(args.iter().cloned());
+                    return self.call(callee, &all, env, e.span);
+                }
                 // **比較と代入の連鎖は禁じる。混在も禁じる**（C-86）
                 if is_cmp(*op) {
                     if let ExprKind::Binary { op: inner, .. } = &lhs.kind {

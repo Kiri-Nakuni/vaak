@@ -97,6 +97,8 @@ pub struct Steel {
     done: bool,
     /// 文字列定数
     strings: Vec<(String, Vec<u8>)>,
+    /// 組み込みの宣言（`llvm.fabs` など）。**重ねて出さない**
+    decls: Vec<String>,
 }
 
 /// 型の幅。**混ぜられないので、幅は左の被演算子が決める**（実装は `wrap_like` と同じ）。
@@ -116,7 +118,24 @@ fn signed(t: &ValueType) -> bool {
 }
 
 fn ity(t: &ValueType) -> String {
-    format!("i{}", width(t).unwrap_or(64))
+    match t {
+        ValueType::F32 => "float".into(),
+        ValueType::F64 => "double".into(),
+        _ => format!("i{}", width(t).unwrap_or(64)),
+    }
+}
+
+fn is_float(t: &ValueType) -> bool {
+    matches!(t, ValueType::F32 | ValueType::F64)
+}
+
+/// LLVM の浮動小数リテラル。**十進では丸めが入る**ので、ビット列で書く。
+///
+/// `float` も**倍精度のビット列**で書くのが LLVM の流儀である
+/// （その値が単精度で表せることを検証してくれる）。
+fn fbits(v: f64, ty: &ValueType) -> String {
+    let d = if matches!(ty, ValueType::F32) { v as f32 as f64 } else { v };
+    format!("0x{:016X}", d.to_bits())
 }
 
 impl Steel {
@@ -131,6 +150,7 @@ impl Steel {
             fns: HashMap::new(),
             done: false,
             strings: Vec::new(),
+            decls: Vec::new(),
         }
     }
 
@@ -231,6 +251,30 @@ impl Steel {
 
     /// 幅を合わせる。**結果の型は左が決める**（`wrap_like` と同じ）。
     fn conv(&mut self, x: &str, from: &ValueType, to: &ValueType) -> String {
+        // **浮動小数どうし。** 幅が違えば伸ばす／縮める
+        if is_float(from) || is_float(to) {
+            if from == to {
+                return x.to_string();
+            }
+            let (f, t) = (ity(from), ity(to));
+            let r = self.tmp();
+            let op = match (is_float(from), is_float(to)) {
+                (true, true) => {
+                    if matches!(from, ValueType::F32) { "fpext" } else { "fptrunc" }
+                }
+                // **整数と浮動小数は混ぜられない**（検査器が捕らえる）。
+                // ここへ来るのは注釈で明示したときだけ
+                (false, true) => {
+                    if signed(from) { "sitofp" } else { "uitofp" }
+                }
+                (true, false) => {
+                    if signed(to) { "fptosi" } else { "fptoui" }
+                }
+                (false, false) => unreachable!(),
+            };
+            self.emit(&format!("{r} = {op} {f} {x} to {t}"));
+            return r;
+        }
         let (a, b) = (width(from).unwrap_or(64), width(to).unwrap_or(64));
         if a == b {
             return x.to_string();
@@ -263,6 +307,11 @@ impl Steel {
     fn binary(&mut self, op: BinOp, l: Val, r: Val, span: Span) -> R<Val> {
         use BinOp::*;
         let ok = self.both_ok(&l.ok, &r.ok);
+
+        // **浮動小数は別の道。** 型は混ぜられないので左を見れば足りる
+        if is_float(&l.ty) {
+            return self.float_binary(op, l, r, ok, span);
+        }
 
         // 比較は **i64 に伸ばしてから**（`as_int` が i128 で比べるのと同じ順序）
         if matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
@@ -315,6 +364,68 @@ impl Steel {
             }
             Div | Mod => Ok(self.euclid(op == Div, &l.v, &rv, &ty, ok)),
             _ => err("この演算子は STEEL がまだ扱えない", span),
+        }
+    }
+
+    /// 浮動小数の演算。**inf も NaN も、この言語には存在しない**（C-79）。
+    ///
+    /// 演算のあとで有限性を確かめ、有限でなければ **paradox** にする。
+    /// 検査は `fabs` と一度の比較で済む——除算そのものが遅いので、
+    /// **相対的な費用は無視できる。**
+    fn float_binary(&mut self, op: BinOp, l: Val, r: Val, ok: String, span: Span) -> R<Val> {
+        use BinOp::*;
+        let t = ity(&l.ty);
+
+        if matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
+            let p = match op {
+                Lt => "olt",
+                Le => "ole",
+                Gt => "ogt",
+                Ge => "oge",
+                Eq => "oeq",
+                _ => "one",
+            };
+            let x = self.tmp();
+            self.emit(&format!("{x} = fcmp {p} {t} {}, {}", l.v, r.v));
+            return Ok(Val { ok, v: x, ty: ValueType::U1 });
+        }
+
+        let o = match op {
+            Add => "fadd",
+            Sub => "fsub",
+            Mul => "fmul",
+            Div => "fdiv",
+            Mod => "frem",
+            _ => return err("この演算子は浮動小数に使えない", span),
+        };
+        let x = self.tmp();
+        self.emit(&format!("{x} = {o} {t} {}, {}", l.v, r.v));
+        let fin = self.finite(&x, &l.ty);
+        let ok2 = self.both_ok(&ok, &fin);
+        Ok(Val { ok: ok2, v: x, ty: l.ty })
+    }
+
+    /// **有限か。** NaN なら `olt` が偽になるので、これ一つで両方を捕まえる。
+    fn finite(&mut self, x: &str, ty: &ValueType) -> String {
+        let t = ity(ty);
+        let bits = if matches!(ty, ValueType::F32) { "f32" } else { "f64" };
+        self.declare_fabs(bits, &t);
+        let a = self.tmp();
+        self.emit(&format!("{a} = call {t} @llvm.fabs.{bits}({t} {x})"));
+        let f = self.tmp();
+        let inf = if matches!(ty, ValueType::F32) {
+            "0x7FF0000000000000"
+        } else {
+            "0x7FF0000000000000"
+        };
+        self.emit(&format!("{f} = fcmp olt {t} {a}, {inf}"));
+        f
+    }
+
+    fn declare_fabs(&mut self, bits: &str, t: &str) {
+        let d = format!("declare {t} @llvm.fabs.{bits}({t})\n");
+        if !self.decls.contains(&d) {
+            self.decls.push(d);
         }
     }
 
@@ -386,6 +497,12 @@ impl Steel {
     fn nonzero(&mut self, x: &Val) -> String {
         if x.ty == ValueType::U1 {
             return x.v.clone();
+        }
+        if is_float(&x.ty) {
+            let t = ity(&x.ty);
+            let r = self.tmp();
+            self.emit(&format!("{r} = fcmp one {t} {}, 0.0", x.v));
+            return r;
         }
         let w = width(&x.ty).unwrap_or(64);
         let t = self.tmp();
@@ -494,6 +611,18 @@ impl Steel {
                 ty: ValueType::U1,
             })),
 
+            E::Float(t) => {
+                let v: f64 = t.parse().map_err(|_| SteelError {
+                    msg: "浮動小数として読めない".into(),
+                    span: e.span,
+                })?;
+                Ok(Some(Val {
+                    ok: "true".into(),
+                    v: fbits(v, &ValueType::F64),
+                    ty: ValueType::F64,
+                }))
+            }
+
             E::Name(n) => {
                 let Some((p, ty)) = self.lookup(n) else {
                     return err(format!("知らない名前 `{n}`"), e.span);
@@ -535,9 +664,13 @@ impl Steel {
                 match op {
                     UnOp::Pos => Ok(Some(r)),
                     UnOp::Neg => {
-                        let w = width(&r.ty).unwrap_or(64);
                         let t = self.tmp();
-                        self.emit(&format!("{t} = sub i{w} 0, {}", r.v));
+                        if is_float(&r.ty) {
+                            self.emit(&format!("{t} = fneg {} {}", ity(&r.ty), r.v));
+                        } else {
+                            let w = width(&r.ty).unwrap_or(64);
+                            self.emit(&format!("{t} = sub i{w} 0, {}", r.v));
+                        }
                         Ok(Some(Val { ok: r.ok, v: t, ty: r.ty }))
                     }
                     // **`u1` なら論理否定、それ以外はビット反転。**
@@ -560,8 +693,14 @@ impl Steel {
                 if *op == BinOp::Coalesce {
                     return self.coalesce(lhs, rhs, e.span).map(Some);
                 }
+                // **`|>` は構文の水準の糖衣**（C-15）。`x |> f(a)` は `f(x, a)`
                 if *op == BinOp::Feed {
-                    return err("`|>` は STEEL がまだ扱えない", e.span);
+                    let ExprKind::Call { callee, args } = &rhs.kind else {
+                        return err("`|>` の右は呼び出しでなければならない", rhs.span);
+                    };
+                    let mut all = vec![(**lhs).clone()];
+                    all.extend(args.iter().cloned());
+                    return self.call(callee, &all, e.span);
                 }
                 let l = self.expr(lhs)?;
                 let r = self.expr(rhs)?;
@@ -581,8 +720,8 @@ impl Steel {
                         return err("束縛する値が無い", b.span);
                     };
                     let ty = b.ty.as_ref().map(|t| t.value.clone()).unwrap_or(v.ty.clone());
-                    if width(&ty).is_none() {
-                        return err("STEEL はまだ整数しか扱えない", b.span);
+                    if width(&ty).is_none() && !is_float(&ty) {
+                        return err("STEEL はまだ数しか扱えない", b.span);
                     }
                     let conv = self.conv(&v.v.clone(), &v.ty.clone(), &ty);
                     let p = self.declare(&b.name, ty.clone());
@@ -641,6 +780,18 @@ impl Steel {
                 self.escape(x)?;
                 // **脱出の値は paradox**（C-43）。ここから先へは進まない
                 Ok(Some(self.paradox(&ValueType::I64)))
+            }
+
+            // `E -> T` — **領域に型を付ける**（C-30）
+            E::Ascribe { expr, ty } => {
+                let v = self.expr(expr)?;
+                let Some(v) = v else { return err("注釈する値が無い", e.span) };
+                let t = ty.value.clone();
+                if width(&t).is_none() && !is_float(&t) {
+                    return err("STEEL はまだ数しか扱えない", e.span);
+                }
+                let c = self.conv(&v.v.clone(), &v.ty.clone(), &t);
+                Ok(Some(Val { ok: v.ok, v: c, ty: t }))
             }
 
             E::Call { callee, args } => self.call(callee, args, e.span),
@@ -976,8 +1127,8 @@ impl Steel {
             let v = self.expr(a)?;
             let Some(v) = v else { return err("引数に値が無い", a.span) };
             let ty = p.ty.value.clone();
-            if width(&ty).is_none() {
-                return err("STEEL はまだ整数しか扱えない", a.span);
+            if width(&ty).is_none() && !is_float(&ty) {
+                return err("STEEL はまだ数しか扱えない", a.span);
             }
             let c = self.conv(&v.v.clone(), &v.ty.clone(), &ty);
             // **paradox を引数に渡せる。** 型は paradox との直和である
@@ -1012,8 +1163,8 @@ impl Steel {
         let ret = f.ret.as_ref().map(|t| t.value.clone()).unwrap_or(ValueType::I64);
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
-            if width(&p.ty.value).is_none() {
-                return err("STEEL はまだ整数の引数しか扱えない", p.span);
+            if width(&p.ty.value).is_none() && !is_float(&p.ty.value) {
+                return err("STEEL はまだ数の引数しか扱えない", p.span);
             }
             params.push(format!("{} %p{i}, i1 %pok{i}", ity(&p.ty.value)));
         }
