@@ -93,6 +93,8 @@ pub struct Steel {
     scopes: Vec<Scope>,
     stages: Vec<Stage>,
     fns: HashMap<String, FnDecl>,
+    /// 作用素式。**本体は使用位置で読み直される**（C-15）
+    flows: HashMap<String, Escape>,
     /// いまの基本ブロックが終端済みか。**終端の後に命令は置けない**
     done: bool,
     /// 文字列定数
@@ -148,6 +150,7 @@ impl Steel {
             scopes: Vec::new(),
             stages: Vec::new(),
             fns: HashMap::new(),
+            flows: HashMap::new(),
             done: false,
             strings: Vec::new(),
             decls: Vec::new(),
@@ -797,7 +800,11 @@ impl Steel {
             E::Call { callee, args } => self.call(callee, args, e.span),
 
             // **関数の宣言はここでは組まない。** 先に集めてある
-            E::FnDecl(_) | E::StructDecl(_) | E::WrapDecl(_) | E::FlowDecl(_) => Ok(None),
+            E::FlowDecl(d) => {
+                self.flows.insert(d.name.clone(), (*d.body).clone());
+                Ok(None)
+            }
+            E::FnDecl(_) | E::StructDecl(_) | E::WrapDecl(_) => Ok(None),
 
             _ => err("STEEL がまだ扱えない構文", e.span),
         }
@@ -1051,59 +1058,120 @@ impl Steel {
 
     /// 脱出。**段数が静的に分かっていれば `br` 一つになる。**
     fn escape(&mut self, x: &Escape) -> R<()> {
-        // 段数を数える。`break break 5` は二段
-        let mut depth = 0usize;
-        let mut cur = x;
-        let mut payload: Option<&Expr> = None;
-        let mut is_continue = false;
-        loop {
-            match &cur.kind {
-                EscapeKind::Break { outward } => {
-                    if *outward {
-                        return err("`outward` は STEEL がまだ扱えない", cur.span);
-                    }
-                    depth += 1;
-                }
-                EscapeKind::Continue => {
-                    is_continue = true;
-                }
-                EscapeKind::Flow { .. } => {
-                    return err("作用素式は STEEL がまだ扱えない", cur.span)
-                }
-            }
-            match &cur.operand {
-                Some(Operand::Escape(inner)) => {
-                    if is_continue {
-                        return err("`continue` の遅延した被演算子は STEEL がまだ扱えない", cur.span);
-                    }
-                    cur = inner;
-                }
-                Some(Operand::Value(v)) => {
-                    payload = Some(v);
-                    break;
-                }
-                None => break,
-            }
-        }
-
+        let (depth, is_continue, payload) = self.plan(x)?;
         if is_continue {
             // **段を再開させる。** `break` の連なりの分だけ外へ出てから
-            let idx = self.stages.len().checked_sub(depth.max(1)).ok_or(SteelError {
-                msg: "段が足りない".into(),
-                span: x.span,
-            })?;
+            let idx = self
+                .stages
+                .len()
+                .checked_sub(depth.max(1))
+                .ok_or(SteelError { msg: "段が足りない".into(), span: x.span })?;
             let Some(cont) = self.stages[idx].cont.clone() else {
                 return err("`continue` の抜けた先がループではない", x.span);
             };
             self.br(&cont);
             return Ok(());
         }
-
         let p = match payload {
-            Some(e) => self.expr(e)?,
+            Some(e) => self.expr(&e)?,
             None => None,
         };
         self.leave(depth, p)
+    }
+
+    /// 脱出の**段数と積み荷を、組み立て時に決める。**
+    ///
+    /// `flow` の本体は**使用位置で読み直される**（C-15）ので、
+    /// ここで展開する——`getdepth()` が使用位置の深さになるのはそのためである。
+    ///
+    /// 返すのは（段数, 再開か, 積み荷）。
+    fn plan(&mut self, x: &Escape) -> R<(usize, bool, Option<Expr>)> {
+        let inner = |me: &mut Self, x: &Escape| -> R<(usize, bool, Option<Expr>)> {
+            match &x.operand {
+                Some(Operand::Escape(i)) => me.plan(i),
+                Some(Operand::Value(v)) => Ok((0, false, Some(v.clone()))),
+                None => Ok((0, false, None)),
+            }
+        };
+        match &x.kind {
+            EscapeKind::Break { outward } => {
+                if *outward {
+                    return err("`outward` は STEEL がまだ扱えない", x.span);
+                }
+                let (d, c, p) = inner(self, x)?;
+                Ok((d + 1, c, p))
+            }
+            EscapeKind::Continue => {
+                let (d, c, p) = inner(self, x)?;
+                if p.is_some() {
+                    // `continue` は作用素式か虚無しか取らない（C-71）
+                    return err("`continue` の被演算子は作用素式か虚無だけ", x.span);
+                }
+                let _ = c;
+                Ok((d, true, None))
+            }
+            EscapeKind::Flow { name, args } => {
+                if name == "$repeat" {
+                    return self.plan_repeat(args, x);
+                }
+                let Some(body) = self.flows.get(name).cloned() else {
+                    return err(format!("知らない作用素式 `{name}`"), x.span);
+                };
+                // **本体を使用位置で読み直す。** 積み荷は使用位置のもの
+                let (d, c, _) = self.plan(&body)?;
+                let (_, _, p) = inner(self, x)?;
+                Ok((d, c, p))
+            }
+        }
+    }
+
+    /// `$repeat(作用素, 回数)` — **回数が組み立て時に決まれば畳む。**
+    fn plan_repeat(
+        &mut self,
+        args: &[FlowArg],
+        x: &Escape,
+    ) -> R<(usize, bool, Option<Expr>)> {
+        let [FlowArg::Escape(op), FlowArg::Value(n)] = args else {
+            return err("`$repeat` は作用素と回数を取る", x.span);
+        };
+        let Some(times) = self.const_int(n) else {
+            // **動く段数は実行時に決まる**（C-34 の A）。STEEL はまだ持たない
+            return err("`$repeat` の回数が組み立て時に決まらない", n.span);
+        };
+        if times < 0 {
+            return err("`$repeat` の回数が負", n.span);
+        }
+        let (d, c, _) = self.plan(op)?;
+        let (_, _, p) = match &x.operand {
+            Some(Operand::Escape(i)) => self.plan(i)?,
+            Some(Operand::Value(v)) => (0, false, Some(v.clone())),
+            None => (0, false, None),
+        };
+        Ok((d * times as usize, c, p))
+    }
+
+    /// 組み立て時に決まる整数か。**`getdepth()` はここで決まる**（C-23）。
+    fn const_int(&self, e: &Expr) -> Option<i128> {
+        match &e.kind {
+            ExprKind::Int(t) => t.parse().ok(),
+            ExprKind::Paren(v) if v.len() == 1 => self.const_int(&v[0]),
+            ExprKind::Call { callee, args } if args.is_empty() => {
+                match &callee.kind {
+                    ExprKind::Name(n) if n == "getdepth" => Some(self.stages.len() as i128),
+                    _ => None,
+                }
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let (a, b) = (self.const_int(lhs)?, self.const_int(rhs)?);
+                match op {
+                    BinOp::Add => Some(a + b),
+                    BinOp::Sub => Some(a - b),
+                    BinOp::Mul => Some(a * b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1211,7 +1279,10 @@ pub fn compile(prog: &Program) -> R<String> {
     let mut s = Steel::new();
 
     // 関数は**スコープ全体で見える**（C-36）ので、先に集める
-    collect(&prog.body, &mut s.fns);
+    let (mut fns, mut flows) = (HashMap::new(), HashMap::new());
+    collect(&prog.body, &mut fns, &mut flows);
+    s.fns = fns;
+    s.flows = flows;
 
     let mut out = String::new();
     out.push_str("; Vaak — STEEL（LLVM IR）\n");
@@ -1252,12 +1323,22 @@ pub fn compile(prog: &Program) -> R<String> {
     Ok(out)
 }
 
-fn collect(items: &[Expr], fns: &mut HashMap<String, FnDecl>) {
+/// **宣言はスコープ全体で見える**（C-36）ので、先に集める。
+///
+/// 作用素式も同じである——関数の本体から使えなければ `$return` が書けない。
+fn collect(
+    items: &[Expr],
+    fns: &mut HashMap<String, FnDecl>,
+    flows: &mut HashMap<String, Escape>,
+) {
     for e in items {
         match &e.kind {
-            ExprKind::Discard(Some(inner)) => collect(std::slice::from_ref(inner), fns),
+            ExprKind::Discard(Some(inner)) => collect(std::slice::from_ref(inner), fns, flows),
             ExprKind::FnDecl(f) if f.owner.is_none() => {
                 fns.insert(f.name.clone(), f.clone());
+            }
+            ExprKind::FlowDecl(d) => {
+                flows.insert(d.name.clone(), (*d.body).clone());
             }
             _ => {}
         }
