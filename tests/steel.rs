@@ -121,3 +121,51 @@ t!(getdepthは使用位置で決まる,
    "flow $return = $repeat(break, getdepth());
     fn f () { { { $return 5; }; }; 0 } -> i64; f()");
 t!(repeatの回数は式でよい, "loop { { { break $repeat(break, 1 + 1) 6; }; }; }");
+
+// ===== 第三段：集合体 =====
+
+t!(配列リテラル, "let xs := [ 2, 3, 5, 7 ]; xs[2]");
+t!(配列の長さ, "let xs := [ 2, 3, 5, 7 ]; xs.len()");
+t!(範囲外は畳まれる, "let xs := [ 1 ]; xs[9] ?? 42");
+t!(負の添字も畳まれる, "let xs := [ 1 ]; xs[0 - 1] ?? 42");
+t!(newで作る, "var a : i64 array := new i64 array(5, 7); a[3]");
+t!(newの既定は零, "var a : i64 array := new i64 array(3, 0); a[1] + 1");
+t!(要素に書く, "var a := [1,2,3]; a[1] := 9; a[1]");
+t!(合計する, "var s := 0; let xs := [1,2,3,4]; nfor (i,0,xs.len()) { s += xs[i]; }; s");
+t!(深く複製する, "var a := [1,2,3]; var b := a; b[0] := 9; a[0]");
+t!(複製した方は変わる, "var a := [1,2,3]; var b := a; b[0] := 9; b[0]");
+t!(aliasで受ければ写さない,
+   "fn sum (a : i64 array alias) { var s := 0; nfor (i,0,a.len()) { s += a[i]; }; s } -> i64;
+    let xs := [1,2,3,4]; sum(xs)");
+t!(aliasで書き換えると元も変わる,
+   "fn bump (var a : i64 array alias) { a[0] := 9; } -> i64;
+    var xs := [1,2]; bump(xs); xs[0]");
+t!(値で受ければ元は変わらない,
+   "fn bump (var a : i64 array) { a[0] := 9; } -> i64;
+    var xs := [1,2]; bump(xs); xs[0]");
+t!(配列を返す, "fn mk () { [ 3, 1, 4 ] } -> i64 array; let a := mk(); a[0] + a[2]");
+t!(文字列の長さ, "let s := \"abcd\"; s.len()");
+t!(文字列の要素, "let s := \"abcd\"; s[1] -> i64");
+t!(文字列も深く複製する, "var s := \"ab\"; var t := s; t[0] := 122; s[0] -> i64");
+t!(u8の配列, "var a : u8 array := new u8 array(3, 200); (a[0] -> i64) + 1");
+t!(真偽の配列, "var a : bool array := new bool array(3, true); if (a[1]) 7 else 8 fi");
+t!(浮動小数の配列, "var a : f64 array := new f64 array(2, 1.5); if (a[0] + a[1] == 3.0) 5 else 6 fi");
+t!(二分探索,
+   "flow $return = $repeat(break, getdepth());
+    fn find (a : i64 array alias, x : i64) {
+        var lo := 0; var hi := a.len() - 1;
+        while (lo <= hi) {
+            let mid := (lo + hi) / 2;
+            if (a[mid] ?? 0 == x) $return mid;
+            elif (a[mid] ?? 0 < x) lo := mid + 1;
+            else hi := mid - 1; fi;
+        };
+    } -> i64;
+    let xs := [ 2, 3, 5, 7, 11, 13 ];
+    (find(xs, 7) ?? 0 - 1) * 10 + (find(xs, 4) ?? 0 - 1)");
+
+t!(場は関数の境で戻る,
+   "fn mk (n : i64) { var a : i64 array := new i64 array(n, 0);
+        nfor (i, 0, n) { a[i] := i; }; a } -> i64 array;
+    fn total (a : i64 array alias) { var s := 0; nfor (i, 0, a.len()) { s += a[i]; }; s } -> i64;
+    var acc := 0; nfor (k, 0, 2000) { let xs := mk(20); acc += total(xs); }; acc mod 251");

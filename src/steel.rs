@@ -123,12 +123,40 @@ fn ity(t: &ValueType) -> String {
     match t {
         ValueType::F32 => "float".into(),
         ValueType::F64 => "double".into(),
+        // **集合体は場所を指す**
+        ValueType::Array(_) | ValueType::Str => "ptr".into(),
         _ => format!("i{}", width(t).unwrap_or(64)),
     }
 }
 
 fn is_float(t: &ValueType) -> bool {
     matches!(t, ValueType::F32 | ValueType::F64)
+}
+
+/// **場に置かれるもの。** 値そのものではなく、場所を指す。
+fn is_heap(t: &ValueType) -> bool {
+    matches!(t, ValueType::Array(_) | ValueType::Str)
+}
+
+/// 集合体の要素の型。`str` は `u8 array` を包んだもの（C-77）。
+fn elem_of(t: &ValueType) -> Option<ValueType> {
+    match t {
+        ValueType::Array(e) => Some((**e).clone()),
+        ValueType::Str => Some(ValueType::U8),
+        _ => None,
+    }
+}
+
+/// 要素一つの大きさ（バイト）。
+fn elem_size(t: &ValueType) -> u64 {
+    if is_heap(t) {
+        return 8;
+    }
+    match width(t) {
+        Some(1) => 1,
+        Some(w) => (w as u64) / 8,
+        None => 8,
+    }
 }
 
 /// LLVM の浮動小数リテラル。**十進では丸めが入る**ので、ビット列で書く。
@@ -492,6 +520,174 @@ impl Steel {
         Val { ok: ok2, v: if want_q { qf } else { rf }, ty: ty.clone() }
     }
 
+    // ================= 集合体 =================
+
+    /// 場に新しい集合体を作る。**長さは実行時に決まってよい。**
+    fn new_collection(&mut self, len: &str, ty: &ValueType) -> String {
+        let es = elem_size(&elem_of(ty).unwrap_or(ValueType::I64));
+        let p = self.tmp();
+        self.emit(&format!("{p} = call ptr @vaak.new(i64 {len}, i64 {es})"));
+        p
+    }
+
+    /// 要素の場所。**添字は確かめてから渡すこと。**
+    fn elem_ptr(&mut self, base: &str, idx: &str, ty: &ValueType) -> String {
+        let el = elem_of(ty).unwrap_or(ValueType::I64);
+        let d = self.tmp();
+        self.emit(&format!("{d} = call ptr @vaak.data(ptr {base})"));
+        let g = self.tmp();
+        self.emit(&format!("{g} = getelementptr {}, ptr {d}, i64 {idx}", ity(&el)));
+        g
+    }
+
+    fn coll_len(&mut self, base: &str) -> String {
+        let n = self.tmp();
+        self.emit(&format!("{n} = call i64 @vaak.len(ptr {base})"));
+        n
+    }
+
+    /// **添字が範囲に入っているか。** 外なら paradox（C-46）。
+    ///
+    /// 返すのは（範囲内か, 安全な添字）。外れていても**読める場所**を渡す——
+    /// 落ちるより paradox の方がよい。
+    fn bounds(&mut self, base: &str, idx: &str) -> (String, String) {
+        let n = self.coll_len(base);
+        let lo = self.tmp();
+        self.emit(&format!("{lo} = icmp sge i64 {idx}, 0"));
+        let hi = self.tmp();
+        self.emit(&format!("{hi} = icmp slt i64 {idx}, {n}"));
+        let ok = self.tmp();
+        self.emit(&format!("{ok} = and i1 {lo}, {hi}"));
+        let safe = self.tmp();
+        self.emit(&format!("{safe} = select i1 {ok}, i64 {idx}, i64 0"));
+        (ok, safe)
+    }
+
+    /// **深く複製する**（C-33）。要素が場を持たない場合。
+    fn deep_copy(&mut self, p: &str, ty: &ValueType) -> String {
+        let el = elem_of(ty).unwrap_or(ValueType::I64);
+        let es = elem_size(&el);
+        let q = self.tmp();
+        self.emit(&format!("{q} = call ptr @vaak.copy(ptr {p}, i64 {es})"));
+        q
+    }
+
+    /// `new T ( 引数 )` — **配列と写像は位置で、構造体は名前で**（C-78）。
+    fn construct(&mut self, ty: &Type, args: &CtorArgs, span: Span) -> R<Region> {
+        let t = ty.value.clone();
+        // **包み型を剥がす／包む**（S-2）。`new i64 ( m )` は数を数に
+        if !is_heap(&t) {
+            let CtorArgs::Positional(a) = args else {
+                return err("この型は STEEL がまだ構築できない", span);
+            };
+            let Some(first) = a.first() else {
+                return err("`new` に値が要る", span);
+            };
+            let v = self.expr(first)?;
+            let Some(v) = v else { return err("`new` に値が要る", span) };
+            let c = self.conv(&v.v.clone(), &v.ty.clone(), &t);
+            return Ok(Some(Val { ok: v.ok, v: c, ty: t }));
+        }
+        let CtorArgs::Positional(a) = args else {
+            return err("集合体は位置で構築する", span);
+        };
+        let el = elem_of(&t).unwrap_or(ValueType::I64);
+        if is_heap(&el) {
+            return err("入れ子の集合体は STEEL がまだ扱えない", span);
+        }
+        // `new T array ( )` — 空
+        let Some(nx) = a.first() else {
+            let p = self.new_collection("0", &t);
+            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+        };
+        let n = self.expr(nx)?;
+        let Some(n) = n else { return err("`new` の個数に値が無い", nx.span) };
+        let len = self.widen64(&n);
+        // **負の個数は零とみなす。** 落ちるより畳む
+        let neg = self.tmp();
+        self.emit(&format!("{neg} = icmp slt i64 {len}, 0"));
+        let safe = self.tmp();
+        self.emit(&format!("{safe} = select i1 {neg}, i64 0, i64 {len}"));
+        let p = self.new_collection(&safe, &t);
+
+        // 埋める値。**無ければ零**
+        let fill = match a.get(1) {
+            Some(fx) => {
+                let f = self.expr(fx)?;
+                let Some(f) = f else { return err("埋める値が無い", fx.span) };
+                self.conv(&f.v.clone(), &f.ty.clone(), &el)
+            }
+            None => if is_float(&el) { "0.0".into() } else { "0".into() },
+        };
+        // 埋める
+        let head = self.label("fill.head");
+        let body = self.label("fill.body");
+        let done = self.label("fill.done");
+        let iv = self.alloca("i64");
+        self.emit(&format!("store i64 0, ptr {iv}"));
+        self.br(&head);
+        self.place(&head);
+        let i = self.tmp();
+        self.emit(&format!("{i} = load i64, ptr {iv}"));
+        let go = self.tmp();
+        self.emit(&format!("{go} = icmp slt i64 {i}, {safe}"));
+        self.cbr(&go, &body, &done);
+        self.place(&body);
+        let g = self.elem_ptr(&p, &i, &t);
+        self.emit(&format!("store {} {fill}, ptr {g}", ity(&el)));
+        let i2 = self.tmp();
+        self.emit(&format!("{i2} = add i64 {i}, 1"));
+        self.emit(&format!("store i64 {i2}, ptr {iv}"));
+        self.br(&head);
+        self.place(&done);
+
+        Ok(Some(Val { ok: "true".into(), v: p, ty: t }))
+    }
+
+    /// 文字列の定数。**場の形（長さ・容量・中身）で置く。**
+    fn string_const(&mut self, b: &[u8]) -> String {
+        let name = format!("@.vaak.s{}", self.strings.len());
+        let body: String =
+            b.iter().map(|c| format!("\\{c:02X}")).collect::<Vec<_>>().join("");
+        let n = b.len();
+        self.head_global(&format!(
+            "{name} = internal constant {{ i64, i64, [{n} x i8] }} \
+             {{ i64 {n}, i64 {n}, [{n} x i8] c\"{body}\" }}"
+        ));
+        self.strings.push((name.clone(), b.to_vec()));
+        name
+    }
+
+    fn head_global(&mut self, d: &str) {
+        let line = format!("{d}\n");
+        if !self.decls.contains(&line) {
+            self.decls.push(line);
+        }
+    }
+
+    /// 枡（`i64`）へ入れる形にする。**集合体は場所を数として入れる。**
+    ///
+    /// 段と分岐の合流点は一つの枡を使う（領域は高々一つの値、C-14）ので、
+    /// **型ごとに枡を分けない。**
+    fn to_slot(&mut self, v: &Val) -> String {
+        if is_heap(&v.ty) {
+            let t = self.tmp();
+            self.emit(&format!("{t} = ptrtoint ptr {} to i64", v.v));
+            return t;
+        }
+        self.conv(&v.v.clone(), &v.ty.clone(), &ValueType::I64)
+    }
+
+    /// 枡から取り出す。
+    fn from_slot(&mut self, raw: &str, ty: &ValueType) -> String {
+        if is_heap(ty) {
+            let t = self.tmp();
+            self.emit(&format!("{t} = inttoptr i64 {raw} to ptr"));
+            return t;
+        }
+        self.conv(raw, &ValueType::I64, ty)
+    }
+
     fn widen64(&mut self, x: &Val) -> String {
         self.conv(&x.v.clone(), &x.ty.clone(), &ValueType::I64)
     }
@@ -562,7 +758,7 @@ impl Steel {
         self.emit(&format!("{ok} = load i1, ptr {}", st.ok_slot));
         let raw = self.tmp();
         self.emit(&format!("{raw} = load i64, ptr {}", st.slot));
-        let v = self.conv(&raw, &ValueType::I64, &st.ty);
+        let v = self.from_slot(&raw, &st.ty.clone());
         Val { ok, v, ty: st.ty }
     }
 
@@ -578,7 +774,7 @@ impl Steel {
         };
         match payload {
             Some(p) => {
-                let w = self.conv(&p.v.clone(), &p.ty.clone(), &ValueType::I64);
+                let w = self.to_slot(&p);
                 self.stages[idx].ty = p.ty.clone();
                 self.emit(&format!("store i64 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", p.ok));
@@ -624,6 +820,61 @@ impl Steel {
                     v: fbits(v, &ValueType::F64),
                     ty: ValueType::F64,
                 }))
+            }
+
+            // `[ a, b, c ]` — **場に置く**
+            E::ArrayLit(items) => {
+                let mut vals = Vec::new();
+                for it in items {
+                    let v = self.expr(it)?;
+                    let Some(v) = v else { return err("配列の要素に値が無い", it.span) };
+                    vals.push(v);
+                }
+                let el = vals.first().map(|v| v.ty.clone()).unwrap_or(ValueType::I64);
+                if is_heap(&el) {
+                    return err("入れ子の集合体は STEEL がまだ扱えない", e.span);
+                }
+                let ty = ValueType::Array(Box::new(el.clone()));
+                let p = self.new_collection(&vals.len().to_string(), &ty);
+                for (i, v) in vals.iter().enumerate() {
+                    let g = self.elem_ptr(&p, &i.to_string(), &ty);
+                    let c = self.conv(&v.v.clone(), &v.ty.clone(), &el);
+                    self.emit(&format!("store {} {c}, ptr {g}", ity(&el)));
+                }
+                Ok(Some(Val { ok: "true".into(), v: p, ty }))
+            }
+
+            // `new T array(n, 埋める値)`
+            E::Construct { ty, args } => self.construct(ty, args, e.span),
+
+            // 文字列は `u8 array` を包んだ型（C-77）。**場へ写してから渡す**
+            E::Str(t) => {
+                let bytes = t.as_bytes().to_vec();
+                let g = self.string_const(&bytes);
+                let p = self.tmp();
+                self.emit(&format!("{p} = call ptr @vaak.copy(ptr {g}, i64 1)"));
+                Ok(Some(Val { ok: "true".into(), v: p, ty: ValueType::Str }))
+            }
+
+            // `a[i]` — **範囲外は paradox**（C-46）
+            E::Index { base, index } => {
+                let b = self.expr(base)?;
+                let i = self.expr(index)?;
+                let (Some(b), Some(i)) = (b, i) else {
+                    return err("添字に値が無い", e.span);
+                };
+                if !is_heap(&b.ty) {
+                    return err("添字を取れるのは集合体だけ", base.span);
+                }
+                let idx = self.widen64(&i);
+                let (inb, safe) = self.bounds(&b.v.clone(), &idx);
+                let g = self.elem_ptr(&b.v.clone(), &safe, &b.ty.clone());
+                let el = elem_of(&b.ty).unwrap_or(ValueType::I64);
+                let t = self.tmp();
+                self.emit(&format!("{t} = load {}, ptr {g}", ity(&el)));
+                let ok1 = self.both_ok(&b.ok, &i.ok);
+                let ok = self.both_ok(&ok1, &inb);
+                Ok(Some(Val { ok, v: t, ty: el }))
             }
 
             E::Name(n) => {
@@ -723,10 +974,15 @@ impl Steel {
                         return err("束縛する値が無い", b.span);
                     };
                     let ty = b.ty.as_ref().map(|t| t.value.clone()).unwrap_or(v.ty.clone());
-                    if width(&ty).is_none() && !is_float(&ty) {
-                        return err("STEEL はまだ数しか扱えない", b.span);
+                    if width(&ty).is_none() && !is_float(&ty) && !is_heap(&ty) {
+                        return err("STEEL はまだ数と集合体しか扱えない", b.span);
                     }
-                    let conv = self.conv(&v.v.clone(), &v.ty.clone(), &ty);
+                    // **`:=` は深い複製である**（C-33）
+                    let conv = if is_heap(&ty) {
+                        self.deep_copy(&v.v.clone(), &ty)
+                    } else {
+                        self.conv(&v.v.clone(), &v.ty.clone(), &ty)
+                    };
                     let p = self.declare(&b.name, ty.clone());
                     self.emit(&format!("store {} {conv}, ptr {p}", ity(&ty)));
                 }
@@ -735,6 +991,42 @@ impl Steel {
             }
 
             E::Assign { op, lhs, rhs } => {
+                // `a[i] := v` — **範囲外なら何も起きない**（paradox）
+                if let ExprKind::Index { base, index } = &lhs.kind {
+                    if *op != AssignOp::Set {
+                        return err("集合体への複合代入は STEEL がまだ扱えない", e.span);
+                    }
+                    let b = self.expr(base)?;
+                    let i = self.expr(index)?;
+                    let r = self.expr(rhs)?;
+                    let (Some(b), Some(i), Some(r)) = (b, i, r) else {
+                        return err("代入に値が無い", e.span);
+                    };
+                    if !is_heap(&b.ty) {
+                        return err("添字を取れるのは集合体だけ", base.span);
+                    }
+                    let idx = self.widen64(&i);
+                    let (inb, safe) = self.bounds(&b.v.clone(), &idx);
+                    let g = self.elem_ptr(&b.v.clone(), &safe, &b.ty.clone());
+                    let el = elem_of(&b.ty).unwrap_or(ValueType::I64);
+                    // **集合体は自分の要素の型を知っている**（C-94）
+                    let c = self.conv(&r.v.clone(), &r.ty.clone(), &el);
+                    // **範囲外への書き込みは誤りである。**
+                    //
+                    // 読みなら paradox でよい（「そこに値が無い」と言える）が、
+                    // 書きは違う——**代入は元々 paradox を産む**ので、
+                    // 「書けなかった」を paradox で表すと**書けた場合と区別がつかない。**
+                    let good = self.label("store.ok");
+                    let bad = self.label("store.bad");
+                    self.cbr(&inb, &good, &bad);
+                    self.place(&bad);
+                    self.emit("call void @vaak.fail()");
+                    self.emit("unreachable");
+                    self.done = true;
+                    self.place(&good);
+                    self.emit(&format!("store {} {c}, ptr {g}", ity(&el)));
+                    return Ok(None);
+                }
                 let ExprKind::Name(n) = &lhs.kind else {
                     return err("STEEL はまだ名前への代入しか扱えない", e.span);
                 };
@@ -747,7 +1039,11 @@ impl Steel {
                 let r = self.expr(rhs)?;
                 let Some(r) = r else { return err("代入する値が無い", e.span) };
                 let v = if *op == AssignOp::Set {
-                    self.conv(&r.v.clone(), &r.ty.clone(), &ty)
+                    if is_heap(&ty) {
+                        self.deep_copy(&r.v.clone(), &ty)
+                    } else {
+                        self.conv(&r.v.clone(), &r.ty.clone(), &ty)
+                    }
                 } else {
                     let cur = self.tmp();
                     self.emit(&format!("{cur} = load {}, ptr {p}", ity(&ty)));
@@ -819,7 +1115,7 @@ impl Steel {
         let use_r = self.label("qq.right");
         let done = self.label("qq.done");
 
-        let w = self.conv(&l.v.clone(), &l.ty.clone(), &ValueType::I64);
+        let w = self.to_slot(&l);
         self.emit(&format!("store i64 {w}, ptr {slot}"));
         self.emit(&format!("store i1 {}, ptr {ok_slot}", l.ok));
         self.cbr(&l.ok.clone(), &done, &use_r);
@@ -828,7 +1124,7 @@ impl Steel {
         let r = self.expr(rhs)?;
         let ty = match r {
             Some(r) => {
-                let w = self.conv(&r.v.clone(), &r.ty.clone(), &ValueType::I64);
+                let w = self.to_slot(&r);
                 self.emit(&format!("store i64 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", r.ok));
                 r.ty
@@ -845,7 +1141,7 @@ impl Steel {
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
         self.emit(&format!("{raw} = load i64, ptr {slot}"));
-        let v = self.conv(&raw, &ValueType::I64, &ty);
+        let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
 }
@@ -872,7 +1168,7 @@ impl Steel {
             self.place(&yes);
             if let Some(v) = self.expr(body)? {
                 ty = v.ty.clone();
-                let w = self.conv(&v.v.clone(), &v.ty.clone(), &ValueType::I64);
+                let w = self.to_slot(&v);
                 self.emit(&format!("store i64 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
@@ -884,7 +1180,7 @@ impl Steel {
         if let Some(els) = &i.els {
             if let Some(v) = self.expr(els)? {
                 ty = v.ty.clone();
-                let w = self.conv(&v.v.clone(), &v.ty.clone(), &ValueType::I64);
+                let w = self.to_slot(&v);
                 self.emit(&format!("store i64 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
@@ -896,7 +1192,7 @@ impl Steel {
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
         self.emit(&format!("{raw} = load i64, ptr {slot}"));
-        let v = self.conv(&raw, &ValueType::I64, &ty);
+        let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
 
@@ -1038,7 +1334,7 @@ impl Steel {
             self.place(&hit);
             if let Some(v) = self.expr(&a.value)? {
                 ty = v.ty.clone();
-                let w = self.conv(&v.v.clone(), &v.ty.clone(), &ValueType::I64);
+                let w = self.to_slot(&v);
                 self.emit(&format!("store i64 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
@@ -1052,7 +1348,7 @@ impl Steel {
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
         self.emit(&format!("{raw} = load i64, ptr {slot}"));
-        let v = self.conv(&raw, &ValueType::I64, &ty);
+        let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
 
@@ -1179,6 +1475,21 @@ impl Steel {
 
 impl Steel {
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> R<Region> {
+        // 集合体のメンバ関数
+        if let ExprKind::Field { base, name } = &callee.kind {
+            let b = self.expr(base)?;
+            let Some(b) = b else { return err("受け手に値が無い", base.span) };
+            if !is_heap(&b.ty) {
+                return err("STEEL はまだ集合体のメンバ関数しか扱えない", span);
+            }
+            return match name.as_str() {
+                "len" => {
+                    let n = self.coll_len(&b.v.clone());
+                    Ok(Some(Val { ok: b.ok, v: n, ty: ValueType::I64 }))
+                }
+                _ => err(format!("`{name}` は STEEL がまだ扱えない"), span),
+            };
+        }
         let ExprKind::Name(name) = &callee.kind else {
             return err("STEEL はまだ自由関数の呼び出ししか扱えない", span);
         };
@@ -1195,10 +1506,19 @@ impl Steel {
             let v = self.expr(a)?;
             let Some(v) = v else { return err("引数に値が無い", a.span) };
             let ty = p.ty.value.clone();
-            if width(&ty).is_none() && !is_float(&ty) {
-                return err("STEEL はまだ数しか扱えない", a.span);
+            if width(&ty).is_none() && !is_float(&ty) && !is_heap(&ty) {
+                return err("STEEL はまだ数と集合体しか扱えない", a.span);
             }
-            let c = self.conv(&v.v.clone(), &v.ty.clone(), &ty);
+            // **複製か別名かは型が決める**（C-20）。`alias` なら写さない
+            let c = if is_heap(&ty) {
+                if p.ty.is_alias {
+                    v.v.clone()
+                } else {
+                    self.deep_copy(&v.v.clone(), &ty)
+                }
+            } else {
+                self.conv(&v.v.clone(), &v.ty.clone(), &ty)
+            };
             // **paradox を引数に渡せる。** 型は paradox との直和である
             vals.push((ity(&ty), c, v.ok));
         }
@@ -1231,11 +1551,18 @@ impl Steel {
         let ret = f.ret.as_ref().map(|t| t.value.clone()).unwrap_or(ValueType::I64);
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
-            if width(&p.ty.value).is_none() && !is_float(&p.ty.value) {
-                return err("STEEL はまだ数の引数しか扱えない", p.span);
+            if width(&p.ty.value).is_none()
+                && !is_float(&p.ty.value)
+                && !is_heap(&p.ty.value)
+            {
+                return err("STEEL はまだ数と集合体の引数しか扱えない", p.span);
             }
             params.push(format!("{} %p{i}, i1 %pok{i}", ity(&p.ty.value)));
         }
+
+        // **場の印を取る。** 関数を出るときに戻す（C-90）
+        let mark = self.tmp();
+        self.emit(&format!("{mark} = call i64 @vaak.mark()"));
 
         // **フレームは段でもある**（C-23）——`break` の上限
         self.open_stage(None, false);
@@ -1252,7 +1579,22 @@ impl Steel {
             None => self.leave(1, None)?,
         }
         let out = self.close_stage();
-        let conv = self.conv(&out.v.clone(), &out.ty.clone(), &ret);
+        // **返り値は呼び出し側の領域へ移る**（C-90 の表）。
+        // 印の下へ写してから、印を戻す——**領域は高々一つの値**（C-14）なので一つだけ
+        let conv = if is_heap(&ret) && is_heap(&out.ty) {
+            let el = elem_of(&ret).unwrap_or(ValueType::I64);
+            let es = elem_size(&el);
+            let q = self.tmp();
+            self.emit(&format!(
+                "{q} = call ptr @vaak.carry(ptr {}, i64 {es}, i64 {mark})",
+                out.v
+            ));
+            q
+        } else {
+            let c = self.conv(&out.v.clone(), &out.ty.clone(), &ret);
+            self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            c
+        };
         let a = self.tmp();
         self.emit(&format!("{a} = insertvalue {{ i1, {} }} undef, i1 {}, 0", ity(&ret), out.ok));
         let b = self.tmp();
@@ -1270,6 +1612,130 @@ impl Steel {
     }
 }
 
+/// 場（アリーナ）の前口上。
+///
+/// # なぜバンプ確保でよいか
+///
+/// **C-90 の表がそのまま設計になっている。**
+///
+/// | | |
+/// |---|---|
+/// | 値は自己完結（C-48） | **参照を追う必要が無い** |
+/// | 別名は外へ返せない（C-19） | 内側を指したまま外へ出ない |
+/// | 再帰的データ構造は作れない（C-63） | **循環しない** |
+/// | 返り値は複製。実装は移動してよい | **呼び出し側の領域へ移る** |
+///
+/// > スコープを越えて生き残るものが無い。だから、抜けた時点での解放は正確である。
+///
+/// # 領域を抜けるときに何をするか
+///
+/// **印を戻すだけ。** ただし外へ出る値を先に印の下へ写す——
+/// **領域は高々一つの値しか持たない**（C-14）ので、写すのは一つだけである。
+///
+/// これは C-33（`:=` は深い複製）が既に言っていることを、そのまま実装したものである。
+///
+/// # 解放しない場合との違い
+///
+/// **観測できない。** 破棄処理が走らないので（C-90）、
+/// 遅く捨てても早く捨てても同じ結果になる。だから**粗くしてよい。**
+const PRELUDE: &str = r#"
+; ==== 場（バンプ確保器）====
+; **領域ごとのアリーナ**（C-90）。抜けたら印を戻すだけ
+@vaak.heap = internal global [16777216 x i8] zeroinitializer
+@vaak.bump = internal global i64 0
+
+define internal ptr @vaak.alloc(i64 %n) {
+entry:
+  %b = load i64, ptr @vaak.bump
+  ; 八バイト境界に揃える
+  %a = add i64 %n, 7
+  %r = and i64 %a, -8
+  %e = add i64 %b, %r
+  ; **尽きたら落とす。** 黙って踏み外すよりよい
+  %over = icmp sgt i64 %e, 16777216
+  br i1 %over, label %fail, label %ok
+fail:
+  call void @vaak.fail()
+  unreachable
+ok:
+  store i64 %e, ptr @vaak.bump
+  %p = getelementptr [16777216 x i8], ptr @vaak.heap, i64 0, i64 %b
+  ret ptr %p
+}
+
+define internal i64 @vaak.mark() {
+entry:
+  %b = load i64, ptr @vaak.bump
+  ret i64 %b
+}
+
+define internal void @vaak.release(i64 %m) {
+entry:
+  store i64 %m, ptr @vaak.bump
+  ret void
+}
+
+; 集合体：{ i64 長さ, i64 容量, 要素… }
+define internal ptr @vaak.new(i64 %len, i64 %esize) {
+entry:
+  %bytes = mul i64 %len, %esize
+  %total = add i64 %bytes, 16
+  %p = call ptr @vaak.alloc(i64 %total)
+  store i64 %len, ptr %p
+  %cp = getelementptr i8, ptr %p, i64 8
+  store i64 %len, ptr %cp
+  ret ptr %p
+}
+
+define internal i64 @vaak.len(ptr %p) {
+entry:
+  %n = load i64, ptr %p
+  ret i64 %n
+}
+
+define internal ptr @vaak.data(ptr %p) {
+entry:
+  %d = getelementptr i8, ptr %p, i64 16
+  ret ptr %d
+}
+
+; **写す。** 要素が場を持たないときはこれで足りる
+define internal ptr @vaak.copy(ptr %p, i64 %esize) {
+entry:
+  %n = load i64, ptr %p
+  %q = call ptr @vaak.new(i64 %n, i64 %esize)
+  %bytes = mul i64 %n, %esize
+  %src = getelementptr i8, ptr %p, i64 16
+  %dst = getelementptr i8, ptr %q, i64 16
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 %bytes, i1 false)
+  ret ptr %q
+}
+
+; **印の下へ写す。** 領域を抜けるときに、外へ出る一つの値だけを移す（C-14）
+define internal ptr @vaak.carry(ptr %p, i64 %esize, i64 %mark) {
+entry:
+  %n = load i64, ptr %p
+  %bytes = mul i64 %n, %esize
+  %total = add i64 %bytes, 16
+  store i64 %mark, ptr @vaak.bump
+  %q = call ptr @vaak.alloc(i64 %total)
+  ; **重なりうる。** memmove で写す
+  call void @llvm.memmove.p0.p0.i64(ptr %q, ptr %p, i64 %total, i1 false)
+  ret ptr %q
+}
+
+; **実行時の誤り。** 書けない場所に書こうとしたときなど
+declare void @exit(i32)
+define internal void @vaak.fail() {
+entry:
+  call void @exit(i32 70)
+  unreachable
+}
+
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)
+"#;
+
 /// プログラム全体を LLVM IR に。
 ///
 /// **最上位の外界面は言語の意味論ではない**（C-31）。
@@ -1285,8 +1751,6 @@ pub fn compile(prog: &Program) -> R<String> {
     s.flows = flows;
 
     let mut out = String::new();
-    out.push_str("; Vaak — STEEL（LLVM IR）\n");
-    out.push_str("target triple = \"x86_64-pc-linux-gnu\"\n\n");
 
     let mut fns: Vec<FnDecl> = s.fns.values().cloned().collect();
     fns.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1320,6 +1784,18 @@ pub fn compile(prog: &Program) -> R<String> {
     s.emit(&format!("ret i32 {code}"));
     out.push_str(&format!("define i32 @main() {{\nentry:\n{}{}}}\n", s.head, s.body));
 
+
+    // **宣言と定数は最後に集める。** 組み立ての途中で増えるので
+    let mut head = String::from("; Vaak — STEEL（LLVM IR）\n");
+    head.push_str("target triple = \"x86_64-pc-linux-gnu\"\n");
+    head.push_str(PRELUDE);
+    head.push('\n');
+    for d in &s.decls {
+        head.push_str(d);
+    }
+    head.push('\n');
+    head.push_str(&out);
+    let out = head;
     Ok(out)
 }
 
