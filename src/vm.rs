@@ -174,6 +174,13 @@ pub fn compile_with_host(
             c.host_fns.insert(n.clone(), i);
         }
     }
+    // **この方言に無い型は断る**（S-20）
+    if let Some((name, span)) = crate::interp::find_dialect_type(&prog.body) {
+        return Err(CompileError {
+            msg: format!("`{name}` はこの方言には無い型（STEEL 方言の型である）"),
+            span,
+        });
+    }
     c.collect(&prog.body);
     // 無名標準ライブラリ（C-15）
     let prelude = crate::parser::parse("flow $return = $repeat(break, getdepth());").unwrap();

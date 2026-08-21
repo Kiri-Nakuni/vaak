@@ -123,6 +123,8 @@ fn ity(t: &ValueType) -> String {
     match t {
         ValueType::F32 => "float".into(),
         ValueType::F64 => "double".into(),
+        // **方言が足した基底型**（S-20）。符号 1・指数 15・仮数 64 ビット
+        ValueType::F80 => "x86_fp80".into(),
         // **集合体は場所を指す**
         ValueType::Array(_) | ValueType::Str => "ptr".into(),
         _ => format!("i{}", width(t).unwrap_or(64)),
@@ -130,7 +132,7 @@ fn ity(t: &ValueType) -> String {
 }
 
 fn is_float(t: &ValueType) -> bool {
-    matches!(t, ValueType::F32 | ValueType::F64)
+    matches!(t, ValueType::F32 | ValueType::F64 | ValueType::F80)
 }
 
 /// **場に置かれるもの。** 値そのものではなく、場所を指す。
@@ -152,10 +154,17 @@ fn elem_size(t: &ValueType) -> u64 {
     if is_heap(t) {
         return 8;
     }
-    match width(t) {
-        Some(1) => 1,
-        Some(w) => (w as u64) / 8,
-        None => 8,
+    match t {
+        // **`x86_fp80` は 10 バイトだが、置き場は 16 バイトである**（x86-64 の揃え）。
+        // `getelementptr` が使うのは置き場の大きさなので、そちらに合わせる
+        ValueType::F80 => 16,
+        ValueType::F64 => 8,
+        ValueType::F32 => 4,
+        _ => match width(t) {
+            Some(1) => 1,
+            Some(w) => (w as u64) / 8,
+            None => 8,
+        },
     }
 }
 
@@ -164,8 +173,37 @@ fn elem_size(t: &ValueType) -> u64 {
 /// `float` も**倍精度のビット列**で書くのが LLVM の流儀である
 /// （その値が単精度で表せることを検証してくれる）。
 fn fbits(v: f64, ty: &ValueType) -> String {
+    if matches!(ty, ValueType::F80) {
+        return f80_bits(v);
+    }
     let d = if matches!(ty, ValueType::F32) { v as f32 as f64 } else { v };
     format!("0x{:016X}", d.to_bits())
+}
+
+/// `x86_fp80` のビット列。LLVM の綴りは `0xK` ＋ 二十桁。
+///
+/// **`f64` を広げる。** `f64` の値はすべて `f80` で正確に表せる——
+/// 指数も仮数も広いので、丸めが起きない。
+///
+/// # 限り
+///
+/// **リテラルは `f64` の精度でしか書けない。**
+/// `f80` の余分な精度は**演算で得るもの**であって、綴りで入れるものではない——
+/// 十進の綴りを八十ビットへ正しく丸めるには、任意精度の変換が要る。
+fn f80_bits(v: f64) -> String {
+    let b = v.to_bits();
+    let sign = (b >> 63) & 1;
+    let exp64 = ((b >> 52) & 0x7FF) as i64;
+    let frac = b & 0x000F_FFFF_FFFF_FFFF;
+    // 零は零。**非有限はこの言語に存在しない**（C-79）ので考えない
+    if exp64 == 0 && frac == 0 {
+        return format!("0xK{:04X}{:016X}", sign << 15, 0u64);
+    }
+    // 指数の下駄を履き替える。1023 → 16383
+    let exp80 = (exp64 - 1023 + 16383) as u64;
+    // **整数ビットは明示である**（`f64` の暗黙の 1 を立てる）
+    let mant = (1u64 << 63) | (frac << 11);
+    format!("0xK{:04X}{:016X}", (sign << 15) | exp80, mant)
 }
 
 impl Steel {
@@ -291,7 +329,13 @@ impl Steel {
             let r = self.tmp();
             let op = match (is_float(from), is_float(to)) {
                 (true, true) => {
-                    if matches!(from, ValueType::F32) { "fpext" } else { "fptrunc" }
+                    // **広いか狭いかで決める。** f32 < f64 < f80
+                    let rank = |t: &ValueType| match t {
+                        ValueType::F32 => 0,
+                        ValueType::F64 => 1,
+                        _ => 2,
+                    };
+                    if rank(from) < rank(to) { "fpext" } else { "fptrunc" }
                 }
                 // **整数と浮動小数は混ぜられない**（検査器が捕らえる）。
                 // ここへ来るのは注釈で明示したときだけ
@@ -439,13 +483,18 @@ impl Steel {
     /// **有限か。** NaN なら `olt` が偽になるので、これ一つで両方を捕まえる。
     fn finite(&mut self, x: &str, ty: &ValueType) -> String {
         let t = ity(ty);
-        let bits = if matches!(ty, ValueType::F32) { "f32" } else { "f64" };
+        let bits = match ty {
+            ValueType::F32 => "f32",
+            ValueType::F80 => "f80",
+            _ => "f64",
+        };
         self.declare_fabs(bits, &t);
         let a = self.tmp();
         self.emit(&format!("{a} = call {t} @llvm.fabs.{bits}({t} {x})"));
         let f = self.tmp();
-        let inf = if matches!(ty, ValueType::F32) {
-            "0x7FF0000000000000"
+        // **無限との比較。** `f80` は綴りが違う（`0xK` ＋ 二十桁）
+        let inf = if matches!(ty, ValueType::F80) {
+            "0xK7FFF8000000000000000"
         } else {
             "0x7FF0000000000000"
         };
@@ -617,7 +666,11 @@ impl Steel {
                 let Some(f) = f else { return err("埋める値が無い", fx.span) };
                 self.conv(&f.v.clone(), &f.ty.clone(), &el)
             }
-            None => if is_float(&el) { "0.0".into() } else { "0".into() },
+            None => match el {
+                ValueType::F80 => "0xK00000000000000000000".into(),
+                _ if is_float(&el) => "0.0".into(),
+                _ => "0".into(),
+            },
         };
         // 埋める
         let head = self.label("fill.head");
@@ -700,7 +753,12 @@ impl Steel {
         if is_float(&x.ty) {
             let t = ity(&x.ty);
             let r = self.tmp();
-            self.emit(&format!("{r} = fcmp one {t} {}, 0.0", x.v));
+            let zero = if matches!(x.ty, ValueType::F80) {
+                "0xK00000000000000000000"
+            } else {
+                "0.0"
+            };
+            self.emit(&format!("{r} = fcmp one {t} {}, {zero}", x.v));
             return r;
         }
         let w = width(&x.ty).unwrap_or(64);

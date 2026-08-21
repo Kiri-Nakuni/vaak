@@ -23,7 +23,7 @@ authors = ["Arimura Akihiro"]
 
 [grammars.vaak]
 repository = "file:///home/suima/Documents/mydsl/editors/tree-sitter-vaak"
-rev = "cb8fbe8d7735e9c01692b9bbd83441e59d62c5bf"
+rev = "ffbf0132f05c9cd506a6e93044dc2c6520d32140"
 
 [language_servers.vaak-lsp]
 name = "Vaak"

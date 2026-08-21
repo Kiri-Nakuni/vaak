@@ -925,6 +925,8 @@ fn base_type(name: &str) -> ValueType {
         "i64" => ValueType::I64,
         "f32" => ValueType::F32,
         "f64" => ValueType::F64,
+        // **STEEL 方言の基底型**（S-20）
+        "f80" => ValueType::F80,
         "str" => ValueType::Str,
         other => ValueType::Named(other.to_string()),
     }

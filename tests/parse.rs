@@ -154,7 +154,7 @@ fn ty(t: &ValueType) -> String {
     use ValueType::*;
     match t {
         U1 => "u1".into(), U8 => "u8".into(), U16 => "u16".into(), U32 => "u32".into(),
-        I32 => "i32".into(), I64 => "i64".into(), F32 => "f32".into(), F64 => "f64".into(),
+        I32 => "i32".into(), I64 => "i64".into(), F32 => "f32".into(), F64 => "f64".into(), F80 => "f80".into(),
         Str => "str".into(),
         Array(i) => format!("{} array", ty(i)),
         Map(k, v) => format!("{} {} map", ty(k), ty(v)),

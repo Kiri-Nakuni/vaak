@@ -79,7 +79,7 @@
     },
     "type": {
       "name": "support.type.vaak",
-      "match": "\\b(bool|f32|f64|i32|i64|str|u16|u32|u1|u8)\\b"
+      "match": "\\b(bool|f32|f64|f80|i32|i64|str|u16|u32|u1|u8)\\b"
     },
     "flow": {
       "name": "entity.name.function.macro.vaak",

@@ -253,6 +253,11 @@ pub struct Type {
 #[derive(Clone, PartialEq, Debug)]
 pub enum ValueType {
     U1, U8, U16, U32, I32, I64, F32, F64,
+    /// **方言が足した基底型**（プローブ：「ホスト方言は基底型を足せる（例: 31/63bit 整数、f80）」）。
+    ///
+    /// **STEEL 方言だけが持つ。** LLVM の `x86_fp80`——符号 1・指数 15・仮数 64 ビット。
+    /// 木を辿る実装と VM は**扱わないと言う**（Rust に対応する型が無い）。
+    F80,
     /// `u8 array` をラップした型（C-77）。
     Str,
     Array(Box<ValueType>),

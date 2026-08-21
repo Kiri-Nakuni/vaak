@@ -781,7 +781,7 @@ fn is_int(t: &ValueType) -> bool {
 }
 
 fn is_float(t: &ValueType) -> bool {
-    matches!(t, ValueType::F32 | ValueType::F64)
+    matches!(t, ValueType::F32 | ValueType::F64 | ValueType::F80)
 }
 
 fn is_num(t: &ValueType) -> bool {
@@ -798,6 +798,7 @@ pub fn show(t: &ValueType) -> String {
         I32 => "i32".into(),
         I64 => "i64".into(),
         F32 => "f32".into(),
+        F80 => "f80".into(),
         F64 => "f64".into(),
         Str => "str".into(),
         Array(i) => format!("{} array", show(i)),

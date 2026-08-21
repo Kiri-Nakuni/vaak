@@ -161,6 +161,10 @@ impl Interp {
 
     /// プログラムを走らせ、最上位の外界面を返す。
     pub fn run(&mut self, prog: &Program) -> R<Eval> {
+        // **この方言に無い型は断る**（S-20）
+        if let Some((name, span)) = find_dialect_type(&prog.body) {
+            return rt(format!("`{name}` はこの方言には無い型（STEEL 方言の型である）"), span);
+        }
         self.collect_decls(&prog.body);
         self.region(&prog.body, Span::NONE)
     }
@@ -1100,6 +1104,123 @@ fn coerce(v: Value, ty: Option<&Type>) -> Value {
 }
 
 /// 型を一つ与えて揃える。`coerce` の型だけ版。
+/// **`f80` はこの方言では扱えない。**
+///
+/// プローブは「ホスト方言は基底型を足せる（例: 31/63bit 整数、f80）」と言う。
+/// **`f80` は STEEL 方言の型である**——Rust に対応する型が無いので、
+/// 木を辿る実装と VM は持たない（S-20）。
+pub fn is_dialect_only(t: &ValueType) -> bool {
+    match t {
+        ValueType::F80 => true,
+        ValueType::Array(e) => is_dialect_only(e),
+        ValueType::Map(k, v) => is_dialect_only(k) || is_dialect_only(v),
+        _ => false,
+    }
+}
+
+/// 構文木のどこかに**この方言に無い型**が書かれていないか。
+///
+/// **黙って受けるより、断る方がよい。** `f80` を書いたのに `f64` で走ったら、
+/// 書き手は精度が出ていることを疑わない。
+pub fn find_dialect_type(items: &[Expr]) -> Option<(String, Span)> {
+    fn ty(t: &Type) -> Option<(String, Span)> {
+        if is_dialect_only(&t.value) {
+            return Some((crate::types::show(&t.value), t.span));
+        }
+        None
+    }
+    fn walk(items: &[Expr], out: &mut Option<(String, Span)>) {
+        use ExprKind as E;
+        for e in items {
+            if out.is_some() {
+                return;
+            }
+            match &e.kind {
+                E::Ascribe { expr, ty: t } => {
+                    *out = ty(t);
+                    walk(std::slice::from_ref(expr), out);
+                }
+                E::Construct { ty: t, .. } => *out = ty(t),
+                E::Decl(d) => {
+                    for b in &d.bindings {
+                        if let Some(t) = &b.ty {
+                            if out.is_none() {
+                                *out = ty(t);
+                            }
+                        }
+                        if let BindInit::Value(v) = &b.init {
+                            walk(std::slice::from_ref(v), out);
+                        }
+                    }
+                }
+                E::FnDecl(f) => {
+                    for p in &f.params {
+                        if out.is_none() {
+                            *out = ty(&p.ty);
+                        }
+                    }
+                    if out.is_none() {
+                        if let Some(r) = &f.ret {
+                            *out = ty(r);
+                        }
+                    }
+                    walk(std::slice::from_ref(&f.body), out);
+                }
+                E::StructDecl(d) => {
+                    for f in &d.fields {
+                        if out.is_none() {
+                            *out = ty(&f.ty);
+                        }
+                    }
+                }
+                E::WrapDecl(d) => *out = ty(&d.base),
+                E::Discard(Some(i)) => walk(std::slice::from_ref(i), out),
+                E::Block(v) | E::Paren(v) | E::ArrayLit(v) => walk(v, out),
+                E::Loop(b) => walk(std::slice::from_ref(b), out),
+                E::While { cond, body } => {
+                    walk(std::slice::from_ref(cond), out);
+                    walk(std::slice::from_ref(body), out);
+                }
+                E::NFor { start, count, body, .. } => {
+                    walk(std::slice::from_ref(start), out);
+                    walk(std::slice::from_ref(count), out);
+                    walk(std::slice::from_ref(body), out);
+                }
+                E::If(i) => {
+                    for (c, b) in &i.arms {
+                        walk(std::slice::from_ref(c), out);
+                        walk(std::slice::from_ref(b), out);
+                    }
+                    if let Some(b) = &i.els {
+                        walk(std::slice::from_ref(b), out);
+                    }
+                }
+                E::Switch { subject, arms } => {
+                    walk(std::slice::from_ref(subject), out);
+                    for a in arms {
+                        walk(std::slice::from_ref(&a.value), out);
+                    }
+                }
+                E::Binary { lhs, rhs, .. } | E::Assign { lhs, rhs, .. } => {
+                    walk(std::slice::from_ref(lhs), out);
+                    walk(std::slice::from_ref(rhs), out);
+                }
+                E::Unary { rhs, .. } => walk(std::slice::from_ref(rhs), out),
+                E::Call { args, .. } => walk(args, out),
+                E::Index { base, index } => {
+                    walk(std::slice::from_ref(base), out);
+                    walk(std::slice::from_ref(index), out);
+                }
+                E::Field { base, .. } => walk(std::slice::from_ref(base), out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = None;
+    walk(items, &mut out);
+    out
+}
+
 pub fn coerce_to(v: Value, t: &ValueType) -> Value {
     coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
 }

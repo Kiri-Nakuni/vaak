@@ -169,3 +169,105 @@ t!(場は関数の境で戻る,
         nfor (i, 0, n) { a[i] := i; }; a } -> i64 array;
     fn total (a : i64 array alias) { var s := 0; nfor (i, 0, a.len()) { s += a[i]; }; s } -> i64;
     var acc := 0; nfor (k, 0, 2000) { let xs := mk(20); acc += total(xs); }; acc mod 251");
+
+// ===== 第四段：`f80`（STEEL 方言の基底型、S-20）=====
+//
+// **木を辿る参照実装は `f80` を持たない。** Rust に対応する型が無いので、
+// 差分試験ができない——代わりに **C の `long double` と突き合わせる。**
+
+/// STEEL だけで走らせ、終了コードを返す。
+fn steel_only(name: &str, src: &str) -> Option<i32> {
+    let prog = vaak::parser::parse(src).expect("構文");
+    let errs: Vec<_> = vaak::check::check(&prog)
+        .into_iter()
+        .chain(vaak::types::check_types(&prog))
+        .map(|e| e.msg)
+        .collect();
+    assert!(errs.is_empty(), "{name}: {errs:?}");
+    let ir = vaak::steel::compile(&prog).unwrap_or_else(|e| panic!("{name}: {}", e.msg));
+    if Command::new("clang").arg("--version").output().is_err() {
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("f80-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ll = dir.join("a.ll");
+    let exe = dir.join("a.out");
+    std::fs::write(&ll, ir).unwrap();
+    let st = Command::new("clang").arg("-O2").arg("-o").arg(&exe).arg(&ll).output().unwrap();
+    assert!(st.status.success(), "{name}: clang: {}", String::from_utf8_lossy(&st.stderr));
+    Some(Command::new(&exe).status().unwrap().code().unwrap())
+}
+
+#[test]
+fn f80の算術() {
+    let Some(c) = steel_only(
+        "算術",
+        "var x : f80 := 1.0; var y : f80 := 2.0; if (x + y == 3.0 -> f80) 7 else 8 fi",
+    ) else {
+        return;
+    };
+    assert_eq!(c, 7);
+}
+
+#[test]
+fn f80から整数へ() {
+    let Some(c) = steel_only("整数へ", "var x : f80 := 1.5; (x * 2.0 -> f80) -> i64") else {
+        return;
+    };
+    assert_eq!(c, 3);
+}
+
+#[test]
+fn f80の零で割ると畳まれる() {
+    let Some(c) = steel_only(
+        "零割",
+        "var x : f80 := 1.0; var y : f80 := 0.0; if ((x / y) ?? 5.0 -> f80 == 5.0 -> f80) 4 else 6 fi",
+    ) else {
+        return;
+    };
+    assert_eq!(c, 4);
+}
+
+#[test]
+fn f80は余分な精度を持つ() {
+    // **これが `f80` の存在理由である。**
+    // 2^-53 は `f64` では 1.0 に丸まるが、`f80`（仮数 64 ビット）では残る。
+    // **C の `long double` と同じ答えになる**ことを確かめてある
+    let Some(c) = steel_only(
+        "精度",
+        "var one : f80 := 1.0;
+         var eps : f80 := 1.1102230246251565e-16;
+         var sum : f80 := one + eps;
+         var one64 := 1.0;
+         var sum64 := one64 + 1.1102230246251565e-16;
+         (if (sum == one) 0 else 1 fi) * 10 + (if (sum64 == one64) 0 else 1 fi)",
+    ) else {
+        return;
+    };
+    assert_eq!(c, 10, "f80 で残り、f64 で消えること");
+}
+
+#[test]
+fn f80の配列() {
+    let Some(c) = steel_only(
+        "配列",
+        "var a : f80 array := new f80 array(3, 1.5); if (a[0] + a[1] == 3.0 -> f80) 5 else 6 fi",
+    ) else {
+        return;
+    };
+    assert_eq!(c, 5);
+}
+
+#[test]
+fn f80は参照実装が断る() {
+    // **方言に無い型は黙って受けない**（S-20）。
+    // `f80` と書いたのに `f64` で走ったら、書き手は精度を疑わない
+    let prog = vaak::parser::parse("var x : f80 := 1.0; x").unwrap();
+    let r = vaak::interp::Interp::new().run(&prog);
+    match r {
+        Err(e) => assert!(e.msg.contains("f80"), "{}", e.msg),
+        Ok(v) => panic!("断っていない: {v:?}"),
+    }
+    let c = vaak::vm::compile(&prog);
+    assert!(c.is_err(), "VM も断ること");
+}

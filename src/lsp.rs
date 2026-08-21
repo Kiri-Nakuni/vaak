@@ -173,7 +173,7 @@ fn kind_of(t: &Tok, next: Option<&Tok>, prev: Option<&Tok>) -> Option<u32> {
 
 /// 組み込みの型の名前。**字句器は鍵語にしていない**（識別子である）ので、ここで拾う。
 fn is_builtin_type(name: &str) -> bool {
-    matches!(name, "bool" | "u1" | "u8" | "u16" | "u32" | "i32" | "i64" | "f32" | "f64" | "str")
+    matches!(name, "bool" | "u1" | "u8" | "u16" | "u32" | "i32" | "i64" | "f32" | "f64" | "f80" | "str")
 }
 
 pub fn semantic_tokens(doc: &Doc) -> Vec<i64> {
@@ -430,6 +430,7 @@ fn show_vt(t: &crate::ast::ValueType) -> String {
         V::I32 => "i32".into(),
         V::I64 => "i64".into(),
         V::F32 => "f32".into(),
+        V::F80 => "f80".into(),
         V::F64 => "f64".into(),
         V::Str => "str".into(),
         V::Array(e) => format!("{} array", show_vt(e)),
