@@ -18,8 +18,8 @@ fn run(path: &str) -> i128 {
         Ok(other) => panic!("{path}: {other:?}"),
         Err(e) => panic!("{path}: 実行時: {} @{:?}", e.msg, e.span),
     };
-    // **VM とも突き合わせる。** ただし S-16 の食い違いが残っている例は飛ばす
-    if !matches!(path, "examples/vaak/01-探索.vaak") {
+    // **VM とも突き合わせる。**
+    {
         let p2 = vaak::vm::compile(&prog).unwrap_or_else(|e| panic!("{path}: {}", e.msg));
         let b = match vaak::vm::run_program(&p2) {
             Ok(vaak::interp::Eval::Value(v)) => v.as_int().expect("整数のはず"),
@@ -75,10 +75,19 @@ fn ホストを操る() {
 }
 
 
-/// S-16 の食い違い。**直ったらこの `ignore` を外す。**
+/// S-16 の再現。**直った**（分岐は領域である、を VM が守っていなかった）。
+///
+/// **最小の形はこれである。**
+///
+/// ```text
+/// fn g (x : i64) { if (x == 0) x; fi; } -> i64;
+/// var f := 0; f += g(0) ?? 7; f
+/// ```
+///
+/// 条件が**真のとき**だけ出た——分岐が何も積まないのに、
+/// 偽のときは paradox を積んでいたので、合流点で高さが揃わなかった。
 #[test]
-#[ignore = "S-16: VM が `??` と動的な段数の脱出の組み合わせで落ちる"]
-fn s16_vmの食い違い() {
+fn s16_直った_分岐は領域である() {
     let src = "flow $return = $repeat(break, getdepth());
 fn search (a : i64 array alias, x : i64) {
     var lo := 0;

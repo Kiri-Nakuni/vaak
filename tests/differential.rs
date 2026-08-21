@@ -176,3 +176,33 @@ dist2(p, q)
 ",
     );
 }
+
+// ===== S-16：分岐は領域である =====
+
+/// 木を辿る実装と VM が同じ答えを出すこと。
+fn 同じ(src: &str) {
+    let p = vaak::parser::parse(src).unwrap_or_else(|e| panic!("{src}: {}", e.msg));
+    let a = format!("{:?}", vaak::interp::Interp::new().run(&p));
+    let c = vaak::vm::compile(&p).unwrap_or_else(|e| panic!("{src}: {}", e.msg));
+    let b = format!("{:?}", vaak::vm::run_program(&c));
+    assert_eq!(a, b, "{src}");
+}
+
+#[test]
+fn s16_分岐が空になっても高さが揃う() {
+    // **条件が真のとき**、分岐は `;` で空になる。それでも paradox が積まれる
+    同じ("fn g (x : i64) { if (x == 0) x; fi; } -> i64; var f := 0; f += g(0) ?? 7; f");
+    同じ("if (1 == 1) 5; fi ?? 9");
+    同じ("if (1 == 2) 5; fi ?? 9");
+    同じ("if (1 == 1) 5; else 6; fi ?? 9");
+    同じ("var i := 0; if (i == 0) i += 1; else i += 2; fi; i");
+}
+
+#[test]
+fn s16_括弧の領域は自分の底を持つ() {
+    同じ("1 + (2)");
+    同じ("1 + (2) + 3");
+    同じ("var n := 1; n + (2)");
+    同じ("1 + ( 2 ; 3 )");
+    同じ("var c : u8 := 50; 1 + ((c - 48) -> i64)");
+}

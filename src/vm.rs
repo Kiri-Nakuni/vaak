@@ -863,12 +863,25 @@ impl Compiler {
             self.expr(c)?;
             self.emit(Op::NeedU1(c.span));
             let j = self.emit(Op::JumpIfFalse(0));
+            // **分岐は領域である**（C-20：被演算子位置なので領域だが、
+            // スコープでも脱出段でもない）。したがって
+            // **中身が空になれば外界面は paradox**（C-14 規則2）。
+            //
+            // これを書かないと、`if (c) x; fi` で条件が真のとき
+            // **分岐が何も積まない**——偽のときは paradox を積むのに。
+            // 合流点で高さが揃わず、後の `;` が下の値を食う（S-16）
+            self.emit(Op::RegionBegin);
             self.expr(b)?;
+            self.emit(Op::EndRegion(b.span));
             ends.push(self.emit(Op::Jump(0)));
             self.patch(j);
         }
         match &i.els {
-            Some(b) => self.expr(b)?,
+            Some(b) => {
+                self.emit(Op::RegionBegin);
+                self.expr(b)?;
+                self.emit(Op::EndRegion(b.span));
+            }
             // `else` の無い `if` で条件が偽 → paradox
             None => {
                 self.emit(Op::Paradox(span));
@@ -958,7 +971,10 @@ impl Compiler {
             self.emit(Op::Bin(BinOp::Eq, a.span));
             let j = self.emit(Op::JumpIfFalse(0));
             self.emit(Op::Pop); // 被照合体を捨てる
+            // **腕も領域である**（C-82）。`if` の分岐と同じ理由で正規化する
+            self.emit(Op::RegionBegin);
             self.expr(&a.value)?;
+            self.emit(Op::EndRegion(a.span));
             ends.push(self.emit(Op::Jump(0)));
             self.patch(j);
         }
