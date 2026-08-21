@@ -82,7 +82,11 @@ struct Stage {
 }
 
 struct Scope {
-    names: HashMap<String, (String, ValueType)>,
+    /// 名前 → （置き場、型、**間接か**）。
+    ///
+    /// 間接なら置き場は**指し先を入れた枠**であって、値の枠ではない。
+    /// 別名を使わない名前は真っ直ぐなままである——**使わない機能は費用を持たない**
+    names: HashMap<String, (String, ValueType, bool)>,
 }
 
 pub struct Steel {
@@ -298,17 +302,47 @@ impl Steel {
 
     fn declare(&mut self, name: &str, ty: ValueType) -> String {
         let p = self.alloca(&ity(&ty));
-        self.scopes.last_mut().unwrap().names.insert(name.to_string(), (p.clone(), ty));
+        self.scopes.last_mut().unwrap().names.insert(name.to_string(), (p.clone(), ty, false));
         p
     }
 
-    fn lookup(&self, name: &str) -> Option<(String, ValueType)> {
+    /// `x alias &= y` — **枠を作らず、y の枠を指す枠を作る**（C-53）。
+    ///
+    /// 指し先を入れ替えられる（`x &= z`）ので、指し先そのものではなく
+    /// **指し先を入れた枠**を持つ。真っ直ぐな名前はこの一段を通らない。
+    fn declare_alias(&mut self, name: &str, target: &str, ty: ValueType) -> String {
+        let r = self.alloca("ptr");
+        self.emit(&format!("store ptr {target}, ptr {r}"));
+        self.scopes.last_mut().unwrap().names.insert(name.to_string(), (r.clone(), ty, true));
+        r
+    }
+
+    fn lookup(&self, name: &str) -> Option<(String, ValueType, bool)> {
         for s in self.scopes.iter().rev() {
             if let Some(x) = s.names.get(name) {
                 return Some(x.clone());
             }
         }
         None
+    }
+
+    /// 値の枠を返す。**間接なら一段辿る。**
+    fn addr(&mut self, name: &str) -> Option<(String, ValueType)> {
+        let (p, ty, indirect) = self.lookup(name)?;
+        if !indirect {
+            return Some((p, ty));
+        }
+        let q = self.tmp();
+        self.emit(&format!("{q} = load ptr, ptr {p}"));
+        Some((q, ty))
+    }
+
+    /// 別名そのものの枠（指し先を入れ替えるため）。**真っ直ぐな名前には無い。**
+    fn alias_slot(&self, name: &str) -> Option<(String, ValueType)> {
+        match self.lookup(name)? {
+            (p, ty, true) => Some((p, ty)),
+            _ => None,
+        }
     }
 }
 
@@ -798,8 +832,12 @@ impl Steel {
             let Some(fields) = self.fields_of(&name) else {
                 return err(format!("知らない構造体 `{name}`"), span);
             };
-            let CtorArgs::Named(given) = args else {
-                return err("構造体は欄を名前で構築する", span);
+            // **欄を一つも書かないのは名前で書いたのと同じ**——既定値で埋まる
+            let empty = Vec::new();
+            let given = match args {
+                CtorArgs::Named(g) => g,
+                CtorArgs::Positional(p) if p.is_empty() => &empty,
+                _ => return err("構造体は欄を名前で構築する", span),
             };
             let size = self.struct_size(&name)?;
             let p = self.tmp();
@@ -1186,7 +1224,7 @@ impl Steel {
             }
 
             E::Name(n) => {
-                let Some((p, ty)) = self.lookup(n) else {
+                let Some((p, ty)) = self.addr(n) else {
                     return err(format!("知らない名前 `{n}`"), e.span);
                 };
                 let t = self.tmp();
@@ -1274,6 +1312,19 @@ impl Steel {
 
             E::Decl(d) => {
                 for b in &d.bindings {
+                    // **別名は値を作らない。** 既にある枠を指すだけ（C-53）
+                    if let BindInit::AliasOf(target) = &b.init {
+                        let Some((q, tty)) = self.addr(target) else {
+                            return err(format!("知らない名前 `{target}`"), b.span);
+                        };
+                        // **注釈があっても置き場は変えない。** 包みを剥がすだけ（S-2）
+                        let ty = match b.ty.as_ref() {
+                            Some(t) => self.resolve(&t.value),
+                            None => tty,
+                        };
+                        self.declare_alias(&b.name, &q, ty);
+                        continue;
+                    }
                     let BindInit::Value(init) = &b.init else {
                         return err("`&=` は STEEL がまだ扱えない", b.span);
                     };
@@ -1305,9 +1356,6 @@ impl Steel {
             E::Assign { op, lhs, rhs } => {
                 // `p.欄 := v`
                 if let ExprKind::Field { base, name } = &lhs.kind {
-                    if *op != AssignOp::Set {
-                        return err("欄への複合代入は STEEL がまだ扱えない", e.span);
-                    }
                     let b = self.expr(base)?;
                     let Some(b) = b else { return err("受け手に値が無い", base.span) };
                     let ValueType::Named(sname) = &b.ty else {
@@ -1323,20 +1371,14 @@ impl Steel {
                     let fty = fields[i].1.clone();
                     let r = self.expr(rhs)?;
                     let Some(r) = r else { return err("代入する値が無い", e.span) };
-                    let c = if is_heap(&fty) {
-                        self.deep_copy(&r.v.clone(), &fty)
-                    } else {
-                        self.conv(&r.v.clone(), &r.ty.clone(), &fty)
-                    };
                     let g = self.field_ptr(&b.v.clone(), &sname, i)?;
+                    // **場所は一度だけ数える。** 読み書きで別々に数えない
+                    let c = self.rmw(*op, &g, &fty, r, e.span)?;
                     self.emit(&format!("store {} {c}, ptr {g}", ity(&fty)));
                     return Ok(None);
                 }
                 // `a[i] := v` — **範囲外なら何も起きない**（paradox）
                 if let ExprKind::Index { base, index } = &lhs.kind {
-                    if *op != AssignOp::Set {
-                        return err("集合体への複合代入は STEEL がまだ扱えない", e.span);
-                    }
                     let b = self.expr(base)?;
                     let i = self.expr(index)?;
                     let r = self.expr(rhs)?;
@@ -1350,12 +1392,6 @@ impl Steel {
                     let (inb, safe) = self.bounds(&b.v.clone(), &idx);
                     let g = self.elem_ptr(&b.v.clone(), &safe, &b.ty.clone());
                     let el = elem_of(&b.ty).unwrap_or(ValueType::I64);
-                    // **集合体は自分の要素の型を知っている**（C-94）
-                    let c = if is_heap(&el) {
-                        self.deep_copy(&r.v.clone(), &el)
-                    } else {
-                        self.conv(&r.v.clone(), &r.ty.clone(), &el)
-                    };
                     // **範囲外への書き込みは誤りである。**
                     //
                     // 読みなら paradox でよい（「そこに値が無い」と言える）が、
@@ -1369,16 +1405,30 @@ impl Steel {
                     self.emit("unreachable");
                     self.done = true;
                     self.place(&good);
+                    // **集合体は自分の要素の型を知っている**（C-94）。
+                    // 読み書きは範囲を確かめた後——**枠の外を読んでから足さない**
+                    let c = self.rmw(*op, &g, &el, r, e.span)?;
                     self.emit(&format!("store {} {c}, ptr {g}", ity(&el)));
                     return Ok(None);
                 }
                 let ExprKind::Name(n) = &lhs.kind else {
                     return err("STEEL はまだ名前への代入しか扱えない", e.span);
                 };
+                // `x &= z` — **指し直す。** 値は動かない（C-53）
                 if *op == AssignOp::Alias {
-                    return err("`&=` は STEEL がまだ扱えない", e.span);
+                    let Some((slot, _)) = self.alias_slot(n) else {
+                        return err("指し直せるのは別名だけ", lhs.span);
+                    };
+                    let ExprKind::Name(t) = &rhs.kind else {
+                        return err("`&=` の右は名前でなければならない", rhs.span);
+                    };
+                    let Some((q, _)) = self.addr(t) else {
+                        return err(format!("知らない名前 `{t}`"), rhs.span);
+                    };
+                    self.emit(&format!("store ptr {q}, ptr {slot}"));
+                    return Ok(None);
                 }
-                let Some((p, ty)) = self.lookup(n) else {
+                let Some((p, ty)) = self.addr(n) else {
                     return err(format!("知らない名前 `{n}`"), lhs.span);
                 };
                 let r = self.expr(rhs)?;
@@ -1392,17 +1442,8 @@ impl Steel {
                 } else {
                     let cur = self.tmp();
                     self.emit(&format!("{cur} = load {}, ptr {p}", ity(&ty)));
-                    let b = match op {
-                        AssignOp::Add => BinOp::Add,
-                        AssignOp::Sub => BinOp::Sub,
-                        AssignOp::Mul => BinOp::Mul,
-                        AssignOp::Div => BinOp::Div,
-                        AssignOp::Mod => BinOp::Mod,
-                        AssignOp::Shl => BinOp::Shl,
-                        AssignOp::Shr => BinOp::Shr,
-                        AssignOp::BitXor => BinOp::BitXor,
-                        AssignOp::BitOr => BinOp::BitOr,
-                        _ => return err("扱えない代入", e.span),
+                    let Some(b) = assign_binop(*op) else {
+                        return err("扱えない代入", e.span);
                     };
                     let lv = Val { ok: "true".into(), v: cur, ty: ty.clone() };
                     let out = self.binary(b, lv, r, e.span)?;
@@ -1431,10 +1472,15 @@ impl Steel {
                 let v = self.expr(expr)?;
                 let Some(v) = v else { return err("注釈する値が無い", e.span) };
                 let t = self.resolve(&ty.value);
-                if width(&t).is_none() && !is_float(&t) {
-                    return err("STEEL はまだ数しか扱えない", e.span);
+                if width(&t).is_none() && !is_float(&t) && !is_heap(&t) {
+                    return err("STEEL はまだ数と集合体しか扱えない", e.span);
                 }
-                let c = self.conv(&v.v.clone(), &v.ty.clone(), &t);
+                // **包みを剥がしても置き場は変わらない**（S-2）。数だけ幅を合わせる
+                let c = if is_heap(&t) {
+                    v.v.clone()
+                } else {
+                    self.conv(&v.v.clone(), &v.ty.clone(), &t)
+                };
                 Ok(Some(Val { ok: v.ok, v: c, ty: t }))
             }
 
@@ -1449,6 +1495,31 @@ impl Steel {
 
             _ => err("STEEL がまだ扱えない構文", e.span),
         }
+    }
+
+    /// 場所への**読み・演算・書き**。`:=` なら読まずに書く。
+    ///
+    /// **場所は呼び手が一度だけ数えてから渡す。** 添字も欄も、
+    /// 読みと書きで別々に数えると**二度目に違う場所を指しうる**。
+    fn rmw(&mut self, op: AssignOp, ptr: &str, ty: &ValueType, r: Val, span: Span) -> R<String> {
+        if op == AssignOp::Set {
+            // **`:=` は深い複製である**（C-33）
+            return Ok(if is_heap(ty) {
+                self.deep_copy(&r.v.clone(), ty)
+            } else {
+                self.conv(&r.v.clone(), &r.ty.clone(), ty)
+            });
+        }
+        let Some(b) = assign_binop(op) else {
+            return err("扱えない代入", span);
+        };
+        if is_heap(ty) {
+            return err("集合体には複合代入できない", span);
+        }
+        let cur = self.tmp();
+        self.emit(&format!("{cur} = load {}, ptr {ptr}", ity(ty)));
+        let lv = Val { ok: "true".into(), v: cur, ty: ty.clone() };
+        Ok(self.binary(b, lv, r, span)?.v)
     }
 
     /// `??` — **左が値なら右は走らない。**
@@ -2193,4 +2264,20 @@ fn collect(
             _ => {}
         }
     }
+}
+
+/// 代入演算子を二項演算子へ写す。**`:=` と `&=` は演算ではない**ので持たない。
+fn assign_binop(op: AssignOp) -> Option<BinOp> {
+    Some(match op {
+        AssignOp::Add => BinOp::Add,
+        AssignOp::Sub => BinOp::Sub,
+        AssignOp::Mul => BinOp::Mul,
+        AssignOp::Div => BinOp::Div,
+        AssignOp::Mod => BinOp::Mod,
+        AssignOp::Shl => BinOp::Shl,
+        AssignOp::Shr => BinOp::Shr,
+        AssignOp::BitXor => BinOp::BitXor,
+        AssignOp::BitOr => BinOp::BitOr,
+        _ => return None,
+    })
 }

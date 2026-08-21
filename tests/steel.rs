@@ -331,3 +331,35 @@ t!(包み型は基底型のまま,
    "wrap Meters = i64; let m := new Meters ( 5 ); new i64 ( m ) * 2");
 t!(包み型の集合体,
    "wrap Bytes = u8 array; var b : Bytes := new Bytes ( new u8 array(3, 97) ); 3");
+
+// ── 複合代入は場所を一度だけ数える ─────────────────────────
+
+t!(欄への複合代入,
+   "struct P { var x : i64 := 10; var y : i64 := 3; };
+    var p := new P (); p.x += 5; p.y *= 4; p.x + p.y");
+t!(枡への複合代入,
+   "var a := new i64 array(3, 7); a[0] += 1; a[1] -= 2; a[2] *= 3; a[0] + a[1] + a[2]");
+t!(欄への割り算の複合代入,
+   "struct P { var x : i64 := 100; }; var p := new P (); p.x /= 7; p.x");
+t!(入れ子の欄へ足す,
+   "struct P { var a : i64 array; };
+    var p := new P ( a := new i64 array(2, 5) ); p.a[0] += 6; p.a[0] + p.a[1]");
+t!(添字は一度だけ数える,
+   "var n := 0; var a := new i64 array(2, 0); a[n] += 9; a[0] + a[1] + n");
+t!(浮動小数の複合代入,
+   "struct P { var x : f64 := 1.5; }; var p := new P (); p.x += 2.25;
+    if (p.x == 3.75) 1 else 0 fi");
+t!(注釈は集合体にも付く, "var a := new i64 array(2, 4); (a -> i64 array)[1]");
+
+// ── 別名は枠を指す。値は動かない ─────────────────────────
+
+t!(別名から読む, "var x := 7; var y : i64 alias &= x; y");
+t!(別名へ書くと元も変わる, "var x := 7; var y : i64 alias &= x; y := 9; x");
+t!(元へ書くと別名も変わる, "var x := 7; var y : i64 alias &= x; x := 4; y");
+t!(別名を指し直す,
+   "var a := 1; var b := 2; var r : i64 alias &= a; r &= b; r := 8; a * 10 + b");
+t!(別名の別名, "var x := 5; var y : i64 alias &= x; var z : i64 alias &= y; z := 3; x");
+t!(別名へ複合代入, "var x := 10; var y : i64 alias &= x; y += 5; x");
+t!(集合体の別名, "var a := new i64 array(2, 3); var b : i64 array alias &= a; b[0] := 9; a[0] + a[1]");
+t!(別名は枠を新しく作らない,
+   "var x := 1; { var y : i64 alias &= x; y := 6; }; x");
