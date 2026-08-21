@@ -9,6 +9,22 @@
 | `~/Documents/mydsl` | `speculative` | **ここで作業中。** `main` は古い |
 | `~/Documents/rtex` | `vaak` | `\directvaak` / `\vaakdef` まで。**GPLv3** |
 
+## いまの担当（2026-08-21 に入れ替えた）
+
+| | 担当 | 枝 |
+|---|---|---|
+| **Claude（自分）** | **Vaak（この版方）** | `speculative` |
+| Codex | rtex（別版方） | `etex-latex` |
+
+**rtex には触らない。** `AGENTS.md` に両方の分担が書いてある。
+リモートは `origin`（`git.trap.jp`）。**枝を進めたら push すること。**
+
+## 依頼された順（これを上から）
+
+1. **S-11：ホストが呼べる名前も見せられる** ← **いまここ。rtex が待っている**
+2. **STEEL 第四段**。**`f80` を足すこと**（LLVM の `x86_fp80`）
+3. その他（下の一覧）
+
 ## 依頼の一覧と状態
 
 | # | もの | 状態 |
@@ -37,6 +53,20 @@
 | 16 | 設計質問二つ | **済**（S-14） |
 
 ## 記録
+
+### 2026-08-21（続き 5）
+
+- **担当を入れ替えた。** Codex が rtex（pdfTeX・e-upTeX・kpathsea が重い）、
+  Claude が Vaak。`AGENTS.md` を両方に置いて push した
+- 引き継ぐ前に rtex を一段進めた：`\expanded` `\detokenize` `\unexpanded` と
+  **引用符つきファイル名**（`\openin\@inputcheck"expl3.ltx" `——
+  これが無いと `\IfFileExists` が必ず偽になる）。
+  `latex.ltx` は **expl3-code.tex の 7866 行目**まで。rtex 155 通過
+- **f80 の依頼**：STEEL に `x86_fp80` を足す。
+  プローブは「ホスト方言は基底型を足せる（例: 31/63bit 整数、f80）」と言っている——
+  **STEEL は方言である**という形で入れるのが筋。
+  ただし **Rust に f80 が無いので、木を辿る参照実装と差分試験できない。**
+  そこをどう扱うか決めること（`S-n` に書く）
 
 ### 2026-08-21（続き 4）
 
