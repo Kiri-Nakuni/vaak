@@ -363,3 +363,23 @@ t!(別名へ複合代入, "var x := 10; var y : i64 alias &= x; y += 5; x");
 t!(集合体の別名, "var a := new i64 array(2, 3); var b : i64 array alias &= a; b[0] := 9; a[0] + a[1]");
 t!(別名は枠を新しく作らない,
    "var x := 1; { var y : i64 alias &= x; y := 6; }; x");
+
+// ── 押す・引く・空にする ─────────────────────────
+
+t!(押して伸ばす, "var a := new i64 array(0, 0); a.push(3); a.push(4); a.push(5); a.len()");
+t!(押した値が読める, "var a := new i64 array(0, 0); a.push(7); a.push(9); a[0] * 10 + a[1]");
+t!(何度も押す,
+   "var a := new i64 array(0, 0); var i := 0; while (i < 40) { a.push(i); i += 1; }; a[39] + a.len()");
+t!(引くと減る, "var a := new i64 array(3, 5); a.pop(); a.len()");
+t!(引いた値が出る, "var a := new i64 array(0, 0); a.push(6); a.push(8); a.pop()");
+t!(空から引くと虚無, "var a := new i64 array(0, 0); a.pop() ?? 42");
+t!(空にする, "var a := new i64 array(9, 1); a.clear(); a.len()");
+t!(空にしてから押す, "var a := new i64 array(9, 1); a.clear(); a.push(3); a.len() * 10 + a[0]");
+t!(押しても他は変わらない,
+   "var a := new i64 array(2, 1); var b := a; b.push(9); a.len() * 10 + b.len()");
+t!(欄の集合体を押す,
+   "struct P { var a : i64 array; }; var p := new P ( a := new i64 array(0, 0) );
+    p.a.push(4); p.a.push(6); p.a[1] + p.a.len()");
+t!(浮動小数を押す,
+   "var a := new f64 array(0, 0.0); a.push(1.5); a.push(2.5);
+    if (a[0] + a[1] == 4.0) 1 else 0 fi");

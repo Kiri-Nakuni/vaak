@@ -1862,6 +1862,98 @@ impl Steel {
         Ok((d * times as usize, c, p))
     }
 
+    /// 式の指す**枠**（値そのものではない）。書き戻しに要る。
+    fn slot(&mut self, e: &Expr) -> R<(String, ValueType)> {
+        match &e.kind {
+            ExprKind::Name(n) => self
+                .addr(n)
+                .ok_or(SteelError { msg: format!("知らない名前 `{n}`"), span: e.span }),
+            ExprKind::Paren(v) if v.len() == 1 => self.slot(&v[0]),
+            ExprKind::Field { base, name } => {
+                let b = self.expr(base)?;
+                let Some(b) = b else { return err("受け手に値が無い", base.span) };
+                let ValueType::Named(sname) = &b.ty else {
+                    return err("欄を持つのは構造体だけ", base.span);
+                };
+                let sname = sname.clone();
+                let Some(fields) = self.fields_of(&sname) else {
+                    return err(format!("知らない構造体 `{sname}`"), base.span);
+                };
+                let Some(i) = fields.iter().position(|(f, _)| f == name) else {
+                    return err(format!("`{sname}` に欄 `{name}` は無い"), e.span);
+                };
+                let fty = fields[i].1.clone();
+                let g = self.field_ptr(&b.v.clone(), &sname, i)?;
+                Ok((g, fty))
+            }
+            _ => err("ここには名前か欄が要る", e.span),
+        }
+    }
+
+    /// `a.push(v)` `a.pop()` `a.clear()` — **場所を書き換える。**
+    fn mutating_method(
+        &mut self,
+        base: &Expr,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> R<Region> {
+        let (slot, ty) = self.slot(base)?;
+        if !is_heap(&ty) {
+            return err("押し引きできるのは集合体だけ", base.span);
+        }
+        let el = elem_of(&ty).unwrap_or(ValueType::I64);
+        let es = elem_size(&el);
+        let cur = self.tmp();
+        self.emit(&format!("{cur} = load ptr, ptr {slot}"));
+        match name {
+            "clear" => {
+                // **個数を零にするだけ。** 容量も置き場もそのまま
+                self.emit(&format!("store i64 0, ptr {cur}"));
+                Ok(None)
+            }
+            "push" => {
+                let Some(a) = args.first() else {
+                    return err("`push` は値を一つ取る", span);
+                };
+                let v = self.expr(a)?;
+                let Some(v) = v else { return err("押す値が無い", a.span) };
+                // **集合体は自分の要素の型を知っている**（C-94）
+                let c = if is_heap(&el) {
+                    self.deep_copy(&v.v.clone(), &el)
+                } else {
+                    self.conv(&v.v.clone(), &v.ty.clone(), &el)
+                };
+                let q = self.tmp();
+                self.emit(&format!("{q} = call ptr @vaak.grow(ptr {cur}, i64 {es})"));
+                self.emit(&format!("store ptr {q}, ptr {slot}"));
+                let n = self.coll_len(&q);
+                let last = self.tmp();
+                self.emit(&format!("{last} = sub i64 {n}, 1"));
+                let g = self.elem_ptr(&q, &last, &ty);
+                self.emit(&format!("store {} {c}, ptr {g}", ity(&el)));
+                // **押した結果は paradox**（C-33 と同じく、書きは値を置かない）
+                Ok(None)
+            }
+            "pop" => {
+                let n = self.coll_len(&cur);
+                let some = self.tmp();
+                self.emit(&format!("{some} = icmp sgt i64 {n}, 0"));
+                let last = self.tmp();
+                self.emit(&format!("{last} = sub i64 {n}, 1"));
+                // **空なら触らない。** 添字も個数も零のまま
+                let safe = self.tmp();
+                self.emit(&format!("{safe} = select i1 {some}, i64 {last}, i64 0"));
+                let g = self.elem_ptr(&cur, &safe, &ty);
+                let out = self.tmp();
+                self.emit(&format!("{out} = load {}, ptr {g}", ity(&el)));
+                self.emit(&format!("store i64 {safe}, ptr {cur}"));
+                Ok(Some(Val { ok: some, v: out, ty: el }))
+            }
+            _ => err(format!("`{name}` は STEEL がまだ扱えない"), span),
+        }
+    }
+
     /// 組み立て時に決まる整数か。**`getdepth()` はここで決まる**（C-23）。
     fn const_int(&self, e: &Expr) -> Option<i128> {
         match &e.kind {
@@ -1891,6 +1983,13 @@ impl Steel {
 
 impl Steel {
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> R<Region> {
+        // **書き換えるメンバ関数は場所を要る。** 伸ばすと置き場が変わりうるので、
+        // 新しい置き場を**元の枠へ書き戻さねばならない**
+        if let ExprKind::Field { base, name } = &callee.kind {
+            if matches!(name.as_str(), "push" | "pop" | "clear") {
+                return self.mutating_method(base, name, args, span);
+            }
+        }
         // 集合体のメンバ関数
         if let ExprKind::Field { base, name } = &callee.kind {
             let b = self.expr(base)?;
@@ -2117,6 +2216,38 @@ entry:
   %cp = getelementptr i8, ptr %p, i64 8
   store i64 %len, ptr %cp
   ret ptr %p
+}
+
+; **一つ分伸ばす。** 容量が足りれば同じ場所、足りなければ写して新しい場所を返す。
+;
+; 頭は十六バイト——前の八つが**個数**、後の八つが**容量**である。
+; 容量は最初から持っていた（`@vaak.new` が個数と同じ値を入れている）ので、
+; **表現を変えずに伸ばせる。**
+define internal ptr @vaak.grow(ptr %p, i64 %esize) {
+entry:
+  %n = load i64, ptr %p
+  %cp = getelementptr i8, ptr %p, i64 8
+  %c = load i64, ptr %cp
+  %fits = icmp slt i64 %n, %c
+  %n1 = add i64 %n, 1
+  br i1 %fits, label %inplace, label %move
+inplace:
+  store i64 %n1, ptr %p
+  ret ptr %p
+move:
+  ; **倍にする。** 一つずつ伸ばすと押すたびに写すことになる
+  %twice = shl i64 %c, 1
+  %empty = icmp slt i64 %twice, 4
+  %c2 = select i1 %empty, i64 4, i64 %twice
+  %q = call ptr @vaak.new(i64 %c2, i64 %esize)
+  %bytes = mul i64 %n, %esize
+  %src = getelementptr i8, ptr %p, i64 16
+  %dst = getelementptr i8, ptr %q, i64 16
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 %bytes, i1 false)
+  store i64 %n1, ptr %q
+  %qc = getelementptr i8, ptr %q, i64 8
+  store i64 %c2, ptr %qc
+  ret ptr %q
 }
 
 define internal i64 @vaak.len(ptr %p) {
