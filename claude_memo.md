@@ -19,11 +19,12 @@
 | 3b | VS Code 拡張 | **済** |
 | 4 | LICENSE（MIT / 有村陽大。rtex は tyti 氏） | **済** |
 | 5 | STEEL vaak | **第一段・第二段 済**（S-12 / S-17 / S-18）。**C の 1.12×** |
-| **5b** | **STEEL 第三段：集合体**（配列・写像・`str`・構造体・`alias`） | **未。次の山** |
+| 5b | STEEL 第三段：集合体 | **済**（S-19）。配列・`str`・深い複製・`alias`・場の解放 |
+| 5d | STEEL：写像・構造体・入れ子の集合体・ループ本体の解放 | 未 |
 | 5c | STEEL：`outward`・動く段数の `$repeat`・ホスト界面 | 未 |
 | 6 | e-upTeX 移植可否 | **済**（八段の段取り） |
-| 7 | e-upTeX 移植 | **段 0・1a 済**。次は 1b（疎レジスタ）→ 2（字句系）→ 3（内省） |
-| 9 | LaTeX2e が動くか | 段 3 の後 |
+| 7 | e-upTeX 移植 | 段 0・1a 済 ＋ **e-TeX の大半**（`\protected` `\ifdefined` `\ifcsname` `\unless` 問い合わせ群） |
+| **9** | **LaTeX2e が動くか** | **進行中。** latex.ltx が 115 → 1148 行目まで。次は pdfTeX の実用命令 |
 | 10 | LuaTeX のコールバック再現 | 方針は **S-11**。未着手 |
 | 10b | **S-15 の穴埋め：`read_at` / `write_at`** | 未。動く添字が 1340 ns |
 | 10c | **`aakdef` の逐語読み**（balanced text 一級対応） | 未 |
@@ -36,6 +37,21 @@
 | 16 | 設計質問二つ | **済**（S-14） |
 
 ## 記録
+
+### 2026-08-21（続き 4）
+
+- **STEEL 第三段（S-19）**：記憶模型は C-90 の表がそのまま設計だった。
+  バンプ確保器＋領域を出るとき外へ出る一つの値を印の下へ写す（C-14 が一つに縛る）。
+  配列・`str`・深い複製・`alias`・`.len()`・添字の読み書き。**289 通過**
+  - 限界：関数の中のループが場を伸ばす。尽きたら終了コード 70
+  - 範囲外への**書き込み**は誤りにした（代入は元々 paradox を産むので区別がつかない）
+- **rtex e-TeX**：latex.ltx が実際に使う命令を数えてから入れた。
+  `\protected`（81 箇所）`\ifdefined` `\ifcsname` `\unless` `\eTeXversion`
+  `\currentgroup*` `\currentif*` `\lastnodetype` `\tracing*`。**149 通過**
+  - **latex.ltx は 115 行目 → 1148 行目まで進んだ**
+  - **重要**：現代の LaTeX2e は素の e-TeX では動かない。
+    `\pdffilesize` / `\filesize` / `\luatexversion` / `\kanjiskip` のどれかが要る。
+    **次は pdfTeX の実用命令**（文字列・ハッシュ・乱数。組版に触らない）
 
 ### 2026-08-21（続き 3）
 
