@@ -977,9 +977,10 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
             if *i < 0 {
                 return false;
             }
-            match (b.get_mut(*i as usize), &new) {
-                (Some(slot), Value::U8(x)) if rest.is_empty() => {
-                    *slot = *x;
+            // **`str` の要素は `u8` である**（C-77）。書き込む値をそれに揃える（C-94）
+            match (b.get_mut(*i as usize), new.as_int()) {
+                (Some(slot), Some(x)) if rest.is_empty() => {
+                    *slot = x as u8;
                     true
                 }
                 _ => false,
