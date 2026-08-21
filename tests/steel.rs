@@ -93,3 +93,31 @@ t!(関数から脱出, "fn f (n : i64) { nfor (i, 0, n) { if (i == 3) break brea
 t!(型を指定した束縛, "var x : i32 := 300; x");
 t!(狭い型で折り返す, "var x : u8 := 200; x + 100");
 t!(continueで飛ばす, "var s := 0; nfor (i, 0, 10) { if (i == 3) continue; fi; s += 1; }; s");
+
+// ===== 第二段：浮動小数と `|>` =====
+
+t!(浮動小数の加算, "var x := 1.5; var y := 2.25; if (x + y == 3.75) 1 else 0 fi");
+t!(浮動小数の除算, "var x := 7.0; var y := 2.0; if (x / y == 3.5) 1 else 0 fi");
+t!(零で割ると畳まれる浮動小数, "var x := 1.0; var y := 0.0; if ((x / y) ?? 42.0 == 42.0) 1 else 0 fi");
+t!(非有限は畳まれる, "var x := 1.0; var y := 0.0; if ((x / y) ?? 0.0 == 0.0) 7 else 8 fi");
+t!(浮動小数の比較, "var x := 1.5; if (x < 2.0) 3 else 4 fi");
+t!(浮動小数の符号反転, "var x := 1.5; if (0.0 - x < 0.0) 5 else 6 fi");
+t!(f32を指定する, "var x : f32 := 1.5; if (x == 1.5 -> f32) 9 else 8 fi");
+t!(パイプ, "fn double (n : i64) { n * 2 } -> i64; 21 |> double()");
+t!(パイプで引数を足す, "fn add (a : i64, b : i64) { a + b } -> i64; 20 |> add(22)");
+t!(パイプを繋ぐ, "fn inc (n : i64) { n + 1 } -> i64; fn dbl (n : i64) { n * 2 } -> i64; 20 |> inc() |> dbl()");
+
+// ===== 第二段：作用素式（`flow` / `$repeat`）=====
+
+t!(二段抜けて値を置く, "loop { { break break 7; }; }");
+t!(flowで名前を付ける, "flow $out = break break; loop { { $out 8; }; }");
+t!(returnの定番,
+   "flow $return = $repeat(break, getdepth());
+    fn f (n : i64) { nfor (i, 0, 10) { if (i == n) $return i; fi; }; } -> i64; f(4) ?? 0 - 1");
+t!(returnが見つからないとparadox,
+   "flow $return = $repeat(break, getdepth());
+    fn f (n : i64) { nfor (i, 0, 3) { if (i == n) $return i; fi; }; } -> i64; f(9) ?? 99");
+t!(getdepthは使用位置で決まる,
+   "flow $return = $repeat(break, getdepth());
+    fn f () { { { $return 5; }; }; 0 } -> i64; f()");
+t!(repeatの回数は式でよい, "loop { { { break $repeat(break, 1 + 1) 6; }; }; }");
