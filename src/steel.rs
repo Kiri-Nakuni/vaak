@@ -103,6 +103,12 @@ pub struct Steel {
     decls: Vec<String>,
     /// 型ごとの写す関数。**一度だけ出す**
     copy_fns: Vec<String>,
+    /// 構造体の宣言。**欄の並びが位置を決める**
+    structs: HashMap<String, StructDecl>,
+    /// 包み型（S-2）。名前 → 包んだ型
+    wraps: HashMap<String, ValueType>,
+    /// 出した構造体の型。**重ねて出さない**
+    struct_tys: Vec<String>,
 }
 
 /// 型の幅。**混ぜられないので、幅は左の被演算子が決める**（実装は `wrap_like` と同じ）。
@@ -128,7 +134,7 @@ fn ity(t: &ValueType) -> String {
         // **方言が足した基底型**（S-20）。符号 1・指数 15・仮数 64 ビット
         ValueType::F80 => "x86_fp80".into(),
         // **集合体は場所を指す**
-        ValueType::Array(_) | ValueType::Str => "ptr".into(),
+        ValueType::Array(_) | ValueType::Str | ValueType::Named(_) => "ptr".into(),
         _ => format!("i{}", width(t).unwrap_or(64)),
     }
 }
@@ -139,7 +145,8 @@ fn is_float(t: &ValueType) -> bool {
 
 /// **場に置かれるもの。** 値そのものではなく、場所を指す。
 fn is_heap(t: &ValueType) -> bool {
-    matches!(t, ValueType::Array(_) | ValueType::Str)
+    // **`Named` はここに来る時点で構造体である**——包みは `resolve` で剥がしてある
+    matches!(t, ValueType::Array(_) | ValueType::Str | ValueType::Named(_))
 }
 
 /// 集合体の要素の型。`str` は `u8 array` を包んだもの（C-77）。
@@ -223,6 +230,9 @@ impl Steel {
             strings: Vec::new(),
             decls: Vec::new(),
             copy_fns: Vec::new(),
+            structs: HashMap::new(),
+            wraps: HashMap::new(),
+            struct_tys: Vec::new(),
         }
     }
 
@@ -305,6 +315,74 @@ impl Steel {
 // ================= 式 =================
 
 impl Steel {
+    /// **包み型を剥がす**（S-2）。構造体はそのまま。
+    ///
+    /// `wrap Meters = i64;` の `Meters` は、実装から見れば `i64` である——
+    /// **包みは型検査のためにあり、置き場は変えない。**
+    fn resolve(&self, t: &ValueType) -> ValueType {
+        match t {
+            ValueType::Named(n) => match self.wraps.get(n) {
+                Some(base) => self.resolve(base),
+                None => t.clone(),
+            },
+            ValueType::Array(e) => ValueType::Array(Box::new(self.resolve(e))),
+            ValueType::Map(k, v) => {
+                ValueType::Map(Box::new(self.resolve(k)), Box::new(self.resolve(v)))
+            }
+            _ => t.clone(),
+        }
+    }
+
+    /// 構造体の欄の並び。**宣言の順が位置である。**
+    fn fields_of(&self, name: &str) -> Option<Vec<(String, ValueType)>> {
+        let d = self.structs.get(name)?;
+        Some(
+            d.fields
+                .iter()
+                .map(|f| (f.name.clone(), self.resolve(&f.ty.value)))
+                .collect(),
+        )
+    }
+
+    /// LLVM の型の名前。**一度だけ出す。**
+    fn struct_ty(&mut self, name: &str) -> R<String> {
+        let ll = format!("%vaak.s.{name}");
+        if self.struct_tys.contains(&ll) {
+            return Ok(ll);
+        }
+        self.struct_tys.push(ll.clone());
+        let Some(fields) = self.fields_of(name) else {
+            return err(format!("知らない構造体 `{name}`"), Span::NONE);
+        };
+        // **欄の型を先に出す。** 入れ子の構造体があるので
+        for (_, t) in &fields {
+            if let ValueType::Named(n) = t {
+                self.struct_ty(n)?;
+            }
+        }
+        let inner: Vec<String> = fields.iter().map(|(_, t)| ity(t)).collect();
+        self.head_global(&format!("{ll} = type {{ {} }}", inner.join(", ")));
+        Ok(ll)
+    }
+
+    /// 構造体の大きさ。**LLVM に数えさせる**——揃えを自分で数えない
+    fn struct_size(&mut self, name: &str) -> R<String> {
+        let ll = self.struct_ty(name)?;
+        let g = self.tmp();
+        self.emit(&format!("{g} = getelementptr {ll}, ptr null, i64 1"));
+        let n = self.tmp();
+        self.emit(&format!("{n} = ptrtoint ptr {g} to i64"));
+        Ok(n)
+    }
+
+    /// 欄の場所。
+    fn field_ptr(&mut self, base: &str, name: &str, idx: usize) -> R<String> {
+        let ll = self.struct_ty(name)?;
+        let g = self.tmp();
+        self.emit(&format!("{g} = getelementptr {ll}, ptr {base}, i64 0, i32 {idx}"));
+        Ok(g)
+    }
+
     fn konst(&mut self, ty: &ValueType, v: i128) -> Val {
         let w = width(ty).unwrap_or(64);
         // **2^N を法として折り返す**（C-76）
@@ -653,6 +731,41 @@ impl Steel {
     /// 持つなら**一つずつ、要素の写す関数を呼ぶ**——
     /// **値のグラフに循環は無い**（C-63）ので、この再帰は必ず止まる。
     fn copy_fn(&mut self, ty: &ValueType) -> String {
+        // **包みを剥がしてから見る**（S-2）。剥がさないと構造体と間違える
+        let ty = &self.resolve(ty);
+        // **構造体は欄ごとに写す**
+        if let ValueType::Named(name) = ty {
+            let name = name.clone();
+            let fname = format!("@vaak.copy.n{name}");
+            if self.copy_fns.contains(&fname) {
+                return fname;
+            }
+            self.copy_fns.push(fname.clone());
+            let fields = self.fields_of(&name).unwrap_or_default();
+            let ll = self.struct_ty(&name).unwrap_or_else(|_| "%err".into());
+            let mut body = format!(
+                "define internal ptr {fname}(ptr %p) {{\nentry:\n  %sz = getelementptr {ll}, ptr null, i64 1\n  %n = ptrtoint ptr %sz to i64\n  %q = call ptr @vaak.alloc(i64 %n)\n"
+            );
+            for (i, (_, fty)) in fields.iter().enumerate() {
+                let t = ity(fty);
+                body.push_str(&format!(
+                    "  %sp{i} = getelementptr {ll}, ptr %p, i64 0, i32 {i}\n  %sv{i} = load {t} , ptr %sp{i}\n"
+                ));
+                let stored = if is_heap(fty) {
+                    let inner = self.copy_fn(fty);
+                    body.push_str(&format!("  %cv{i} = call ptr {inner}(ptr %sv{i})\n"));
+                    format!("%cv{i}")
+                } else {
+                    format!("%sv{i}")
+                };
+                body.push_str(&format!(
+                    "  %dp{i} = getelementptr {ll}, ptr %q, i64 0, i32 {i}\n  store {t} {stored}, ptr %dp{i}\n"
+                ));
+            }
+            body.push_str("  ret ptr %q\n}");
+            self.head_global(&body);
+            return fname;
+        }
         let el = elem_of(ty).unwrap_or(ValueType::I64);
         let es = elem_size(&el);
         let name = format!("@vaak.copy.{}", Self::mangle(ty));
@@ -678,7 +791,41 @@ impl Steel {
 
     /// `new T ( 引数 )` — **配列と写像は位置で、構造体は名前で**（C-78）。
     fn construct(&mut self, ty: &Type, args: &CtorArgs, span: Span) -> R<Region> {
-        let t = ty.value.clone();
+        let t = self.resolve(&ty.value);
+        // **構造体は欄を名前で**（C-78）
+        if let ValueType::Named(name) = &t {
+            let name = name.clone();
+            let Some(fields) = self.fields_of(&name) else {
+                return err(format!("知らない構造体 `{name}`"), span);
+            };
+            let CtorArgs::Named(given) = args else {
+                return err("構造体は欄を名前で構築する", span);
+            };
+            let size = self.struct_size(&name)?;
+            let p = self.tmp();
+            self.emit(&format!("{p} = call ptr @vaak.alloc(i64 {size})"));
+            for (i, (fname, fty)) in fields.iter().enumerate() {
+                // 与えられた値。**無ければ既定**（検査器が「値が無い」を捕らえている）
+                let v = match given.iter().find(|(g, _)| g == fname) {
+                    Some((_, e)) => {
+                        let v = self.expr(e)?;
+                        let Some(v) = v else { return err("欄に値が無い", e.span) };
+                        if is_heap(fty) {
+                            self.deep_copy(&v.v.clone(), fty)
+                        } else {
+                            self.conv(&v.v.clone(), &v.ty.clone(), fty)
+                        }
+                    }
+                    None => match self.default_of(fname, &name, fty)? {
+                        Some(v) => v,
+                        None => return err(format!("欄 `{fname}` に値が無い"), span),
+                    },
+                };
+                let g = self.field_ptr(&p, &name, i)?;
+                self.emit(&format!("store {} {v}, ptr {g}", ity(fty)));
+            }
+            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+        }
         // **包み型を剥がす／包む**（S-2）。`new i64 ( m )` は数を数に
         if !is_heap(&t) {
             let CtorArgs::Positional(a) = args else {
@@ -703,6 +850,11 @@ impl Steel {
         };
         let n = self.expr(nx)?;
         let Some(n) = n else { return err("`new` の個数に値が無い", nx.span) };
+        // **包む／剥がす**（S-2）。既にその型なら、そのまま通す——
+        // `new Bytes ( <u8 array> )` は長さではなく**包む**という意味である
+        if is_heap(&n.ty) {
+            return Ok(Some(Val { ok: n.ok, v: n.v, ty: t }));
+        }
         let len = self.widen64(&n);
         // **負の個数は零とみなす。** 落ちるより畳む
         let neg = self.tmp();
@@ -753,6 +905,23 @@ impl Steel {
         self.place(&done);
 
         Ok(Some(Val { ok: "true".into(), v: p, ty: t }))
+    }
+
+    /// 欄の既定値（`let x : i64 := 0;` の `0`）。
+    fn default_of(&mut self, fname: &str, sname: &str, fty: &ValueType) -> R<Option<String>> {
+        let d = self.structs.get(sname).cloned();
+        let Some(d) = d else { return Ok(None) };
+        let Some(f) = d.fields.iter().find(|f| f.name == fname) else {
+            return Ok(None);
+        };
+        let Some(def) = f.default.clone() else { return Ok(None) };
+        let v = self.expr(&def)?;
+        let Some(v) = v else { return Ok(None) };
+        Ok(Some(if is_heap(fty) {
+            self.deep_copy(&v.v.clone(), fty)
+        } else {
+            self.conv(&v.v.clone(), &v.ty.clone(), fty)
+        }))
     }
 
     /// 文字列の定数。**場の形（長さ・容量・中身）で置く。**
@@ -974,6 +1143,27 @@ impl Steel {
                 Ok(Some(Val { ok: "true".into(), v: p, ty: ValueType::Str }))
             }
 
+            // `p.欄`
+            E::Field { base, name } => {
+                let b = self.expr(base)?;
+                let Some(b) = b else { return err("受け手に値が無い", base.span) };
+                let ValueType::Named(sname) = &b.ty else {
+                    return err("欄を持つのは構造体だけ", base.span);
+                };
+                let sname = sname.clone();
+                let Some(fields) = self.fields_of(&sname) else {
+                    return err(format!("知らない構造体 `{sname}`"), base.span);
+                };
+                let Some(i) = fields.iter().position(|(f, _)| f == name) else {
+                    return err(format!("`{sname}` に欄 `{name}` は無い"), e.span);
+                };
+                let fty = fields[i].1.clone();
+                let g = self.field_ptr(&b.v.clone(), &sname, i)?;
+                let t = self.tmp();
+                self.emit(&format!("{t} = load {}, ptr {g}", ity(&fty)));
+                Ok(Some(Val { ok: b.ok, v: t, ty: fty }))
+            }
+
             // `a[i]` — **範囲外は paradox**（C-46）
             E::Index { base, index } => {
                 let b = self.expr(base)?;
@@ -1091,7 +1281,11 @@ impl Steel {
                     let Some(v) = v else {
                         return err("束縛する値が無い", b.span);
                     };
-                    let ty = b.ty.as_ref().map(|t| t.value.clone()).unwrap_or(v.ty.clone());
+                    // **注釈の包みを剥がす**（S-2）
+                    let ty = match b.ty.as_ref() {
+                        Some(t) => self.resolve(&t.value),
+                        None => v.ty.clone(),
+                    };
                     if width(&ty).is_none() && !is_float(&ty) && !is_heap(&ty) {
                         return err("STEEL はまだ数と集合体しか扱えない", b.span);
                     }
@@ -1109,6 +1303,35 @@ impl Steel {
             }
 
             E::Assign { op, lhs, rhs } => {
+                // `p.欄 := v`
+                if let ExprKind::Field { base, name } = &lhs.kind {
+                    if *op != AssignOp::Set {
+                        return err("欄への複合代入は STEEL がまだ扱えない", e.span);
+                    }
+                    let b = self.expr(base)?;
+                    let Some(b) = b else { return err("受け手に値が無い", base.span) };
+                    let ValueType::Named(sname) = &b.ty else {
+                        return err("欄を持つのは構造体だけ", base.span);
+                    };
+                    let sname = sname.clone();
+                    let Some(fields) = self.fields_of(&sname) else {
+                        return err(format!("知らない構造体 `{sname}`"), base.span);
+                    };
+                    let Some(i) = fields.iter().position(|(f, _)| f == name) else {
+                        return err(format!("`{sname}` に欄 `{name}` は無い"), e.span);
+                    };
+                    let fty = fields[i].1.clone();
+                    let r = self.expr(rhs)?;
+                    let Some(r) = r else { return err("代入する値が無い", e.span) };
+                    let c = if is_heap(&fty) {
+                        self.deep_copy(&r.v.clone(), &fty)
+                    } else {
+                        self.conv(&r.v.clone(), &r.ty.clone(), &fty)
+                    };
+                    let g = self.field_ptr(&b.v.clone(), &sname, i)?;
+                    self.emit(&format!("store {} {c}, ptr {g}", ity(&fty)));
+                    return Ok(None);
+                }
                 // `a[i] := v` — **範囲外なら何も起きない**（paradox）
                 if let ExprKind::Index { base, index } = &lhs.kind {
                     if *op != AssignOp::Set {
@@ -1207,7 +1430,7 @@ impl Steel {
             E::Ascribe { expr, ty } => {
                 let v = self.expr(expr)?;
                 let Some(v) = v else { return err("注釈する値が無い", e.span) };
-                let t = ty.value.clone();
+                let t = self.resolve(&ty.value);
                 if width(&t).is_none() && !is_float(&t) {
                     return err("STEEL はまだ数しか扱えない", e.span);
                 }
@@ -1627,7 +1850,7 @@ impl Steel {
         for (p, a) in f.params.iter().zip(args) {
             let v = self.expr(a)?;
             let Some(v) = v else { return err("引数に値が無い", a.span) };
-            let ty = p.ty.value.clone();
+            let ty = self.resolve(&p.ty.value);
             if width(&ty).is_none() && !is_float(&ty) && !is_heap(&ty) {
                 return err("STEEL はまだ数と集合体しか扱えない", a.span);
             }
@@ -1670,7 +1893,10 @@ impl Steel {
         self.stages.clear();
         self.push_scope();
 
-        let ret = f.ret.as_ref().map(|t| t.value.clone()).unwrap_or(ValueType::I64);
+        let ret = match f.ret.as_ref() {
+            Some(t) => self.resolve(&t.value),
+            None => ValueType::I64,
+        };
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             if width(&p.ty.value).is_none()
@@ -1679,7 +1905,8 @@ impl Steel {
             {
                 return err("STEEL はまだ数と集合体の引数しか扱えない", p.span);
             }
-            params.push(format!("{} %p{i}, i1 %pok{i}", ity(&p.ty.value)));
+            let pt = self.resolve(&p.ty.value);
+            params.push(format!("{} %p{i}, i1 %pok{i}", ity(&pt)));
         }
 
         // **場の印を取る。** 関数を出るときに戻す（C-90）
@@ -1689,8 +1916,9 @@ impl Steel {
         // **フレームは段でもある**（C-23）——`break` の上限
         self.open_stage(None, false);
         for (i, p) in f.params.iter().enumerate() {
-            let ptr = self.declare(&p.name, p.ty.value.clone());
-            self.emit(&format!("store {} %p{i}, ptr {ptr}", ity(&p.ty.value)));
+            let pt = self.resolve(&p.ty.value);
+            let ptr = self.declare(&p.name, pt.clone());
+            self.emit(&format!("store {} %p{i}, ptr {ptr}", ity(&pt)));
         }
         let ExprKind::Block(items) = &f.body.kind else {
             return err("関数の本体はブロックでなければならない", f.span);
@@ -1879,9 +2107,12 @@ pub fn compile(prog: &Program) -> R<String> {
 
     // 関数は**スコープ全体で見える**（C-36）ので、先に集める
     let (mut fns, mut flows) = (HashMap::new(), HashMap::new());
-    collect(&prog.body, &mut fns, &mut flows);
+    let (mut structs, mut wraps) = (HashMap::new(), HashMap::new());
+    collect(&prog.body, &mut fns, &mut flows, &mut structs, &mut wraps);
     s.fns = fns;
     s.flows = flows;
+    s.structs = structs;
+    s.wraps = wraps;
 
     let mut out = String::new();
 
@@ -1939,15 +2170,25 @@ fn collect(
     items: &[Expr],
     fns: &mut HashMap<String, FnDecl>,
     flows: &mut HashMap<String, Escape>,
+    structs: &mut HashMap<String, StructDecl>,
+    wraps: &mut HashMap<String, ValueType>,
 ) {
     for e in items {
         match &e.kind {
-            ExprKind::Discard(Some(inner)) => collect(std::slice::from_ref(inner), fns, flows),
+            ExprKind::Discard(Some(inner)) => {
+                collect(std::slice::from_ref(inner), fns, flows, structs, wraps)
+            }
             ExprKind::FnDecl(f) if f.owner.is_none() => {
                 fns.insert(f.name.clone(), f.clone());
             }
             ExprKind::FlowDecl(d) => {
                 flows.insert(d.name.clone(), (*d.body).clone());
+            }
+            ExprKind::StructDecl(d) => {
+                structs.insert(d.name.clone(), d.clone());
+            }
+            ExprKind::WrapDecl(d) => {
+                wraps.insert(d.name.clone(), d.base.value.clone());
             }
             _ => {}
         }

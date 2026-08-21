@@ -296,3 +296,38 @@ t!(三重の入れ子,
 t!(埋める値は一つずつ写す,
    "var g : i64 array array := new i64 array array(3, [0]); g[0][0] := 5; g[1][0] * 10 + g[0][0]");
 t!(文字列の配列, "let xs := [ \"ab\", \"cde\" ]; xs[1].len() * 10 + xs[0].len()");
+
+// ===== 第四段：構造体と包み型 =====
+
+t!(構造体を作って読む,
+   "struct P { let x : i64; let y : i64; };
+    let p := new P ( x := 3, y := 4 ); p.x * 10 + p.y");
+t!(欄の既定値,
+   "struct P { let x : i64; var y : i64 := 7; };
+    let p := new P ( x := 1 ); p.y");
+t!(欄に書く,
+   "struct P { let x : i64; var y : i64 := 0; };
+    var p := new P ( x := 1 ); p.y := 9; p.y");
+t!(構造体も深く複製する,
+   "struct P { let x : i64; var y : i64 := 0; };
+    var a := new P ( x := 1 ); var b := a; b.y := 9; a.y * 10 + b.y");
+t!(構造体をaliasで受ける,
+   "struct P { let x : i64; let y : i64; };
+    fn d2 (p : P alias) { p.x * p.x + p.y * p.y } -> i64;
+    let p := new P ( x := 3, y := 4 ); d2(p)");
+t!(構造体を返す,
+   "struct P { let x : i64; let y : i64; };
+    fn mk (a : i64) { new P ( x := a, y := a + 1 ) } -> P;
+    let p := mk(4); p.x * 10 + p.y");
+t!(構造体が集合体を持つ,
+   "struct Bag { var xs : i64 array; };
+    var a := new Bag ( xs := [1,2,3] );
+    var b := a; b.xs[0] := 9;
+    a.xs[0] * 10 + b.xs[0]");
+t!(構造体の配列,
+   "struct P { let x : i64; };
+    let ps := [ new P ( x := 1 ), new P ( x := 2 ) ]; ps[1].x");
+t!(包み型は基底型のまま,
+   "wrap Meters = i64; let m := new Meters ( 5 ); new i64 ( m ) * 2");
+t!(包み型の集合体,
+   "wrap Bytes = u8 array; var b : Bytes := new Bytes ( new u8 array(3, 97) ); 3");
