@@ -87,6 +87,10 @@ struct FnEntry {
 pub struct Interp {
     arena: Arena,
     scopes: Vec<Scope>,
+    /// ホストが見せている**呼べる名前**（S-11）。名前 → 番号
+    host_fns: HashMap<String, u16>,
+    /// 答える側（S-11）。走らせている間だけ入っている
+    hosts: Option<Box<dyn crate::value::HostFns>>,
     /// 関数の可視範囲はスコープを越える（C-36）。フレームを跨いでも見える。
     fns: HashMap<String, FnEntry>,
     structs: HashMap<String, StructDecl>,
@@ -105,10 +109,29 @@ flow $return = $repeat(break, getdepth());
 "#;
 
 impl Interp {
+    /// ホストが**呼べる名前**を見せる（S-11）。番号は登録順。
+    pub fn expose_fn(&mut self, name: &str, index: u16) {
+        self.host_fns.insert(name.to_string(), index);
+    }
+
+    /// ホストに尋ねる。**答える側は `run_with` で渡される。**
+    fn host_call(&mut self, index: u16, args: &[Value]) -> Option<Value> {
+        match self.hosts.take() {
+            None => None,
+            Some(mut h) => {
+                let r = h.call(index, args);
+                self.hosts = Some(h);
+                r
+            }
+        }
+    }
+
     pub fn new() -> Self {
         let mut it = Interp {
             arena: Arena::new(),
             scopes: Vec::new(),
+            host_fns: HashMap::new(),
+            hosts: None,
             fns: HashMap::new(),
             structs: HashMap::new(),
             wraps: HashMap::new(),
@@ -140,6 +163,22 @@ impl Interp {
     pub fn run(&mut self, prog: &Program) -> R<Eval> {
         self.collect_decls(&prog.body);
         self.region(&prog.body, Span::NONE)
+    }
+
+    /// 答える側を渡して走らせる（S-11）。
+    /// 答える側を渡して走らせる（S-11）。
+    ///
+    /// **持ち主は呼び出し側のままである**——`Rc` で共有するので、
+    /// 走り終わってもホストの側に残っている。
+    pub fn run_with(
+        &mut self,
+        prog: &Program,
+        hosts: Box<dyn crate::value::HostFns>,
+    ) -> R<Eval> {
+        self.hosts = Some(hosts);
+        let r = self.run(prog);
+        self.hosts = None;
+        r
     }
 
     // ---- スコープ ----
@@ -1605,6 +1644,22 @@ impl Interp {
         // 組み込み
         if name == "getdepth" {
             return Ok(Eval::Value(Value::I64(self.depth())));
+        }
+        // **ホストが答える名前**（S-11）。
+        // 値と違って、**呼べる名前はスコープ全体で見える**（C-36 と同じ扱い）
+        if let Some(hi) = self.host_fns.get(name).copied() {
+            let mut argv = Vec::new();
+            for a in args {
+                match self.need_value(a)? {
+                    Ok(v) => argv.push(v),
+                    Err(x) => return Ok(Eval::Escape(x)),
+                }
+            }
+            return Ok(match self.host_call(hi, &argv) {
+                Some(v) => Eval::Value(v),
+                // **返り値が無ければ領域に値を置かない**
+                None => Eval::Paradox(span),
+            });
         }
         let Some(f) = self.fns.get(name).cloned() else {
             return rt(format!("知らない関数 `{name}`"), callee.span);

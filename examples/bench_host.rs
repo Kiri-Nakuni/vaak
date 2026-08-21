@@ -14,9 +14,16 @@ fn main() {
 
     let src = std::env::args().nth(1).unwrap_or_else(|| " count[5] * 2 + count[6] ".into());
     let n: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(20000);
+    use vaak::ast::HostItem;
     let ex = vec![
-        ("count".to_string(), ValueType::Array(Box::new(ValueType::I32))),
-        ("dimen".to_string(), ValueType::Array(Box::new(ValueType::I32))),
+        (
+            "count".to_string(),
+            HostItem::Value(ValueType::Array(Box::new(ValueType::I32))),
+        ),
+        (
+            "dimen".to_string(),
+            HostItem::Value(ValueType::Array(Box::new(ValueType::I32))),
+        ),
     ];
 
     let t = Instant::now();

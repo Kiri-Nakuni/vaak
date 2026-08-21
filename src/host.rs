@@ -20,7 +20,7 @@
 //!    **その値が有効かどうかは、ホストが解釈する**——
 //!    TeX なら `str` の外界面はその場に文字列トークンとして展開されるべきである
 
-use crate::ast::ValueType;
+use crate::ast::{HostSig, ValueType};
 use crate::interp::{Eval, Interp};
 use crate::value::Value;
 
@@ -45,6 +45,33 @@ pub trait HostBinding {
 
     /// 走った後に書き戻す。**同じなら呼ばれない。**
     fn write(&mut self, v: &Value);
+}
+
+/// ホストが**呼べる名前**として見せるもの（S-11）。
+///
+/// # なぜコールバックではないのか
+///
+/// **閉包が Vaak では表現できない。**
+///
+/// | 捕まえ方 | 何に反するか |
+/// |---|---|
+/// | 参照で | **C-48**——値は自己完結している。別名は値の中に入らない |
+/// | 写しで | **C-33**——値は深く複製される。呼ぶたびに環境を全部写す |
+///
+/// だから「関数値を渡す」道は最初から閉じている。
+/// 代わりに**ホストが答える名前**を置く——
+/// スクリプトから見れば、ただの呼び出しである。
+///
+/// # 型はホストが宣言する
+///
+/// [`sig`](HostFn::sig) が引数と返り値の型を答えるので、
+/// **検査器は無改造で働く。**
+pub trait HostFn {
+    /// 引数と返り値の型。**走る前に確定していなければならない。**
+    fn sig(&self) -> HostSig;
+
+    /// 呼ばれる。**返り値が `None` なら領域に値を置かない**（paradox）。
+    fn call(&mut self, args: &[Value]) -> Option<Value>;
 }
 
 /// もっとも単純な実装。**値をそのまま持つ。**
@@ -88,9 +115,29 @@ pub enum Outcome {
     Runtime { msg: String, line: usize, col: usize },
 }
 
+/// ホストへの問い合わせに答える側（S-11）。
+///
+/// **番号は登録順である。** 組み立ての時点で決まっているので、
+/// 呼び出しのたびに名前を引き直さない。
+struct Answer {
+    fns: std::rc::Rc<std::cell::RefCell<Vec<(String, Box<dyn HostFn>)>>>,
+}
+
+impl crate::value::HostFns for Answer {
+    fn call(&mut self, index: u16, args: &[Value]) -> Option<Value> {
+        let mut fns = self.fns.borrow_mut();
+        fns.get_mut(index as usize)?.1.call(args)
+    }
+}
+
 /// ホストの側。**名前と見せるものの対応を持つ。**
 pub struct Host {
     bindings: Vec<(String, Box<dyn HostBinding>, bool)>,
+    /// 呼べる名前（S-11）。
+    ///
+    /// **持ち主はここのままである。** 走らせる間だけ `Rc` を貸す——
+    /// 借りを `Interp` の欄に持てないので、共有にした
+    fns: std::rc::Rc<std::cell::RefCell<Vec<(String, Box<dyn HostFn>)>>>,
     /// 検査を通してから走らせるか。**検査を通したプログラムを受け取る前提**（C-31）。
     pub check: bool,
     /// バイトコード VM で走らせるか。既定は木を辿る参照実装。
@@ -99,7 +146,7 @@ pub struct Host {
 
 impl Host {
     pub fn new() -> Self {
-        Self { bindings: Vec::new(), check: true, use_vm: false }
+        Self { bindings: Vec::new(), fns: Default::default(), check: true, use_vm: false }
     }
 
     /// 名前を見せる。**同じ名前なら差し替える。**
@@ -110,6 +157,15 @@ impl Host {
                 slot.2 = true;
             }
             None => self.bindings.push((name.to_string(), b, true)),
+        }
+    }
+
+    /// **呼べる名前**を見せる（S-11）。**同じ名前なら差し替える。**
+    pub fn expose_fn(&mut self, name: &str, f: Box<dyn HostFn>) {
+        let mut fns = self.fns.borrow_mut();
+        match fns.iter_mut().find(|(n, _)| n == name) {
+            Some(slot) => slot.1 = f,
+            None => fns.push((name.to_string(), f)),
         }
     }
 
@@ -139,12 +195,18 @@ impl Host {
             Ok(p) => p,
             Err(e) => return Outcome::Static(vec![e.msg]),
         };
-        let exposed: Vec<(String, ValueType)> = self
+        let mut exposed: Vec<(String, crate::ast::HostItem)> = self
             .bindings
             .iter()
             .filter(|(_, _, live)| *live)
-            .map(|(n, b, _)| (n.clone(), b.type_of()))
+            .map(|(n, b, _)| (n.clone(), crate::ast::HostItem::Value(b.type_of())))
             .collect();
+        exposed.extend(
+            self.fns
+                .borrow()
+                .iter()
+                .map(|(n, f)| (n.clone(), crate::ast::HostItem::Fn(f.sig()))),
+        );
 
         if self.check {
             let mut errs: Vec<String> = crate::check::check_with_host(&prog, &exposed)
@@ -171,7 +233,8 @@ impl Host {
                 .filter(|(_, _, live)| *live)
                 .map(|(_, b, _)| b.read())
                 .collect();
-            match crate::vm::run_program_with_host(&p, values) {
+            let mut answer = Answer { fns: self.fns.clone() };
+            match crate::vm::run_program_with_fns(&p, values, &mut answer) {
                 Ok((ev, after)) => {
                     let mut it = after.into_iter();
                     for (_, b, live) in self.bindings.iter_mut() {
@@ -192,7 +255,12 @@ impl Host {
                     it.expose(name, b.read());
                 }
             }
-            let r = it.run(&prog);
+            // **呼べる名前を登録する**（S-11）。番号は登録順
+            for (i, (name, _)) in self.fns.borrow().iter().enumerate() {
+                it.expose_fn(name, i as u16);
+            }
+            let answer = Box::new(Answer { fns: self.fns.clone() });
+            let r = it.run_with(&prog, answer);
             // 走り終わってから書き戻す
             for (name, b, live) in self.bindings.iter_mut() {
                 if *live {

@@ -26,6 +26,8 @@ pub enum Op {
     Store(u16),
     /// 名前を別の名前のセルへ向ける。**値は動かさない**（C-20）。
     Alias(u16, u16),
+    /// ホストが見せている**呼べる名前**を呼ぶ（S-11）。番号と引数の数。
+    HostCall(u16, u16, Span),
     /// 新しいセルを作って上を入れる。
     Declare(u16),
     /// 上を捨てる。`;` の作用。
@@ -131,6 +133,8 @@ pub struct Program2 {
     pub structs: HashMap<String, StructDecl>,
     pub wraps: HashMap<String, ValueType>,
     pub top: u32,
+    /// ホストが見せている**呼べる名前**（S-11）。番号で引く
+    pub host_fns: Vec<(String, HostSig)>,
 }
 
 // ================= コンパイラ =================
@@ -151,7 +155,7 @@ pub fn compile(prog: &Program) -> Result<Program2, CompileError> {
 /// スクリプトからは最初から見えている状態で始まる。
 pub fn compile_with_host(
     prog: &Program,
-    host: &[(String, ValueType)],
+    host: &[(String, HostItem)],
 ) -> Result<Program2, CompileError> {
     let mut c = Compiler {
         out: Program2::default(),
@@ -160,7 +164,16 @@ pub fn compile_with_host(
         frame_base: 0,
         flows: HashMap::new(),
         var_self: Default::default(),
+        host_fns: HashMap::new(),
     };
+    // **呼べる名前を先に登録する。** 関数と同じくスコープ全体で見える（C-36 / S-11）
+    for (n, item) in host {
+        if let HostItem::Fn(sig) = item {
+            let i = c.out.host_fns.len() as u16;
+            c.out.host_fns.push((n.clone(), sig.clone()));
+            c.host_fns.insert(n.clone(), i);
+        }
+    }
     c.collect(&prog.body);
     // 無名標準ライブラリ（C-15）
     let prelude = crate::parser::parse("flow $return = $repeat(break, getdepth());").unwrap();
@@ -184,9 +197,11 @@ pub fn compile_with_host(
     // 最上位。**領域でありスコープでありフレームである**
     c.chunk = Chunk::default();
     // ホストの名前を先に枠へ。**スクリプトからは最初から見えている**
-    for (n, _) in host {
-        let slot = c.slot(n);
-        c.chunk.host_slots.push(slot);
+    for (n, item) in host {
+        if matches!(item, HostItem::Value(_)) {
+            let slot = c.slot(n);
+            c.chunk.host_slots.push(slot);
+        }
     }
     c.region(&prog.body, Span::NONE)?;
     c.emit(Op::Ret);
@@ -235,6 +250,8 @@ struct Compiler {
     flows: HashMap<String, FlowDecl>,
     /// `var self` を取るメンバ関数の名前（S-1）。**破壊するので書き戻す。**
     var_self: std::collections::HashSet<String>,
+    /// ホストが見せている**呼べる名前** → 番号（S-11）
+    host_fns: HashMap<String, u16>,
 }
 
 impl Compiler {
@@ -767,6 +784,16 @@ impl Compiler {
             self.emit(Op::Depth);
             return Ok(());
         }
+        // **ホストが答える名前**（S-11）。
+        // 値と違って、**呼べる名前はスコープ全体で見える**（C-36 と同じ扱い）
+        if let Some(&hi) = self.host_fns.get(name) {
+            for a in args {
+                self.expr(a)?;
+                self.emit(Op::NeedValue(a.span));
+            }
+            self.emit(Op::HostCall(hi, args.len() as u16, span));
+            return Ok(());
+        }
         let Some(idx) = self.out.fn_index.get(name).copied() else {
             return self.err(format!("知らない関数 `{name}`"), callee.span);
         };
@@ -1229,6 +1256,8 @@ struct Frame {
 
 pub struct Vm<'a> {
     p: &'a Program2,
+    /// ホストが答える側（S-11）
+    hosts: &'a mut dyn crate::value::HostFns,
     arena: Arena,
     stack: Vec<Slot>,
     frames: Vec<Frame>,
@@ -1239,6 +1268,15 @@ pub struct Vm<'a> {
 /// 実行の結果。木を辿る実装と同じ形（`interp::Eval` に合わせる）。
 pub fn run_program(p: &Program2) -> Result<crate::interp::Eval, RtErr> {
     Ok(run_program_with_host(p, Vec::new())?.0)
+}
+
+/// 呼べる名前を持つホストで走らせる（S-11）。
+pub fn run_program_with_fns(
+    p: &Program2,
+    host: Vec<Value>,
+    hosts: &mut dyn crate::value::HostFns,
+) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
+    Runner::new().run_with(p, host, hosts)
 }
 
 /// ホストの値を渡して走らせ、**走り終わった値を返す**（S-4）。
@@ -1278,8 +1316,19 @@ impl Runner {
         p: &Program2,
         host: Vec<Value>,
     ) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
+        let mut none = crate::value::NoHostFns;
+        self.run_with(p, host, &mut none)
+    }
+
+    pub fn run_with(
+        &mut self,
+        p: &Program2,
+        host: Vec<Value>,
+        hosts: &mut dyn crate::value::HostFns,
+    ) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
         let mut vm = Vm {
             p,
+            hosts,
             arena: std::mem::take(&mut self.arena),
             stack: std::mem::take(&mut self.stack),
             frames: std::mem::take(&mut self.frames),
@@ -1522,6 +1571,19 @@ impl<'a> Vm<'a> {
             Op::Alias(dst, src) => {
                 let c = self.cell(src);
                 self.frames.last_mut().unwrap().cells[dst as usize] = c;
+            }
+            // **ホストが答える**（S-11）。
+            // 返り値が無ければ領域に値を置かない——paradox になる
+            Op::HostCall(hi, argc, sp) => {
+                let mut args = Vec::with_capacity(argc as usize);
+                for _ in 0..argc {
+                    args.push(self.pop().value(sp)?);
+                }
+                args.reverse();
+                match self.hosts.call(hi, &args) {
+                    Some(v) => self.stack.push(Slot::Value(v)),
+                    None => self.stack.push(Slot::Paradox(sp)),
+                }
             }
             Op::Coerce(t) => {
                 let ty = self.p.chunks[self.cur()].types[t as usize].clone();

@@ -9,6 +9,26 @@
 use crate::ast::ValueType;
 use std::collections::BTreeMap;
 
+/// ホストが**呼べる名前**に答える側（S-11）。
+///
+/// 番号は組み立ての時点で決まっている（`Program2::host_fns` の並び）。
+///
+/// **第一段は同期呼び出しである。** S-11 は界面の実装として中断・再開を選んだが、
+/// それは**再入**（ホストが Vaak の実行中に Vaak を呼ぶ）を安く済ませるためであり、
+/// 呼べること自体には要らない。**再入が要るようになったら中断へ移す。**
+pub trait HostFns {
+    fn call(&mut self, index: u16, args: &[Value]) -> Option<Value>;
+}
+
+/// 呼べる名前を持たないホスト。
+pub struct NoHostFns;
+
+impl HostFns for NoHostFns {
+    fn call(&mut self, _index: u16, _args: &[Value]) -> Option<Value> {
+        None
+    }
+}
+
 /// セルの番号。名前はセルを指し、セルは値を持つ。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct CellId(pub u32);

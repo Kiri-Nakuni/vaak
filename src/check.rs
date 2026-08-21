@@ -62,6 +62,11 @@ struct Checker {
     /// ホストが見せている名前。**関数の中からは見えない**（C-96）——
     /// 見えないことを、見えない理由とともに言うために持つ。
     host_names: HashSet<String>,
+    /// ホストが見せている**呼べる名前**と、その引数の数（S-11）。
+    ///
+    /// **関数と同じくスコープ全体で見える**（C-36）ので、
+    /// 関数の中からも呼べる——値と違うのはそこである
+    host_fns: HashMap<String, usize>,
 }
 
 pub fn check(prog: &Program) -> Vec<StaticError> {
@@ -69,7 +74,7 @@ pub fn check(prog: &Program) -> Vec<StaticError> {
 }
 
 /// ホストが見せている名前を添えて検査する（S-4）。**`var` で見える。**
-pub fn check_with_host(prog: &Program, host: &[(String, ValueType)]) -> Vec<StaticError> {
+pub fn check_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec<StaticError> {
     let mut c = Checker {
         errs: Vec::new(),
         scopes: vec![HashMap::new()],
@@ -80,10 +85,24 @@ pub fn check_with_host(prog: &Program, host: &[(String, ValueType)]) -> Vec<Stat
         flows: HashSet::new(),
         stages: vec![Stage { is_loop: false, is_frame: true }],
         visible_limit: None,
-        host_names: host.iter().map(|(n, _)| n.clone()).collect(),
+        host_names: host
+            .iter()
+            .filter(|(_, i)| matches!(i, HostItem::Value(_)))
+            .map(|(n, _)| n.clone())
+            .collect(),
+        host_fns: HashMap::new(),
     };
-    for (n, _) in host {
-        c.scopes[0].insert(n.clone(), (BindKind::Var, false));
+    for (n, item) in host {
+        match item {
+            // **値は最上位のスコープに置く。** 関数の中からは見えない（C-96）
+            HostItem::Value(_) => {
+                c.scopes[0].insert(n.clone(), (BindKind::Var, false));
+            }
+            // **呼べる名前は関数と同じ扱いである。** スコープ全体で見える（C-36）
+            HostItem::Fn(sig) => {
+                c.host_fns.insert(n.clone(), sig.params.len());
+            }
+        }
     }
     c.flows.insert("$return".into());
     c.flows.insert("$repeat".into());
@@ -631,6 +650,19 @@ impl Checker {
             return Places::Value;
         };
         if name == "getdepth" {
+            return Places::Value;
+        }
+        // **ホストが見せている呼べる名前**（S-11）
+        if let Some(want) = self.host_fns.get(name).copied() {
+            for a in args {
+                self.operand(a, env);
+            }
+            if want != args.len() {
+                self.err(
+                    format!("`{name}` は引数を {want} 個取るが {} 個来た", args.len()),
+                    span,
+                );
+            }
             return Places::Value;
         }
         let Some(f) = self.fns.get(name).cloned() else {

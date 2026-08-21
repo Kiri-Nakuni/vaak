@@ -269,6 +269,32 @@ pub enum CtorArgs {
     Positional(Vec<Expr>),
 }
 
+/// ホストが見せるもの（C-95 / S-11）。
+///
+/// **値だけでなく、呼べる名前も見せられる。**
+///
+/// ```text
+/// count            値。読んで、書き戻す
+/// tex_print("…")   呼べる名前。ホストが答える
+/// ```
+///
+/// 呼べる名前を足したのは、**閉包が Vaak では表現できない**からである（S-11）——
+/// コールバックは環境を捕まえるが、参照で捕まえれば C-48（値の中に別名は入らない）に、
+/// 写しで捕まえれば C-33（値は深く複製される）に掛かる。
+#[derive(Clone, PartialEq, Debug)]
+pub enum HostItem {
+    Value(ValueType),
+    Fn(HostSig),
+}
+
+/// 呼べる名前の形。**ホストが宣言する**ので、検査器は無改造で働く。
+#[derive(Clone, PartialEq, Debug)]
+pub struct HostSig {
+    pub params: Vec<ValueType>,
+    /// `None` は**値を置かない**——呼び出しは paradox になる。
+    pub ret: Option<ValueType>,
+}
+
 /// プログラム全体。最上位は領域でありスコープである。
 #[derive(Clone, Debug)]
 pub struct Program {

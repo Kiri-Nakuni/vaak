@@ -15,7 +15,7 @@ pub fn check_types(prog: &Program) -> Vec<StaticError> {
 }
 
 /// ホストが見せている名前と型を添えて検査する（S-4）。
-pub fn check_types_with_host(prog: &Program, host: &[(String, ValueType)]) -> Vec<StaticError> {
+pub fn check_types_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec<StaticError> {
     let mut t = TypeChecker {
         errs: Vec::new(),
         scopes: vec![HashMap::new()],
@@ -24,9 +24,18 @@ pub fn check_types_with_host(prog: &Program, host: &[(String, ValueType)]) -> Ve
         structs: HashMap::new(),
         wraps: HashMap::new(),
         stage_want: vec![None],
+        host_fns: HashMap::new(),
     };
-    for (n, ty) in host {
-        t.scopes[0].insert(n.clone(), ty.clone());
+    for (n, item) in host {
+        match item {
+            HostItem::Value(ty) => {
+                t.scopes[0].insert(n.clone(), ty.clone());
+            }
+            // **型はホストが宣言する。** だから検査器は無改造で働く（S-11）
+            HostItem::Fn(sig) => {
+                t.host_fns.insert(n.clone(), sig.clone());
+            }
+        }
     }
     t.collect(&prog.body);
     t.body(&prog.body);
@@ -43,6 +52,8 @@ struct TypeChecker {
     /// 段ごとの「そこに置かれる値の型」。**脱出が運ぶ値はこれに合わねばならない。**
     /// 内側が末尾。段送りは書いた順（左から右）に外へ進む（C-70）。
     stage_want: Vec<T>,
+    /// ホストが見せている**呼べる名前**の形（S-11）。
+    host_fns: HashMap<String, HostSig>,
 }
 
 /// 分かっている型。`None` は「分からない」——**そこでは何も言わない**。
@@ -617,6 +628,16 @@ impl TypeChecker {
         let ExprKind::Name(name) = &callee.kind else { return None };
         if name == "getdepth" {
             return Some(ValueType::I64);
+        }
+        // **ホストが見せている呼べる名前**（S-11）
+        if let Some(sig) = self.host_fns.get(name).cloned() {
+            for (want, a) in sig.params.iter().zip(args) {
+                self.expect(a, want);
+            }
+            for a in args.iter().skip(sig.params.len()) {
+                self.expr(a, None);
+            }
+            return sig.ret;
         }
         let Some(f) = self.fns.get(name).cloned() else {
             for a in args {
