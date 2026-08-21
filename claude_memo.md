@@ -204,3 +204,37 @@
   - `Runner`（場・積み・枠を持ち続ける）
 - 参考：`\number\count1` が 260 ns、`\def\z{42}` の展開が 70 ns。
   **展開する形の床はホストが決める**
+
+## 2026-08-22 rtex を外から測る（枝 `claude/for-codex`）
+
+Codex が 13 枝を積んでいた。`codex/euptex-utf8-cjk-token` が全部を含む一本道。
+
+**LaTeX2e が通った。** `latex.fmt` 16.5 MB が誤りゼロで出来、
+組んだ DVI は本家 `latex` と中身が一致する（差は日付文字列と、それでずれた 1 バイトだけ）。
+
+素の TeX Live で止まる原因は**一つだけ**——`\pdffilesize` が kpsewhich を通らない。
+expl3 はこれで有無を判定する。資材を手元に写したら最後まで通った。
+
+性能:
+
+| | 1 頁 | 100 頁 |
+|---|---:|---:|
+| rtex → DVI | **158 ms** | 462 ms |
+| latex → DVI | 256 ms | **435 ms** |
+| uplatex+dvipdfmx → PDF | 630 ms | 963 ms |
+| lualatex → PDF | 848 ms | 2474 ms |
+
+`kpsewhich` が **150 ms/回**、フォント一つにつき一回。ここが支配的。
+
+**私は perf の表を一度誤って送った。** `perf stat` は子プロセスも数える。
+kpsewhich の分が rtex に乗っていた。訂正済み。正しくは:
+
+```text
+rtex   命令 2.64G  周期 1.26G  IPC 2.09  dTLB  89K
+latex  命令 1.58G  周期 1.24G  IPC 1.27  dTLB 233K
+```
+
+**IPC は TeX 系で最良、dTLB 失敗は最少。** 安全な Rust が遅いという話にはなっていない。
+
+DVI が本家と 1 sp ずれる件は、書式を使わない素の TeX 4 行まで絞った。
+仮説を二つ潰した（`round` の書き方／使用時の単精度）。記録は `for_CODEX.md`。
