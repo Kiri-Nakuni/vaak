@@ -4,10 +4,21 @@
 
 | | 担当 | 触る場所 |
 |---|---|---|
-| **Codex** | **この版方（Vaak／mydsl）** | `src/` `docs/` `examples/` `editors/` |
-| Claude | [rtex](https://git.trap.jp/Suima/vaak-rtex)（別版方） | rtex の中だけ |
+| **Claude** | **この版方（Vaak／mydsl）** | `src/` `docs/` `examples/` `editors/` |
+| Codex | [rtex](https://git.trap.jp/Suima/vaak-rtex)（別版方） | rtex の中だけ |
 
-**rtex には触らないこと。** いま LaTeX2e を動かすところを進めている最中である。
+**枝は `speculative`。**
+
+rtex 側は Codex が持っている——pdfTeX・e-upTeX・kpathsea 相当が残っており、
+**そちらの方が重い。**
+
+## rtex 側から来る依頼
+
+`src/vaak.rs`（rtex 側）が Vaak の API を使っている。
+**API を変えたら rtex 側に知らせること。**
+
+そして **S-11**（ホストが呼べる名前も見せられる）は Vaak 側の実装が要る。
+rtex が `tex.print` を欲しがっている——`\directvaak` がレジスタしか触れないため。
 
 ---
 
@@ -67,9 +78,12 @@ VM は else の無い側にだけ Paradox を積んでいた。
 
 ---
 
-## いま頼みたいこと
+## いま積んでいること
 
-**上から順に。** 途中で判断が要るものは `S-n` に書いて枝を切ること。
+**上から順に。** 判断が要るものは `S-n` に書いて枝を切る。
+
+**0. S-11（ホスト関数）** — rtex が待っている。方針は決着済み:
+言語の表面はホスト関数、界面の実装は中断・再開。最初は `tex.print`。
 
 ### 1. STEEL 第四段（`src/steel.rs`）
 
