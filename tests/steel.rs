@@ -271,3 +271,28 @@ fn f80は参照実装が断る() {
     let c = vaak::vm::compile(&prog);
     assert!(c.is_err(), "VM も断ること");
 }
+
+// ===== 第四段：入れ子の集合体 =====
+
+t!(入れ子の添字, "let m := [ [1,2], [3,4] ]; m[1][0]");
+t!(入れ子も深く複製する,
+   "var m := [ [1,2], [3,4] ]; var n := m; n[0][0] := 9; m[0][0] * 10 + n[0][0]");
+t!(入れ子の長さ, "let m := [ [1,2,3] ]; m[0].len() * 10 + m.len()");
+t!(入れ子をnewで作る,
+   "var g : i64 array array := new i64 array array(2, [0,0]); g[0][1] := 7; g[1][1] * 10 + g[0][1]");
+t!(入れ子を返す,
+   "fn mk () { [ [1,2], [3,4] ] } -> i64 array array; let a := mk(); a[1][0] * 10 + a[0][1]");
+t!(入れ子を返して場を使う,
+   "fn mk () { [ [ 7, 8 ], [ 9, 10 ] ] } -> i64 array array;
+    fn churn (n : i64) { var a : i64 array := new i64 array(n, 5); a[0] } -> i64;
+    let g := mk(); var z := 0; nfor (k, 0, 50) { z += churn(200); };
+    g[0][0] * 10 + g[1][1]");
+t!(入れ子を何度も作る,
+   "fn mk (n : i64) { var g : i64 array array := new i64 array array(n, [0,0,0]);
+        nfor (i,0,n) { g[i][0] := i; }; g } -> i64 array array;
+    var s := 0; nfor (k,0,500) { let g := mk(4); s += g[3][0]; }; s mod 251");
+t!(三重の入れ子,
+   "let t := [ [ [1,2] ], [ [3,4] ] ]; t[1][0][1]");
+t!(埋める値は一つずつ写す,
+   "var g : i64 array array := new i64 array array(3, [0]); g[0][0] := 5; g[1][0] * 10 + g[0][0]");
+t!(文字列の配列, "let xs := [ \"ab\", \"cde\" ]; xs[1].len() * 10 + xs[0].len()");

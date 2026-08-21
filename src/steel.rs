@@ -101,6 +101,8 @@ pub struct Steel {
     strings: Vec<(String, Vec<u8>)>,
     /// 組み込みの宣言（`llvm.fabs` など）。**重ねて出さない**
     decls: Vec<String>,
+    /// 型ごとの写す関数。**一度だけ出す**
+    copy_fns: Vec<String>,
 }
 
 /// 型の幅。**混ぜられないので、幅は左の被演算子が決める**（実装は `wrap_like` と同じ）。
@@ -220,6 +222,7 @@ impl Steel {
             done: false,
             strings: Vec::new(),
             decls: Vec::new(),
+            copy_fns: Vec::new(),
         }
     }
 
@@ -612,13 +615,65 @@ impl Steel {
         (ok, safe)
     }
 
-    /// **深く複製する**（C-33）。要素が場を持たない場合。
+    /// **深く複製する**（C-33）。
+    ///
+    /// 要素が場を持たなければ丸ごと写すだけで済むが、
+    /// **入れ子なら要素も写さねばならない**——型ごとに写す関数を出す。
     fn deep_copy(&mut self, p: &str, ty: &ValueType) -> String {
+        let f = self.copy_fn(ty);
+        let q = self.tmp();
+        self.emit(&format!("{q} = call ptr {f}(ptr {p})"));
+        q
+    }
+
+    /// 型を名前にする。**同じ型なら同じ名前**になること。
+    fn mangle(t: &ValueType) -> String {
+        match t {
+            ValueType::U1 => "u1".into(),
+            ValueType::U8 => "u8".into(),
+            ValueType::U16 => "u16".into(),
+            ValueType::U32 => "u32".into(),
+            ValueType::I32 => "i32".into(),
+            ValueType::I64 => "i64".into(),
+            ValueType::F32 => "f32".into(),
+            ValueType::F64 => "f64".into(),
+            ValueType::F80 => "f80".into(),
+            ValueType::Str => "str".into(),
+            ValueType::Array(e) => format!("a{}", Self::mangle(e)),
+            ValueType::Map(k, v) => format!("m{}_{}", Self::mangle(k), Self::mangle(v)),
+            ValueType::Named(n) => format!("n{n}"),
+        }
+    }
+
+    /// 型ごとの**深く写す関数**を出し、その名前を返す。
+    ///
+    /// **一度だけ出す。** 同じ型で二度呼ばれても、二つ目は名前だけ返る。
+    ///
+    /// 要素が場を持たなければ丸ごと写す（`@vaak.copy`）。
+    /// 持つなら**一つずつ、要素の写す関数を呼ぶ**——
+    /// **値のグラフに循環は無い**（C-63）ので、この再帰は必ず止まる。
+    fn copy_fn(&mut self, ty: &ValueType) -> String {
         let el = elem_of(ty).unwrap_or(ValueType::I64);
         let es = elem_size(&el);
-        let q = self.tmp();
-        self.emit(&format!("{q} = call ptr @vaak.copy(ptr {p}, i64 {es})"));
-        q
+        let name = format!("@vaak.copy.{}", Self::mangle(ty));
+        if self.copy_fns.contains(&name) {
+            return name;
+        }
+        self.copy_fns.push(name.clone());
+        if !is_heap(&el) {
+            // **丸ごと写せる。** 要素が場を持たない
+            self.head_global(&format!(
+                "define internal ptr {name}(ptr %p) {{\nentry:\n  %q = call ptr @vaak.copy(ptr %p, i64 {es})\n  ret ptr %q\n}}"
+            ));
+            return name;
+        }
+        // **入れ子。** 要素も写す
+        let inner = self.copy_fn(&el);
+        let body = format!(
+            "define internal ptr {name}(ptr %p) {{\nentry:\n  %n = load i64, ptr %p\n  %q = call ptr @vaak.new(i64 %n, i64 {es})\n  %sd = call ptr @vaak.data(ptr %p)\n  %dd = call ptr @vaak.data(ptr %q)\n  br label %head\nhead:\n  %i = phi i64 [ 0, %entry ], [ %i2, %body ]\n  %go = icmp slt i64 %i, %n\n  br i1 %go, label %body, label %done\nbody:\n  %sp = getelementptr ptr, ptr %sd, i64 %i\n  %sv = load ptr, ptr %sp\n  %cv = call ptr {inner}(ptr %sv)\n  %dp = getelementptr ptr, ptr %dd, i64 %i\n  store ptr %cv, ptr %dp\n  %i2 = add i64 %i, 1\n  br label %head\ndone:\n  ret ptr %q\n}}"
+        );
+        self.head_global(&body);
+        name
     }
 
     /// `new T ( 引数 )` — **配列と写像は位置で、構造体は名前で**（C-78）。
@@ -641,9 +696,6 @@ impl Steel {
             return err("集合体は位置で構築する", span);
         };
         let el = elem_of(&t).unwrap_or(ValueType::I64);
-        if is_heap(&el) {
-            return err("入れ子の集合体は STEEL がまだ扱えない", span);
-        }
         // `new T array ( )` — 空
         let Some(nx) = a.first() else {
             let p = self.new_collection("0", &t);
@@ -672,7 +724,8 @@ impl Steel {
                 _ => "0".into(),
             },
         };
-        // 埋める
+        // 埋める。**入れ子なら一つずつ写す**——
+        // 同じ場所を全部の枡に入れると、一つ書き換えたら全部変わる（C-33 に反する）
         let head = self.label("fill.head");
         let body = self.label("fill.body");
         let done = self.label("fill.done");
@@ -687,7 +740,12 @@ impl Steel {
         self.cbr(&go, &body, &done);
         self.place(&body);
         let g = self.elem_ptr(&p, &i, &t);
-        self.emit(&format!("store {} {fill}, ptr {g}", ity(&el)));
+        let one = if is_heap(&el) {
+            self.deep_copy(&fill, &el)
+        } else {
+            fill.clone()
+        };
+        self.emit(&format!("store {} {one}, ptr {g}", ity(&el)));
         let i2 = self.tmp();
         self.emit(&format!("{i2} = add i64 {i}, 1"));
         self.emit(&format!("store i64 {i2}, ptr {iv}"));
@@ -889,14 +947,16 @@ impl Steel {
                     vals.push(v);
                 }
                 let el = vals.first().map(|v| v.ty.clone()).unwrap_or(ValueType::I64);
-                if is_heap(&el) {
-                    return err("入れ子の集合体は STEEL がまだ扱えない", e.span);
-                }
                 let ty = ValueType::Array(Box::new(el.clone()));
                 let p = self.new_collection(&vals.len().to_string(), &ty);
                 for (i, v) in vals.iter().enumerate() {
                     let g = self.elem_ptr(&p, &i.to_string(), &ty);
-                    let c = self.conv(&v.v.clone(), &v.ty.clone(), &el);
+                    // **リテラルの要素も深く複製する**（C-33）
+                    let c = if is_heap(&el) {
+                        self.deep_copy(&v.v.clone(), &el)
+                    } else {
+                        self.conv(&v.v.clone(), &v.ty.clone(), &el)
+                    };
                     self.emit(&format!("store {} {c}, ptr {g}", ity(&el)));
                 }
                 Ok(Some(Val { ok: "true".into(), v: p, ty }))
@@ -1068,7 +1128,11 @@ impl Steel {
                     let g = self.elem_ptr(&b.v.clone(), &safe, &b.ty.clone());
                     let el = elem_of(&b.ty).unwrap_or(ValueType::I64);
                     // **集合体は自分の要素の型を知っている**（C-94）
-                    let c = self.conv(&r.v.clone(), &r.ty.clone(), &el);
+                    let c = if is_heap(&el) {
+                        self.deep_copy(&r.v.clone(), &el)
+                    } else {
+                        self.conv(&r.v.clone(), &r.ty.clone(), &el)
+                    };
                     // **範囲外への書き込みは誤りである。**
                     //
                     // 読みなら paradox でよい（「そこに値が無い」と言える）が、
@@ -1640,14 +1704,25 @@ impl Steel {
         // **返り値は呼び出し側の領域へ移る**（C-90 の表）。
         // 印の下へ写してから、印を戻す——**領域は高々一つの値**（C-14）なので一つだけ
         let conv = if is_heap(&ret) && is_heap(&out.ty) {
-            let el = elem_of(&ret).unwrap_or(ValueType::I64);
-            let es = elem_size(&el);
-            let q = self.tmp();
-            self.emit(&format!(
-                "{q} = call ptr @vaak.carry(ptr {}, i64 {es}, i64 {mark})",
-                out.v
-            ));
-            q
+            // **二段で写す**（C-90 の表：「返り値は呼び出し側の領域へ移る」）。
+            //
+            // 1. 印より上へ深く写す（**逃がす**）
+            // 2. 印まで戻す
+            // 3. そこから印の下へ深く写す
+            //
+            // 一段では足りない。**入れ子なら中身が印の上に残る**からである——
+            // 外側の塊だけを下へ動かしても、指している先が消える。
+            //
+            // 重ならないことは数えれば分かる：
+            // 逃がした先は元の頂より上、書き込む先は印から深さの分だけ。
+            // **深さは元の頂と印の差を越えない**ので、届かない。
+            let f = self.copy_fn(&ret);
+            let up = self.tmp();
+            self.emit(&format!("{up} = call ptr {f}(ptr {})", out.v));
+            self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            let down = self.tmp();
+            self.emit(&format!("{down} = call ptr {f}(ptr {up})"));
+            down
         } else {
             let c = self.conv(&out.v.clone(), &out.ty.clone(), &ret);
             self.emit(&format!("call void @vaak.release(i64 {mark})"));
