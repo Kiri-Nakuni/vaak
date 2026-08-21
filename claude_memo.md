@@ -11,24 +11,29 @@
 
 ## 依頼の一覧と状態
 
+**開いているバグが一つある。それが最優先。**
+
 | # | もの | 状態 |
 |---|---|---|
-| 1 | 決定への移行（C-95 ホスト界面 / C-96 ホスト名の可視範囲） | **済** |
-| 2 | LSP（高優先度） | **済**。`src/lsp.rs` `src/json.rs` `src/bin/vaak-lsp.rs` |
-| 3 | Zed 拡張に LSP を繋ぐ | **済**。`editors/zed/`。文法定義は持たない |
-| 4 | LICENSE（MIT / 有村陽大） | **済**。`LICENSE` `docs/LICENSING.md` |
-| 5 | **STEEL vaak**（LLVM IR スタンドアロン） | **第一段完了**（S-12）。整数・制御・関数。枝 `steel`、`speculative` に併合済み |
-| 6 | e-upTeX 移植可否 | **済**。`rtex/docs/euptex-port-notes.md` に八段の段取り |
-| 7 | e-upTeX 移植 | **段 0・1a 完了**（Q/H/zw/zh、`\numexpr` 系）。次は 1b（疎レジスタ）→ 2（字句系） |
-| 8 | 寸法の鍵語 H / Q / zw / zh | **済**。rtex 枝 `jdimen`、試験 7 本 |
-| 9 | LaTeX2e が動くか（7 が済んだら） | 未 |
-| 10 | LuaTeX のコールバック再現（意味論を変えずに） | 方針は **S-11**。実装は凍結解除待ち |
-| 11 | pdfTeX を参考に PDF 直接出力（OTF は後回し、HarfBuzz 不要） | 未 |
-| 12 | Portable vaak（WASM） | **済**（S-13）。WASI と素の WASM の二つ。枝 `portable` |
-| 13 | rtex の名前空間を掴んで枝を切る | **飛ばした**。`main` は 2 コミットで名前空間の作業が無い |
-| 14 | rtex vaak の差し込み範囲を増やす＋ほぼゼロ費用か測る | 未 |
-| 15 | 人間向けリファレンス＋付録（最低優先度） | 未 |
-| 16 | 別 CLAUDE からの設計質問二つに答える | **済**（S-14） |
+| **B1** | **S-16：VM が `??` と動的な段数の脱出で落ちる** | **開いている。** `tests/examples.rs` に `#[ignore]` の再現あり |
+| 1 | 決定への移行（C-95 / C-96 / C-97） | **済** |
+| 2 | LSP | **済**。`src/lsp.rs` `src/json.rs` |
+| 3 | Zed 拡張 | **済**。tree-sitter 文法つき（Zed は意味トークンで色を付けない） |
+| 3b | VS Code 拡張 | **済**。`editors/vscode/`。TextMate ＋ 意味トークン |
+| 4 | LICENSE（MIT / 有村陽大） | **済**。rtex は tyti 氏に全部帰属 |
+| 5 | STEEL vaak（LLVM IR） | **第一段完了**（S-12）。**C の 1.12×、Rust の 1.08×** |
+| 5b | STEEL 第二段（配列・写像・`str`・浮動小数・`alias`・`flow`・`outward`） | 未 |
+| 6 | e-upTeX 移植可否 | **済**。八段の段取り |
+| 7 | e-upTeX 移植 | **段 0・1a 完了**。次は 1b（疎レジスタ）→ 2（字句系）→ 3（内省） |
+| 9 | LaTeX2e が動くか | 段 3 の後 |
+| 10 | LuaTeX のコールバック再現 | 方針は **S-11**。実装は未着手（CLAUDE.md は求めている） |
+| 10b | **S-15 の穴埋め：`read_at` / `write_at`** | 未。動く添字が 1340 ns 掛かる |
+| 11 | pdfTeX を参考に PDF 直接出力 | 未 |
+| 12 | Portable vaak（WASM） | **済**（S-13） |
+| 13 | rtex の名前空間 | **枝に `NAMESPACE_ROADMAP.md` があった。実装差分は無い。** 未着手 |
+| 14 | rtex vaak の差し込み範囲＋ほぼゼロ費用か | 未 |
+| 15 | 人間向けリファレンス＋付録 | 未（最低優先度） |
+| 16 | 設計質問二つ | **済**（S-14） |
 
 ## 記録
 
@@ -51,6 +56,21 @@
 - **名前空間**：`.claude/worktrees/review-latest-repo-changes-3b7687/NAMESPACE_ROADMAP.md`
   に**詳細な設計がある**（Phase 0〜8）。実装差分は入っていない（作業木は綺麗）
 - **権利**：rtex は tyti 氏に全部帰属（依頼者の寄与は本人が無いものと認めた）
+
+### 2026-08-21（続き）
+
+- **STEEL を C / Rust と比べた。** fib(35)：C 24.0ms / Rust 25.0ms / **STEEL 27.0ms**。
+  生成された機械語がほぼ同じ。**`i1` 由来の命令が 0**——paradox の対が消えている。
+  実行ファイルは 15,880 バイト（C が 16,040、Rust が 3.9MB）
+- **VS Code 拡張**（`editors/vscode/`）と **Zed の tree-sitter 文法**。
+  Zed は LSP の意味トークンで色を付けないので文法が要った。
+  **鍵語の一覧は一つ**——`tests/grammar.rs` が三箇所を突き合わせる
+- **C-97**：`true` / `false` / `bool` / **`E -> T`**（C-30 で決まっていたのに未実装だった）
+- **例を五本**（`examples/vaak/`）。**例が VM のバグを二つ見つけた**:
+  - `1 + (2)` が落ちていた（括弧の領域が自分の底を持っていなかった）→ `RegionBegin` で直した
+  - **S-16 は残っている**
+- **S-15**：C-95 の費用は添字一つあたり 22 ns。**撤回しない。**
+  動く添字だけが 1340 ns で、塞ぐなら `read_at` / `write_at`
 
 ### 2026-08-21
 
