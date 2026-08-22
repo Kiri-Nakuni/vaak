@@ -1,0 +1,19 @@
+fn eval_tag (tag : i64, a : i64, b : i64) {
+    switch (tag)
+        case 0 => a + 1
+        case 1 => a - b
+        case 2 => a * 2
+        case 3 => b
+} -> i64;
+
+% ベンチ測定器は次の二行を置換する。単体では小さな実行例として走る。
+let item_count := 200;
+let pass_count := 2;
+
+var total := 0;
+nfor (pass, 0, pass_count) {
+    nfor (i, 0, item_count) {
+        total += eval_tag(i mod 4, i, i mod 7);
+    };
+};
+total

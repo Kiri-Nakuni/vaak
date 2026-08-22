@@ -1,0 +1,17 @@
+% ベンチ測定器は次の二行を置換する。単体では小さな実行例として走る。
+let item_count := 200;
+let pass_count := 2;
+
+var total := 0;
+nfor (pass, 0, pass_count) {
+    nfor (i, 0, item_count) {
+        let tag := i mod 4;
+        let b := i mod 7;
+        total += (switch (tag)
+            case 0 => i + 1
+            case 1 => i - b
+            case 2 => i * 2
+            case 3 => b);
+    };
+};
+total

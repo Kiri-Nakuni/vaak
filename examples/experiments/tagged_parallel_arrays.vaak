@@ -1,0 +1,24 @@
+% ベンチ測定器は次の二行を置換する。単体では小さな実行例として走る。
+let item_count := 200;
+let pass_count := 2;
+
+var tags := new i64 array(item_count, 0);
+var left := new i64 array(item_count, 0);
+var right := new i64 array(item_count, 0);
+nfor (i, 0, item_count) {
+    tags[i] := i mod 4;
+    left[i] := i;
+    right[i] := i mod 7;
+};
+
+var total := 0;
+nfor (pass, 0, pass_count) {
+    nfor (i, 0, tags.len()) {
+        total += (switch (tags[i])
+            case 0 => left[i] + 1
+            case 1 => left[i] - right[i]
+            case 2 => left[i] * 2
+            case 3 => right[i]);
+    };
+};
+total
