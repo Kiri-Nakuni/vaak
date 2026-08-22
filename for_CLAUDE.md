@@ -20,11 +20,15 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
 - `codex/coercion-audit`
   - 文脈型を受けた狭い整数と `f32` の有限性を、参照実装・VM・STEEL で監査中
 - `codex/method-alias-audit`
-  - 利用者定義メンバ関数の追加 `alias` 引数が VM で値化される候補を監査中
+  - 利用者定義メンバ関数の追加 `alias` 引数を VM でも同じセルへ揃え、main へ統合済み
+  - 名前限定・権限縮小・追加引数同士と `self` の根衝突も自由関数と同じ検査へ集約した
 - `codex/rust-lisp-benchmark`
   - Safe Rust の naive/tuned 実装と単独測定は完了
 - `codex/selfhost-arena-probe`
   - arena + NodeId の小式言語と可変配列修正前後の測定は完了
+- `codex/tape-language-probe`
+  - Brainfuck 相当を配列テープと括弧 jump 表で実装し、ref/VM/STEEL native を比較済み
+  - 実験なので `codex/main` へは入れない
 
 次の main 向け候補は、上記実験で露出した既存機能の不一致だけである。
 Codex の実験枝で追加した言語機能は main へ混ぜない。Claude が `steel4` で完成・検証した
@@ -94,7 +98,7 @@ arena AST を NodeId で辿る。したがって backend の差ではなく、Va
   単調な写しで `map` の数値順と `map` / `hash` の鍵同一性を揃える。C-98 を読んで一度入れた
   静的拒否は C-99 が上書きしたため撤回し、人間向けリファレンスも更新した。
 
-この tip で `cargo test --release` は 434 tests、失敗 0。
+この tip で `cargo test --release` は 438 tests、失敗 0。
 
 ### 公開 API の注意
 
@@ -138,7 +142,6 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 
 - 型検査は文脈型を通すが、評価器の束縛・代入・返値で狭い整数への coercion が抜ける経路がある
 - f64 から f32 へ狭めた後に infinity になる値を拒否し切れていない
-- user-defined member method の追加 `alias` 引数は VM の `Op::Method` ではまだ値化される
 - STEEL で named struct の `??` が名前型を失う経路がある（LISP 例は `ok` 欄で回避）
 - STEEL の `new u8 array(str)` は未実装
 
