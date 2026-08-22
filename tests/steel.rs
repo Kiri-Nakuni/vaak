@@ -383,3 +383,24 @@ t!(欄の集合体を押す,
 t!(浮動小数を押す,
    "var a := new f64 array(0, 0.0); a.push(1.5); a.push(2.5);
     if (a[0] + a[1] == 4.0) 1 else 0 fi");
+
+// ── 挿す・抜く ─────────────────────────
+
+t!(先頭へ挿す, "var a := new i64 array(2, 5); a.insert(0, 9); a[0] * 100 + a[1] * 10 + a[2]");
+t!(途中へ挿す, "var a := new i64 array(0, 0); a.push(1); a.push(3); a.insert(1, 2); a[0]*100+a[1]*10+a[2]");
+t!(末尾へ挿す, "var a := new i64 array(0, 0); a.push(1); a.insert(1, 7); a[1] * 10 + a.len()");
+t!(枠の外へ挿すと何も起きない, "var a := new i64 array(2, 4); a.insert(5, 9); a.len() * 10 + a[0]");
+t!(負の添字へ挿すと何も起きない, "var a := new i64 array(2, 4); a.insert(0 - 1, 9); a.len()");
+t!(抜くと詰まる, "var a := new i64 array(0, 0); a.push(1); a.push(2); a.push(3); a.remove(1); a[0]*10+a[1]");
+t!(抜いた値が出る, "var a := new i64 array(0, 0); a.push(7); a.push(8); a.remove(0)");
+t!(抜くと減る, "var a := new i64 array(4, 1); a.remove(2); a.len()");
+t!(枠の外を抜くと虚無, "var a := new i64 array(2, 1); a.remove(9) ?? 42");
+t!(枠の外を抜いても減らない, "var a := new i64 array(2, 1); a.remove(9) ?? 0; a.len()");
+t!(末尾を抜く, "var a := new i64 array(0, 0); a.push(4); a.push(6); a.remove(1) * 10 + a.len()");
+t!(挿してから抜く, "var a := new i64 array(0, 0); a.push(1); a.insert(0, 9); a.remove(1) + a[0]");
+t!(浮動小数を挿す,
+   "var a := new f64 array(0, 0.0); a.push(2.0); a.insert(0, 1.5);
+    if (a[0] + a[1] == 3.5) 1 else 0 fi");
+t!(欄の集合体へ挿す,
+   "struct P { var a : i64 array; }; var p := new P ( a := new i64 array(1, 5) );
+    p.a.insert(0, 3); p.a[0] * 10 + p.a[1]");

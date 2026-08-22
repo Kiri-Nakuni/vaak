@@ -1950,6 +1950,92 @@ impl Steel {
                 self.emit(&format!("store i64 {safe}, ptr {cur}"));
                 Ok(Some(Val { ok: some, v: out, ty: el }))
             }
+            // `a.insert(i, v)` — **枠の外なら何も起きない**（paradox）
+            "insert" => {
+                let (Some(ia), Some(va)) = (args.first(), args.get(1)) else {
+                    return err("`insert` は添字と値を取る", span);
+                };
+                let i = self.expr(ia)?;
+                let v = self.expr(va)?;
+                let (Some(i), Some(v)) = (i, v) else {
+                    return err("`insert` の引数に値が無い", span);
+                };
+                let idx = self.widen64(&i);
+                let c = if is_heap(&el) {
+                    self.deep_copy(&v.v.clone(), &el)
+                } else {
+                    self.conv(&v.v.clone(), &v.ty.clone(), &el)
+                };
+                let n = self.coll_len(&cur);
+                // **末尾へ挿すのは許す**（`i == n`）。押すのと同じである
+                let lo = self.tmp();
+                self.emit(&format!("{lo} = icmp sge i64 {idx}, 0"));
+                let hi = self.tmp();
+                self.emit(&format!("{hi} = icmp sle i64 {idx}, {n}"));
+                let ok = self.tmp();
+                self.emit(&format!("{ok} = and i1 {lo}, {hi}"));
+                let dothis = self.label("ins.do");
+                let after = self.label("ins.after");
+                self.cbr(&ok, &dothis, &after);
+                self.place(&dothis);
+                // **枠の中と分かってから伸ばす。** 外なら個数も置き場も動かさない
+                let q = self.tmp();
+                self.emit(&format!("{q} = call ptr @vaak.grow(ptr {cur}, i64 {es})"));
+                self.emit(&format!("store ptr {q}, ptr {slot}"));
+                let dst = self.tmp();
+                self.emit(&format!("{dst} = add i64 {idx}, 1"));
+                let from = self.elem_ptr(&q, &idx, &ty);
+                let to = self.elem_ptr(&q, &dst, &ty);
+                let cnt = self.tmp();
+                self.emit(&format!("{cnt} = sub i64 {n}, {idx}"));
+                let bytes = self.tmp();
+                self.emit(&format!("{bytes} = mul i64 {cnt}, {es}"));
+                // **重なるので memmove である。** memcpy では壊れる
+                self.emit(&format!(
+                    "call void @llvm.memmove.p0.p0.i64(ptr {to}, ptr {from}, i64 {bytes}, i1 false)"
+                ));
+                self.emit(&format!("store {} {c}, ptr {from}", ity(&el)));
+                self.br(&after);
+                self.place(&after);
+                Ok(None)
+            }
+
+            // `a.remove(i)` — **抜いた値を返す。** 枠の外なら paradox
+            "remove" => {
+                let Some(ia) = args.first() else {
+                    return err("`remove` は添字を一つ取る", span);
+                };
+                let i = self.expr(ia)?;
+                let Some(i) = i else { return err("`remove` の添字に値が無い", ia.span) };
+                let idx = self.widen64(&i);
+                let n = self.coll_len(&cur);
+                let (ok, safe) = self.bounds(&cur, &idx);
+                // **ずらす前に読む。** 後では消えている
+                let g = self.elem_ptr(&cur, &safe, &ty);
+                let out = self.tmp();
+                self.emit(&format!("{out} = load {}, ptr {g}", ity(&el)));
+                let dothis = self.label("rm.do");
+                let after = self.label("rm.after");
+                self.cbr(&ok, &dothis, &after);
+                self.place(&dothis);
+                let src = self.tmp();
+                self.emit(&format!("{src} = add i64 {safe}, 1"));
+                let from = self.elem_ptr(&cur, &src, &ty);
+                let cnt = self.tmp();
+                self.emit(&format!("{cnt} = sub i64 {n}, {src}"));
+                let bytes = self.tmp();
+                self.emit(&format!("{bytes} = mul i64 {cnt}, {es}"));
+                self.emit(&format!(
+                    "call void @llvm.memmove.p0.p0.i64(ptr {g}, ptr {from}, i64 {bytes}, i1 false)"
+                ));
+                let less = self.tmp();
+                self.emit(&format!("{less} = sub i64 {n}, 1"));
+                self.emit(&format!("store i64 {less}, ptr {cur}"));
+                self.br(&after);
+                self.place(&after);
+                Ok(Some(Val { ok, v: out, ty: el }))
+            }
+
             _ => err(format!("`{name}` は STEEL がまだ扱えない"), span),
         }
     }
@@ -1986,7 +2072,7 @@ impl Steel {
         // **書き換えるメンバ関数は場所を要る。** 伸ばすと置き場が変わりうるので、
         // 新しい置き場を**元の枠へ書き戻さねばならない**
         if let ExprKind::Field { base, name } = &callee.kind {
-            if matches!(name.as_str(), "push" | "pop" | "clear") {
+            if matches!(name.as_str(), "push" | "pop" | "clear" | "insert" | "remove") {
                 return self.mutating_method(base, name, args, span);
             }
         }
