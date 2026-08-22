@@ -22,10 +22,15 @@ pub enum Op {
     Paradox(Span),
     /// 名前の指すセルを読む。
     Load(u16),
+    /// 関数引数として名前の指すセル自体を積む。
+    /// **別名は値ではなく束縛の形態**なので、`Load` とは分ける（C-48）。
+    Ref(u16),
     /// 名前の指すセルに書く（上を消費）。
     Store(u16),
     /// 名前を別の名前のセルへ向ける。**値は動かさない**（C-20）。
     Alias(u16, u16),
+    /// その名前が指すセルを、現在の字句的な段／フレームの間だけ凍らせる。
+    Freeze(u16),
     /// ホストが見せている**呼べる名前**を呼ぶ（S-11）。番号と引数の数。
     HostCall(u16, u16, Span),
     /// 新しいセルを作って上を入れる。
@@ -165,6 +170,7 @@ pub fn compile_with_host(
         flows: HashMap::new(),
         expanding_flows: Default::default(),
         var_self: Default::default(),
+        fn_aliases: Default::default(),
         host_fns: HashMap::new(),
     };
     // **呼べる名前を先に登録する。** 関数と同じくスコープ全体で見える（C-36 / S-11）
@@ -190,7 +196,9 @@ pub fn compile_with_host(
     // 先に関数を全部登録する。**宣言はスコープ全体で見える**（C-36）
     let fns = collect_fns(&prog.body);
     for (i, f) in fns.iter().enumerate() {
-        c.out.fn_index.insert(fn_key(f), i as u32 + 1);
+        let key = fn_key(f);
+        c.out.fn_index.insert(key.clone(), i as u32 + 1);
+        c.fn_aliases.insert(key, f.params.iter().map(|p| p.ty.is_alias).collect());
         if f.owner.is_some()
             && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false)
         {
@@ -260,6 +268,8 @@ struct Compiler {
     expanding_flows: std::collections::HashSet<String>,
     /// `var self` を取るメンバ関数の名前（S-1）。**破壊するので書き戻す。**
     var_self: std::collections::HashSet<String>,
+    /// 利用者定義関数の引数が `alias` か。前方呼び出しも含めて先に集める。
+    fn_aliases: HashMap<String, Vec<bool>>,
     /// ホストが見せている**呼べる名前** → 番号（S-11）
     host_fns: HashMap<String, u16>,
 }
@@ -357,6 +367,11 @@ impl Compiler {
         for p in &f.params {
             let s = self.slot(&p.name);
             self.chunk.params.push((s, p.ty.is_alias));
+            // `const` の別名引数は呼び出し元のセル自体を凍らせる。
+            // 凍結はフレームの出口で一括して解く（C-35 / C-37）。
+            if p.ty.is_alias && p.kind == BindKind::Const {
+                self.emit(Op::Freeze(s));
+            }
         }
         self.chunk.self_is_var = f.owner.is_some()
             && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false);
@@ -594,6 +609,11 @@ impl Compiler {
                         return self.err(format!("知らない名前 `{t}`"), b.span);
                     };
                     let dst = self.slot(&b.name);
+                    if d.kind == BindKind::Const {
+                        // `const` は経路ではなくセルの性質。
+                        // 元の名前からの書き込みも同じ間は禁じる（C-35）。
+                        self.emit(Op::Freeze(src));
+                    }
                     self.emit(Op::Alias(dst, src));
                 }
             }
@@ -807,11 +827,28 @@ impl Compiler {
         let Some(idx) = self.out.fn_index.get(name).copied() else {
             return self.err(format!("知らない関数 `{name}`"), callee.span);
         };
-        for a in args {
-            self.expr(a)?;
-            self.emit(Op::NeedValue(a.span));
+        let aliases = self.fn_aliases.get(name).cloned().unwrap_or_default();
+        for (i, a) in args.iter().enumerate() {
+            self.argument(a, aliases.get(i).copied().unwrap_or(false))?;
         }
         self.emit(Op::Call(idx, args.len() as u16, span));
+        Ok(())
+    }
+
+    /// 別名引数は名前のセル、値引数はその場で複製した値を積む。
+    fn argument(&mut self, arg: &Expr, is_alias: bool) -> Result<(), CompileError> {
+        if is_alias {
+            let ExprKind::Name(name) = &arg.kind else {
+                return self.err("`alias` 引数に渡せるのは名前だけ", arg.span);
+            };
+            let Some(slot) = self.lookup(name) else {
+                return self.err(format!("知らない名前 `{name}`"), arg.span);
+            };
+            self.emit(Op::Ref(slot));
+        } else {
+            self.expr(arg)?;
+            self.emit(Op::NeedValue(arg.span));
+        }
         Ok(())
     }
 
@@ -1190,6 +1227,8 @@ enum Shape {
 enum Slot {
     Value(Value),
     Paradox(Span),
+    /// 値ではない。`alias` 引数の束縛にだけ使う（C-48）。
+    Cell(CellId),
 }
 
 impl Slot {
@@ -1198,6 +1237,7 @@ impl Slot {
             Slot::Value(v) => Ok(v),
             // **消費されなかった paradox**（C-46）
             Slot::Paradox(sp) => Err(RtErr { msg: "消費されなかった paradox".into(), span: sp }),
+            Slot::Cell(_) => Err(RtErr { msg: "セル参照は値ではない".into(), span }),
         }
     }
     fn from_eval(e: crate::interp::Eval, span: Span) -> Result<Slot, RtErr> {
@@ -1253,6 +1293,9 @@ struct StageState {
     pending: Option<u32>,
     /// この段に入ったときのスタックの高さ。抜けるときはここまで捨てる。
     base: usize,
+    /// この段に入ったときの凍結の個数。
+    /// `const` 別名の凍結は字句的に解ける（C-37）。
+    frozen_base: usize,
 }
 
 struct Frame {
@@ -1267,6 +1310,8 @@ struct Frame {
     /// `var self` を取るメンバ関数のとき、レシーバのセル。
     /// **レシーバは複製されない**（C-20）ので、返るときに書き戻す。
     self_cell: Option<CellId>,
+    /// 呼び出し元が持っていた凍結の個数。フレームを返るとここまで戻す。
+    frozen_base: usize,
 }
 
 pub struct Vm<'a> {
@@ -1276,6 +1321,8 @@ pub struct Vm<'a> {
     arena: Arena,
     stack: Vec<Slot>,
     frames: Vec<Frame>,
+    /// 凍っているセル。同じセルの入れ子の凍結を数えるため列で持つ。
+    frozen: Vec<CellId>,
     /// 枠のセル表の使い回し。`Runner` から借りる
     pool: Vec<Vec<CellId>>,
 }
@@ -1329,6 +1376,8 @@ pub struct Runner {
     arena: Arena,
     stack: Vec<Slot>,
     frames: Vec<Frame>,
+    /// 凍結表の容量も実行ごとに使い回す。
+    frozen: Vec<CellId>,
     /// 枠のセル表を使い回す。関数呼び出しのたびに確保しない
     pool: Vec<Vec<CellId>>,
 }
@@ -1369,18 +1418,21 @@ impl Runner {
             arena: std::mem::take(&mut self.arena),
             stack: std::mem::take(&mut self.stack),
             frames: std::mem::take(&mut self.frames),
+            frozen: std::mem::take(&mut self.frozen),
             pool: std::mem::take(&mut self.pool),
         };
         let r = vm.run_top(p, host);
         // **返ってくる道は一つ。** 誤りで抜けても入れ物は戻す
         vm.arena.clear();
         vm.stack.clear();
+        vm.frozen.clear();
         for f in vm.frames.drain(..) {
             vm.pool.push(f.cells);
         }
         self.arena = vm.arena;
         self.stack = vm.stack;
         self.frames = vm.frames;
+        self.frozen = vm.frozen;
         self.pool = vm.pool;
         r
     }
@@ -1412,10 +1464,15 @@ impl Vm<'_> {
         let after: Vec<Value> = (0..n)
             .map(|i| self.arena.take(CellId((base + i) as u32)).unwrap_or(Value::I64(0)))
             .collect();
-        let ev = out.map(|out| match out {
-            Slot::Value(v) => crate::interp::Eval::Value(v),
-            Slot::Paradox(sp) => crate::interp::Eval::Paradox(sp),
-        });
+        let ev = match out {
+            Ok(Slot::Value(v)) => Ok(crate::interp::Eval::Value(v)),
+            Ok(Slot::Paradox(sp)) => Ok(crate::interp::Eval::Paradox(sp)),
+            Ok(Slot::Cell(_)) => Err(RtErr {
+                msg: "セル参照が呼び出しの外へ出た".into(),
+                span: Span::NONE,
+            }),
+            Err(e) => Err(e),
+        };
         (ev, after)
     }
 }
@@ -1510,6 +1567,7 @@ impl<'a> Vm<'a> {
             stages: Vec::new(),
             regions: Vec::new(),
             self_cell: None,
+            frozen_base: self.frozen.len(),
         });
     }
 
@@ -1594,9 +1652,16 @@ impl<'a> Vm<'a> {
                     None => return self.err("まだ束縛されていない", Span::NONE),
                 }
             }
+            Op::Ref(s) => {
+                let c = self.cell(s);
+                self.stack.push(Slot::Cell(c));
+            }
             Op::Store(s) => {
                 let v = self.pop().value(Span::NONE)?;
                 let c = self.cell(s);
+                if self.frozen.contains(&c) {
+                    return self.err("凍っているセルには書けない（`const` の別名がある）", Span::NONE);
+                }
                 self.arena.set(c, v);
             }
             Op::Declare(s) => {
@@ -1608,6 +1673,10 @@ impl<'a> Vm<'a> {
             Op::Alias(dst, src) => {
                 let c = self.cell(src);
                 self.frames.last_mut().unwrap().cells[dst as usize] = c;
+            }
+            Op::Freeze(src) => {
+                let c = self.cell(src);
+                self.frozen.push(c);
             }
             // **ホストが答える**（S-11）。
             // 返り値が無ければ領域に値を置かない——paradox になる
@@ -1730,6 +1799,9 @@ impl<'a> Vm<'a> {
                 let i = self.pop().value(sp)?;
                 let v = self.pop().value(sp)?;
                 let c = self.cell(slot);
+                if self.frozen.contains(&c) {
+                    return self.err("凍っているセルには書けない（`const` の別名がある）", sp);
+                }
                 let Some(coll) = self.arena.get_mut(c) else {
                     return self.err("まだ束縛されていない", sp);
                 };
@@ -1849,14 +1921,31 @@ impl<'a> Vm<'a> {
                 let params = ch.params.clone();
                 let mut args = Vec::with_capacity(argc as usize);
                 for _ in 0..argc {
-                    args.push(self.pop().value(sp)?);
+                    args.push(self.pop());
                 }
                 args.reverse();
                 let mut cells = Vec::new();
+                let mut aliases = Vec::new();
                 for (i, a) in args.into_iter().enumerate() {
                     let is_alias = params.get(i).map(|p| p.1).unwrap_or(false);
-                    // 非 alias は深く複製する（値は自己完結しているので clone で足りる）
-                    cells.push((self.arena.alloc(Some(a)), is_alias));
+                    if is_alias {
+                        let cell = match a {
+                            Slot::Cell(cell) => cell,
+                            _ => {
+                                return self.err("`alias` 引数に渡せるのは名前だけ", sp)
+                            }
+                        };
+                        // 名前が違っても、実際のセルが同じなら二つの別名である（C-87）。
+                        if aliases.contains(&cell) {
+                            return self.err("同じセルに別名が二つ届く", sp);
+                        }
+                        aliases.push(cell);
+                        cells.push((cell, true));
+                    } else {
+                        // 非 alias は深く複製する（値は自己完結しているので clone で足りる）
+                        let value = a.value(sp)?;
+                        cells.push((self.arena.alloc(Some(value)), false));
+                    }
                 }
                 self.push_frame(idx, cells, 1);
             }
@@ -1864,6 +1953,7 @@ impl<'a> Vm<'a> {
                 let out = self.pop();
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.stack_base);
+                self.frozen.truncate(f.frozen_base);
                 self.stack.push(out);
                 // `var self` なら、書き換えたレシーバを**結果の上**に置く（S-1）。
                 // 呼び出し側は直後に `Store` で書き戻し、結果だけが残る
@@ -1896,12 +1986,15 @@ impl<'a> Vm<'a> {
                     nfor: None,
                     pending: None,
                     base,
+                    frozen_base: self.frozen.len(),
                 });
             }
             // 裸のブロックが正常に終わった。段を畳むだけで、値はそのまま
             Op::BlockEnd(_) => {
                 let f = self.frames.last_mut().unwrap();
-                f.stages.pop();
+                if let Some(st) = f.stages.pop() {
+                    self.frozen.truncate(st.frozen_base);
+                }
             }
             Op::LoopBegin => {
                 let base = self.stack.len();
@@ -1911,6 +2004,7 @@ impl<'a> Vm<'a> {
                     nfor: None,
                     pending: None,
                     base,
+                    frozen_base: self.frozen.len(),
                 });
             }
             Op::LoopBody(start, sp) => return self.loop_body(start, sp),
@@ -1918,6 +2012,7 @@ impl<'a> Vm<'a> {
                 let f = self.frames.last_mut().unwrap();
                 let st = f.stages.pop().unwrap();
                 self.stack.truncate(st.base);
+                self.frozen.truncate(st.frozen_base);
                 // 0 周なら paradox、そうでなければ反復回数
                 if st.count == 0 {
                     self.stack.push(Slot::Paradox(sp));
@@ -1995,11 +2090,15 @@ impl<'a> Vm<'a> {
     /// ループ本体を一周し終えた。**脱出はここで受ける。**
     fn loop_body(&mut self, start: u32, sp: Span) -> Result<Option<Esc>, RtErr> {
         // 本体は値を残してはいけない（静的検査が保証する）。残りを捨てる
-        let base = {
+        let (base, frozen_base) = {
             let f = self.frames.last().unwrap();
-            f.stages.last().map(|l| l.base).unwrap_or(f.stack_base)
+            f.stages
+                .last()
+                .map(|l| (l.base, l.frozen_base))
+                .unwrap_or((f.stack_base, f.frozen_base))
         };
         self.stack.truncate(base);
+        self.frozen.truncate(frozen_base);
         let f = self.frames.last_mut().unwrap();
         let st = f.stages.last_mut().unwrap();
         st.count = st.count.wrapping_add(1);
@@ -2025,6 +2124,7 @@ impl<'a> Vm<'a> {
             nfor: Some((s0, 0, n, slot, start.clone())),
             pending: None,
             base,
+            frozen_base: self.frozen.len(),
         });
         // 回数が 0 以下なら 0 周 → paradox
         if n <= 0 {
@@ -2059,11 +2159,15 @@ impl<'a> Vm<'a> {
     }
 
     fn nfor_next(&mut self, top: u32, sp: Span) -> Result<Option<Esc>, RtErr> {
-        let base = {
+        let (base, frozen_base) = {
             let f = self.frames.last().unwrap();
-            f.stages.last().map(|l| l.base).unwrap_or(f.stack_base)
+            f.stages
+                .last()
+                .map(|l| (l.base, l.frozen_base))
+                .unwrap_or((f.stack_base, f.frozen_base))
         };
         self.stack.truncate(base);
+        self.frozen.truncate(frozen_base);
         let (s0, k, n, slot, sample, pending) = {
             let f = self.frames.last_mut().unwrap();
             let st = f.stages.last_mut().unwrap();
@@ -2077,6 +2181,7 @@ impl<'a> Vm<'a> {
             let f = self.frames.last_mut().unwrap();
             let st = f.stages.pop().unwrap();
             self.stack.truncate(st.base);
+            self.frozen.truncate(st.frozen_base);
             self.stack.push(Slot::Value(Value::I64(st.count)));
             return Ok(None);
         }
@@ -2148,6 +2253,7 @@ impl<'a> Vm<'a> {
             };
             let f = self.frames.pop().unwrap();
             self.stack.truncate(f.stack_base);
+            self.frozen.truncate(f.frozen_base);
             if self.frames.is_empty() {
                 return Ok(Some(out));
             }
@@ -2173,6 +2279,7 @@ impl<'a> Vm<'a> {
         let f = self.frames.last_mut().unwrap();
         let st = f.stages.pop().unwrap();
         self.stack.truncate(st.base);
+        self.frozen.truncate(st.frozen_base);
         let f = self.frames.last_mut().unwrap();
         let i = find_stage_end(&self.p.chunks[f.chunk as usize].ops, f.pc, kind);
         f.pc = i + 1;
@@ -2187,6 +2294,7 @@ impl<'a> Vm<'a> {
                 let st = f.stages.pop().unwrap();
                 let i = find_stage_end(&self.p.chunks[f.chunk as usize].ops, f.pc, kind);
                 self.stack.truncate(st.base);
+                self.frozen.truncate(st.frozen_base);
                 // **値の無い脱出は何も置かない**ので、外界面は paradox（C-62）
                 let v = match esc.payload.take() {
                     Some(v) => Slot::Value(v),
@@ -2206,7 +2314,9 @@ impl<'a> Vm<'a> {
                 // 遅延した被演算子は**再開した本体の先頭**で走る（C-73）
                 st.pending = esc.deferred;
                 let base = st.base;
+                let frozen_base = st.frozen_base;
                 self.stack.truncate(base);
+                self.frozen.truncate(frozen_base);
                 let f = self.frames.last_mut().unwrap();
                 let i = find_stage_end(&self.p.chunks[f.chunk as usize].ops, f.pc, kind);
                 // 本体の末尾（`LoopBody` / `NForNext`）へ飛ぶ。そこで周回が進む
