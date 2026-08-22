@@ -55,6 +55,9 @@ pub enum Op {
     Call(u32, u16, Span),
     /// メンバ関数。名前は定数表。
     Method(u32, u16, Span),
+    /// 名前のセルにある集合体を、その場で変更する組み込みメンバ関数。
+    /// レシーバを深く複製して `Store` し直さない。
+    MutMethod(u16, u32, u16, Span),
     /// 集合体。
     MakeArray(u16),
     MakeMap(u16),
@@ -789,6 +792,21 @@ impl Compiler {
                 if let ExprKind::Name(v) = &base.kind {
                     if let Some(slot) = self.lookup(v) {
                         self.emit(Op::LoadLen(slot, span));
+                        return Ok(());
+                    }
+                }
+            }
+            // 組み込みの破壊的操作を名前へ掛けるなら、セルを直接変更できる。
+            // 引数はこれまでどおり左から右に評価し、変更はその後に行う。
+            if is_destructive(name) {
+                if let ExprKind::Name(v) = &base.kind {
+                    if let Some(slot) = self.lookup(v) {
+                        for a in args {
+                            self.expr(a)?;
+                            self.emit(Op::NeedValue(a.span));
+                        }
+                        let n = self.name_idx(name);
+                        self.emit(Op::MutMethod(slot, n, args.len() as u16, span));
                         return Ok(());
                     }
                 }
@@ -1915,6 +1933,24 @@ impl<'a> Vm<'a> {
                         .map_err(|e| RtErr { msg: e.msg, span: e.span })?;
                     self.stack.push(Slot::from_eval(out, sp)?);
                 }
+            }
+            Op::MutMethod(slot, ni, argc, sp) => {
+                let name = self.p.chunks[self.cur()].names[ni as usize].clone();
+                let mut args = Vec::with_capacity(argc as usize);
+                for _ in 0..argc {
+                    args.push(self.pop().value(sp)?);
+                }
+                args.reverse();
+                let cell = self.cell(slot);
+                if self.frozen.contains(&cell) {
+                    return self.err("凍っているセルには書けない", sp);
+                }
+                let Some(cur) = self.arena.get_mut(cell) else {
+                    return self.err("まだ束縛されていない", sp);
+                };
+                let out = write_method_pub(cur, &name, &args, sp)
+                    .map_err(|e| RtErr { msg: e.msg, span: e.span })?;
+                self.stack.push(Slot::from_eval(out, sp)?);
             }
             Op::Call(idx, argc, sp) => {
                 let ch = &self.p.chunks[idx as usize];
