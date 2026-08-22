@@ -222,6 +222,17 @@ fn const_別名は同じセルへのほかの経路も凍らせる() {
     same("fn f (const x : i64 alias) { break; }; var a := 1; f(a); a := 2; a");
 }
 
+#[test]
+fn 可変メソッドの引数がレシーバを変えても変更を失わない() {
+    let source =
+        "fn add (var xs : i64 array alias) { xs.push(2); 3 } -> i64;
+         var xs := [1]; xs.push(add(xs)); xs[1] * 10 + xs[2]";
+    let reference = vaak::interp::run(source);
+    let vm = vaak::vm::run(source);
+    assert_eq!(shape(&reference), "値 23", "参照実装: {reference:?}");
+    assert_eq!(shape(&vm), "値 23", "VM: {vm:?}");
+}
+
 // ===== S-16：分岐は領域である =====
 
 /// 木を辿る実装と VM が同じ答えを出すこと。
