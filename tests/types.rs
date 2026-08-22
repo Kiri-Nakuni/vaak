@@ -60,6 +60,41 @@ fn while_の条件は任意の整数型() {
 }
 
 #[test]
+fn 利用者定義メソッドにも_alias_制約が掛かる() {
+    bad(
+        "struct P { var x : i64 := 0; };
+         fn P.take (self, var a : i64 array alias) { a.len() } -> i64;
+         var p := new P ( ); var xs := [[1]]; p.take(xs[0]);",
+        "名前だけ",
+    );
+    bad(
+        "struct P { var x : i64 := 0; };
+         fn P.set (self, var a : i64 alias) { a := 9; };
+         var p := new P ( ); let a := 1; p.set(a);",
+        "権限は増やせない",
+    );
+    bad(
+        "struct P { var x : i64 := 0; };
+         fn P.set2 (self, var a : i64 alias, var b : i64 alias) { a := 2; b := 3; };
+         var p := new P ( ); var a := 1; p.set2(a, a);",
+        "別名が二つ",
+    );
+    bad(
+        "struct P { var x : i64 := 0; };
+         fn P.join (self, other : P alias) { self.x } -> i64;
+         var p := new P ( ); p.join(p);",
+        "別名が二つ",
+    );
+    // 同名の別型メソッドでは、レシーバ型から選んだ宣言だけを見る。
+    ok(
+        "struct P { var x : i64 := 0; }; struct Q { var x : i64 := 0; };
+         fn P.use (self, x : i64) { x } -> i64;
+         fn Q.use (self, var x : i64 alias) { x } -> i64;
+         var p := new P ( ); p.use(1 + 2);",
+    );
+}
+
+#[test]
 fn 分岐は同じ型でなければならない() {
     ok("if (1 < 2) 1 else 2 fi;");
     bad("if (1 < 2) 1 else 1.0 fi;", "型が合わない");

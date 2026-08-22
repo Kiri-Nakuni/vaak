@@ -57,6 +57,21 @@ fn rt<T>(msg: impl Into<String>, span: Span) -> R<T> {
     Err(RuntimeError { msg: msg.into(), span })
 }
 
+/// 検査を飛ばした実行でも、同じ実セルへ二つの別名を束縛しない（C-87）。
+fn reject_duplicate_alias_cells(
+    cells: impl IntoIterator<Item = CellId>,
+    span: Span,
+) -> R<()> {
+    let mut seen = Vec::new();
+    for cell in cells {
+        if seen.contains(&cell) {
+            return rt("同じセルに別名が二つ届く", span);
+        }
+        seen.push(cell);
+    }
+    Ok(())
+}
+
 // ================= 環境 =================
 
 #[derive(Clone, Debug)]
@@ -1985,14 +2000,7 @@ impl Interp {
             }
         }
         // **同じ呼び出しで、同じセルに届く別名を二つ以上渡せない**（C-87）
-        let cells: Vec<CellId> = bound.iter().filter(|b| b.3).map(|b| b.2).collect();
-        for i in 0..cells.len() {
-            for j in i + 1..cells.len() {
-                if cells[i] == cells[j] {
-                    return rt("同じセルに別名が二つ届く", span);
-                }
-            }
-        }
+        reject_duplicate_alias_cells(bound.iter().filter(|b| b.3).map(|b| b.2), span)?;
 
         // 関数本体は領域・スコープ・脱出段（**フレーム**）
         let saved_base = self.frame_base;
@@ -2107,6 +2115,10 @@ impl Interp {
                 bound.push((p.name.clone(), p.kind, cell, false));
             }
         }
+        // 標準の入口は静的検査済みだが、参照実装を直接呼ぶ差分試験でも
+        // C-87 を破る呼び出しを受け入れない。self_cell は常に新しいので、
+        // ここで実際に衝突し得るのは追加 alias 同士である。
+        reject_duplicate_alias_cells(bound.iter().filter(|b| b.3).map(|b| b.2), span)?;
 
         let saved = self.frame_base;
         self.push_scope(true, true);

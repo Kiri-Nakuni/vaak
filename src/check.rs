@@ -711,30 +711,15 @@ impl Checker {
                 span,
             );
         }
-        // **`alias` を受ける引数に渡せるのは名前だけ。同じセルに二つ届かない**（C-87）
-        let mut alias_roots: Vec<&str> = Vec::new();
-        for (p, a) in f.params.iter().zip(args) {
-            if p.ty.is_alias {
-                let ExprKind::Name(n) = &a.kind else {
-                    self.err("`alias` 引数に渡せるのは名前だけ", a.span);
-                    continue;
-                };
-                match self.lookup(n) {
-                    None => self.unknown(n, a.span),
-                    Some((k, _)) => {
-                        if !can_narrow(k, p.kind) {
-                            self.err("経路の権限は増やせない", a.span);
-                        }
-                    }
-                }
-                if alias_roots.contains(&n.as_str()) {
-                    self.err("同じセルに別名が二つ届く", a.span);
-                }
-                alias_roots.push(n);
-            } else {
-                self.operand(a, env);
-            }
+        // 名前解決と被演算子の検査は alias かどうかによらない。
+        // alias 固有の制約は、型からメソッドを選べる型検査器とも共有する。
+        for a in args {
+            self.operand(a, env);
         }
+        let alias_errs = alias_arg_errors(&f.params, args, None, |n| {
+            self.lookup(n).map(|(kind, _)| kind)
+        });
+        self.errs.extend(alias_errs);
         Places::Value
     }
 
@@ -893,6 +878,48 @@ fn can_narrow(from: BindKind, to: BindKind) -> bool {
         (BindKind::Const, BindKind::Const) => true,
         (BindKind::Const, _) => false,
     }
+}
+
+/// 呼び出しの alias 制約（C-53 / C-87）。
+///
+/// 通常関数は効果検査器だけで宣言を選べるが、メソッドはレシーバの型が要る。
+/// どちらも同じ規則を使えるよう、名前解決そのものから切り離して返す。
+pub(crate) fn alias_arg_errors(
+    params: &[Param],
+    args: &[Expr],
+    receiver: Option<&Expr>,
+    mut kind_of: impl FnMut(&str) -> Option<BindKind>,
+) -> Vec<StaticError> {
+    let mut errs = Vec::new();
+    let mut alias_roots: Vec<&str> = receiver.and_then(root_of).into_iter().collect();
+    for (p, a) in params.iter().zip(args) {
+        if !p.ty.is_alias {
+            continue;
+        }
+        let ExprKind::Name(n) = &a.kind else {
+            errs.push(StaticError {
+                msg: "`alias` 引数に渡せるのは名前だけ".into(),
+                span: a.span,
+            });
+            continue;
+        };
+        if let Some(kind) = kind_of(n) {
+            if !can_narrow(kind, p.kind) {
+                errs.push(StaticError {
+                    msg: "経路の権限は増やせない".into(),
+                    span: a.span,
+                });
+            }
+        }
+        if alias_roots.contains(&n.as_str()) {
+            errs.push(StaticError {
+                msg: "同じセルに別名が二つ届く".into(),
+                span: a.span,
+            });
+        }
+        alias_roots.push(n);
+    }
+    errs
 }
 
 /// 経路の根（最初の識別子）。**別名の同一性は根で判定する**（C-87）。

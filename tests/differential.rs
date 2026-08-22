@@ -274,6 +274,48 @@ fn 名前の可変メソッドはセル上の配列を直接育てる() {
     );
 }
 
+#[test]
+fn 利用者定義メソッドの追加_alias_引数は呼び出し元のセルを指す() {
+    let source =
+        "struct P { var value : i64 := 0; };
+         fn P.set (self, var target : i64 alias) { target := 9; };
+         var p := new P ( );
+         var target := 1;
+         p.set(target);
+         target";
+    let reference = vaak::interp::run(source);
+    let vm = vaak::vm::run(source);
+    assert_eq!(shape(&reference), "値 9", "参照実装: {reference:?}");
+    assert_eq!(shape(&vm), "値 9", "VM: {vm:?}");
+}
+
+#[test]
+fn 利用者定義メソッドの値引数は後続引数より先に写す() {
+    same(
+        "struct P { var value : i64 := 0; };
+         fn set (var target : i64 alias) { target := 9; 0 } -> i64;
+         fn P.first (self, first : i64, second : i64) { first } -> i64;
+         var p := new P ( );
+         var target := 1;
+         p.first(target, set(target)) * 10 + target",
+    );
+}
+
+#[test]
+fn 利用者定義メソッドでも同じ実セルに_alias_引数を二つ渡せない() {
+    same(
+        "struct P { var value : i64 := 0; };
+         fn P.set2 (self, var a : i64 alias, var b : i64 alias) { a := 2; b := 3; };
+         var p := new P ( ); var x := 1; p.set2(x, x); x",
+    );
+    // 名前が違っても &= で同じセルを指していれば拒む。
+    same(
+        "struct P { var value : i64 := 0; };
+         fn P.set2 (self, var a : i64 alias, var b : i64 alias) { a := 2; b := 3; };
+         var p := new P ( ); var x := 1; var y : i64 alias &= x; p.set2(x, y); x",
+    );
+}
+
 // ===== S-16：分岐は領域である =====
 
 /// 木を辿る実装と VM が同じ答えを出すこと。
