@@ -37,7 +37,15 @@ fn steel_run(name: &str, src: &str) -> Option<i32> {
     let ll = dir.join("a.ll");
     let exe = dir.join("a.out");
     std::fs::write(&ll, ir).unwrap();
-    let st = Command::new("clang").arg("-O2").arg("-o").arg(&exe).arg(&ll).output().unwrap();
+    // **`-lm` が要る。** `exp` `log` `pow` `sin` などは libm の関数へ落ちる
+    let st = Command::new("clang")
+        .arg("-O2")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&ll)
+        .arg("-lm")
+        .output()
+        .unwrap();
     assert!(st.status.success(), "{name}: clang: {}", String::from_utf8_lossy(&st.stderr));
     Some(Command::new(&exe).status().unwrap().code().unwrap())
 }
@@ -234,7 +242,14 @@ fn steel_only(name: &str, src: &str) -> Option<i32> {
     let ll = dir.join("a.ll");
     let exe = dir.join("a.out");
     std::fs::write(&ll, ir).unwrap();
-    let st = Command::new("clang").arg("-O2").arg("-o").arg(&exe).arg(&ll).output().unwrap();
+    let st = Command::new("clang")
+        .arg("-O2")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&ll)
+        .arg("-lm")
+        .output()
+        .unwrap();
     assert!(st.status.success(), "{name}: clang: {}", String::from_utf8_lossy(&st.stderr));
     Some(Command::new(&exe).status().unwrap().code().unwrap())
 }
@@ -566,3 +581,85 @@ t!(f32の鍵, "var m : f32 i64 map := ( 1.5 => 7, 0.0 - 2.5 => 9 ); var k := m.k
 t!(hashでf32の鍵, "var h : f32 i64 hash := ( 1.5 => 7, 0.0 - 2.5 => 9 ); h[1.5]");
 t!(浮動小数の鍵を抜く, "var m : f64 i64 map := ( 1.5 => 7, 2.5 => 9 ); m.remove(1.5) + m.len()");
 t!(hashで浮動小数の鍵を抜く, "var h : f64 i64 hash := ( 1.5 => 7, 2.5 => 9 ); h.remove(1.5) + h.len()");
+
+// ── 文脈の型は演算の中まで届く（C-100） ─────────────────────────
+
+t!(u8の場では折り返してから割る, "var x : u8 := 100 * 3 / 2; x");
+t!(i64の場では折り返さない, "var x : i64 := 100 * 3 / 2; x");
+t!(枠を越えるリテラル, "var x : u8 := 256 / 2; x");
+t!(代入でも届く, "var x : u8 := 0; x := 100 * 3 / 2; x");
+t!(領域を通しても届く, "var x : u8 := { 100 * 3 / 2 }; x");
+t!(ifの枝へ届く, "var x : u8 := if (1 == 1) 100 * 3 / 2 else 0 fi; x");
+t!(注釈から届く, "(100 * 3 / 2) -> u8");
+t!(引数へ届く, "fn f (a : u8) { a } -> u8; f(100 * 3 / 2)");
+t!(返り値から届く, "fn f () { 100 * 3 / 2 } -> u8; f()");
+t!(欄へ届く, "struct P { var x : u8 := 0; }; var p := new P ( x := 100 * 3 / 2 ); p.x");
+t!(欄の既定へも届く, "struct P { var x : u8 := 100 * 3 / 2; }; var p := new P (); p.x");
+t!(配列の要素へ届く, "var a : u8 array := [ 100 * 3 / 2 ]; a[0]");
+t!(名前で書いても同じ,
+   "var a : u8 := 100; var b : u8 := 3; var c : u8 := 2; var x : u8 := 0; x := a * b / c; x");
+t!(i32でも折り返す, "var x : i32 := 100000 * 100000 / 1000; x");
+t!(桁数は別の型でよい, "var x : u8 := 1 << 9; x");
+t!(幅以上の桁送りはこぼれる, "var x : u8 := 1 << 9; x");
+t!(右へ幅以上送る, "var x : u8 := 255 >> 9; x");
+t!(符号つきを右へ幅以上送ると符号で埋まる, "var x : i32 := 0 - 1; x := x >> 40; x");
+t!(i64を幅以上送る, "var x : i64 := 1 << 64; x");
+
+// ── 数のメンバ関数（S-23） ─────────────────────────
+
+t!(絶対値, "var x : i64 := 0 - 5; x.abs()");
+t!(絶対値は折り返す, "var x : i32 := 0 - 2147483648; x.abs()");
+t!(最小と最大, "var a : i64 := 5; a.min(3) * 10 + a.max(3)");
+t!(符号なしの最小, "var a : u8 := 5; a.min(200)");
+t!(立っているビットを数える, "var x : u8 := 0b1011; x.count_ones()");
+t!(前の零を数える, "var x : u8 := 0b00010000; x.leading_zeros()");
+t!(零の前の零, "var x : u8 := 0; x.leading_zeros()");
+t!(後ろの零を数える, "var x : u8 := 0b00010000; x.trailing_zeros()");
+t!(零の後ろの零, "var x : u8 := 0; x.trailing_zeros()");
+t!(ビットを逆にする, "var x : u8 := 0b11010000; x.reverse_bits()");
+t!(バイトを入れ替える, "var x : u16 := 0x1234; x.swap_bytes()");
+t!(一バイトは入れ替えても同じ, "var x : u8 := 0x12; x.swap_bytes()");
+t!(左へ回す, "var x : u8 := 1; x.rotate_left(1)");
+t!(幅だけ回すと戻る, "var x : u8 := 0b10110001; x.rotate_left(8)");
+t!(幅を越えて回す, "var x : u8 := 1; x.rotate_left(9)");
+t!(右へ回す, "var x : u8 := 1; x.rotate_right(1)");
+t!(端をまたいで回す, "var x : u8 := 0b10000000; x.rotate_left(1)");
+t!(足して止まる, "var x : u8 := 250; x.saturating_add(10)");
+t!(引いて止まる, "var x : u8 := 5; x.saturating_sub(10)");
+t!(掛けて止まる, "var x : i32 := 100000; x.saturating_mul(100000)");
+t!(負へ掛けて止まる, "var x : i32 := 0 - 100000; x.saturating_mul(100000)");
+t!(止まらない掛け算, "var x : u8 := 20; x.saturating_mul(20)");
+t!(平方根, "var x : f64 := 4.0; if (x.sqrt() == 2.0) 1 else 0 fi");
+t!(負の平方根は虚無, "var x : f64 := 0.0 - 1.0; if ((x.sqrt() ?? 7.0) == 7.0) 1 else 0 fi");
+t!(浮動小数の絶対値, "var x : f64 := 0.0 - 2.5; if (x.abs() == 2.5) 1 else 0 fi");
+t!(床と天井,
+   "var x : f64 := 2.5; if (x.floor() == 2.0) 1 else 0 fi");
+t!(切り捨て, "var x : f64 := 0.0 - 2.5; if (x.trunc() == 0.0 - 2.0) 1 else 0 fi");
+t!(四捨五入, "var x : f64 := 2.5; if (x.round() == 3.0) 1 else 0 fi");
+t!(符号を写す, "var x : f64 := 3.0; if (x.copysign(0.0 - 1.0) == 0.0 - 3.0) 1 else 0 fi");
+t!(掛けて足す, "var x : f64 := 2.0; if (x.mul_add(3.0, 1.0) == 7.0) 1 else 0 fi");
+t!(冪, "var x : f64 := 2.0; if (x.pow(10.0) == 1024.0) 1 else 0 fi");
+t!(零の対数は虚無, "var x : f64 := 0.0; if ((x.ln() ?? 5.0) == 5.0) 1 else 0 fi");
+t!(二の対数, "var x : f64 := 8.0; if (x.log2() == 3.0) 1 else 0 fi");
+t!(f32の平方根, "var x : f32 := 4.0; if (x.sqrt() == 2.0) 1 else 0 fi");
+
+// ── 十進以外の表記 ─────────────────────────
+
+t!(二進, "0b1011");
+t!(十六進, "0xff");
+t!(八進, "0o777");
+t!(区切りつき, "1_000");
+t!(区切りつき十六進, "0xFF_FF");
+
+// ── 包み型は関数の返りでも剥がれる ─────────────────────────
+
+t!(包み型を返す関数,
+   "wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId;
+    (mk(7) -> i64) * 10 + 1");
+t!(包み型を返して包み型で受ける,
+   "wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId;
+    fn use2 (h : NodeId) { (h -> i64) * 2 } -> i64;
+    use2(mk(21))");
+t!(包み型の配列を返す,
+   "wrap Bytes = u8 array; fn mk () { new Bytes(new u8 array(2, 5)) } -> Bytes;
+    var b := mk(); (b -> u8 array)[1] -> i64");
