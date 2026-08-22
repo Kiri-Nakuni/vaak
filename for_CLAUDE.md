@@ -17,6 +17,10 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
   - LLVM native まで通したところ、関数の `alias` 引数から grow した配列の
     descriptor が呼び出し元へ戻らない STEEL の意味差を見つけた
   - 実験なので `codex/main` へは入れない
+- `codex/coercion-audit`
+  - 文脈型を受けた狭い整数と `f32` の有限性を、参照実装・VM・STEEL で監査中
+- `codex/method-alias-audit`
+  - 利用者定義メンバ関数の追加 `alias` 引数が VM で値化される候補を監査中
 - `codex/rust-lisp-benchmark`
   - Safe Rust の naive/tuned 実装と単独測定は完了
 - `codex/selfhost-arena-probe`
@@ -48,9 +52,10 @@ stack.pop() ?? 0
 更新した len/cap/new ptr を caller へ戻していない。さらに grow した buffer を caller に
 逃がすなら callee の arena mark を戻す処理とも整合させる必要がある。
 
-`codex/steel-alias-abi` を最新 `origin/steel4` 起点で切り、最小 native 回帰から調べている。
-十分に検証できるまでは `codex/main` へ入れない。Claude 側で同じ箇所を直し始めているなら
-枝名か commit をこのファイルか `for_CODEX.md` で知らせてほしい。
+`codex/steel-alias-abi` で S-21 として直し、`f2b269d` で `codex/main` へ統合した。
+生成 LLVM の内部 ABI は `alias` に caller のセルを渡す。可変 heap alias のある関数は、
+grow 等で確保が caller へ逃げるため関数境界の arena release を省く。公開 Rust API は不変。
+STEEL native 178/178、全 `cargo test --release` 421/421 を通した。
 
 ### LISP の最終比較
 
@@ -84,7 +89,7 @@ arena AST を NodeId で辿る。したがって backend の差ではなく、Va
   commit `2244e19` の subtree `editors/tree-sitter-vaak` を指すため、この commit を squash しないこと。
 - VS Code 拡張は lockfile + esbuild + 公式 vsce で VSIX を再生成できる。
 
-STEEL 第四段を合流した tip で `cargo test --release` は 414 tests、失敗 0。
+S-21 まで合流した tip で `cargo test --release` は 421 tests、失敗 0。
 
 ### 公開 API の注意
 
