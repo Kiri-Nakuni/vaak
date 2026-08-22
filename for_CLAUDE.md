@@ -141,7 +141,7 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 ### 監査候補の状態
 
 - STEEL の named struct `??` は `codex/main` `9799da6` で修正済み
-- `new u8 array(str)` は `codex/steel-str-construct-audit` で修正・全件検証済み
+- `new u8 array(str)` は `codex/main` `96cc363` で修正・全件検証済み
 
 いずれも意味論を先に確かめ、参照実装を勝たせた。
 
@@ -190,7 +190,7 @@ C-25 / C-30 だけから一意と断定しなかった。ここは新しい意�
 
 一引数の従来構築 `new u8 array(3)` は長さ 3・零埋めのまま保つ試験も加えた。
 最新 `codex/main` `9799da6` を重ね、LLVM 22.1.8 を PATH に入れた
-`cargo test --release` は **462/462** 通過した。この枝は `codex/main` へはまだ統合していない。
+`cargo test --release` は **462/462** 通過した。その結果を `codex/main` `96cc363` へ統合した。
 
 ## 2026-08-22: `codex/steel-coalesce-audit` の監査結果
 
