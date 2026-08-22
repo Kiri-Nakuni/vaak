@@ -1,11 +1,15 @@
 {
   "name": "vaak",
   "displayName": "Vaak",
-  "description": "Vaak（PraTeX 埋め込みスクリプト言語）の言語サーバと色分け",
+  "description": "埋め込みスクリプト言語 Vaak の言語サーバと色分け",
   "version": "0.1.0",
   "publisher": "arimura-akihiro",
   "license": "MIT",
-  "engines": { "vscode": "^1.75.0" },
+  "repository": {
+    "type": "git",
+    "url": "https://git.trap.jp/Suima/vaak.git"
+  },
+  "engines": { "vscode": "^1.82.0" },
   "categories": ["Programming Languages"],
   "activationEvents": ["onLanguage:vaak"],
   "main": "./out/extension.js",
@@ -42,9 +46,19 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p .",
-    "watch": "tsc -watch -p ."
+    "check": "tsc --noEmit -p .",
+    "compile": "npm run check && node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "npm run check && node esbuild.js --production",
+    "package:vsix": "vsce package --out vaak.vsix",
+    "vscode:prepublish": "npm run package"
   },
   "dependencies": { "vscode-languageclient": "^9.0.1" },
-  "devDependencies": { "@types/node": "^20", "@types/vscode": "^1.75.0", "typescript": "^5.4.0" }
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.82.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.28.2",
+    "typescript": "^5.4.0"
+  }
 }
