@@ -177,6 +177,51 @@ dist2(p, q)
     );
 }
 
+#[test]
+fn alias_引数は呼び出し元と同じセルを指す() {
+    same("fn set (var x : i64 alias) { x := 9; }; var a := 1; set(a); a");
+}
+
+#[test]
+fn 値引数は呼び出し元のセルを指さない() {
+    same("fn set (var x : i64) { x := 9; }; var a := 1; set(a); a");
+    same(
+        "fn set (var x : i64 array) { x[0] := 9; }; var a := [1]; set(a); a[0]",
+    );
+    // 後の引数が元のセルを書いても、先の値引数は評価時点の複製。
+    same(
+        "fn set (var x : i64 alias) { x := 9; 0 } -> i64;
+         fn first (a : i64, b : i64) { a } -> i64;
+         var x := 1; first(x, set(x))",
+    );
+}
+
+#[test]
+fn 同じセルに_alias_引数が二つ届くと誤りになる() {
+    same(
+        "fn f (a : i64 alias, b : i64 alias) { a } -> i64; var p := 1; f(p, p);",
+    );
+    same(
+        "fn f (a : i64 alias, b : i64 alias) { a } -> i64;
+         var p := 1; var q : i64 alias &= p; f(p, q);",
+    );
+}
+
+#[test]
+fn const_別名は同じセルへのほかの経路も凍らせる() {
+    same("var a := 1; { const b : i64 alias &= a; a := 2; }; a");
+    same("var a := 1; { const b : i64 alias &= a; }; a := 2; a");
+    same("var a := [1]; { const b : i64 array alias &= a; a[0] := 2; }; a[0]");
+    same("var a := 1; { const b : i64 alias &= a; break; }; a := 2; a");
+    same("var a := 1; loop { const b : i64 alias &= a; break; }; a := 2; a");
+    same(
+        "var a := 1; nfor (i, 0, 2) { const b : i64 alias &= a; continue; }; a := 2; a",
+    );
+    same("fn f (const x : i64 alias) { x := 2; }; var a := 1; f(a); a");
+    same("fn f (const x : i64 alias) { x; }; var a := 1; f(a); a := 2; a");
+    same("fn f (const x : i64 alias) { break; }; var a := 1; f(a); a := 2; a");
+}
+
 // ===== S-16：分岐は領域である =====
 
 /// 木を辿る実装と VM が同じ答えを出すこと。
