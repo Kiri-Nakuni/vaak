@@ -22,8 +22,9 @@ authors = ["Arimura Akihiro"]
 # repository・rev・path を更新したコミットを作ること。
 
 [grammars.vaak]
-repository = "file:///home/suima/Documents/mydsl/editors/tree-sitter-vaak"
-rev = "ffbf0132f05c9cd506a6e93044dc2c6520d32140"
+repository = "ssh://git@git.trap.jp:2200/Suima/vaak.git"
+rev = "2244e19a0ab3470b26ba6c671a7241692ccd930b"
+path = "editors/tree-sitter-vaak"
 
 [language_servers.vaak-lsp]
 name = "Vaak"
