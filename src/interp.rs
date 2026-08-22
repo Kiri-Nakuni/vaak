@@ -1883,8 +1883,20 @@ impl Interp {
     ///
     /// 利用者定義（S-1）を先に探し、無ければ標準ライブラリ（S-3）。
     fn method(&mut self, base: &Expr, name: &str, args: &[Expr], span: Span) -> R<Eval> {
-        if let Ok(Ok(recv)) = self.need_value(base) {
-            let key = match recv.type_of() {
+        // 名前ならセルから型だけを見る。値を評価すると、組み込みの `push` や
+        // `pop` に着く前に配列全体を複製してしまい、操作が長さに比例する。
+        let receiver_type = if let ExprKind::Name(n) = &base.kind {
+            self.lookup(n)
+                .and_then(|binding| self.arena.get(binding.cell))
+                .map(Value::type_of)
+        } else {
+            match self.need_value(base) {
+                Ok(Ok(receiver)) => Some(receiver.type_of()),
+                _ => None,
+            }
+        };
+        if let Some(receiver_type) = receiver_type {
+            let key = match receiver_type {
                 ValueType::Named(t) => format!("{t}.{name}"),
                 _ => String::new(),
             };
