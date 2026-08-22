@@ -14,10 +14,14 @@
 % STEEL は無名標準ライブラリをまだ注入しないので、同じ定義を明示する。
 flow $return = $repeat(break, getdepth());
 
+%{ token 列の位置と、環境・配列の一般の添字を取り違えないための包み。
+   現行仕様では比較・算術・添字のたびに i64 へ明示的に剥がす。 }%
+wrap TokenPos = i64;
+
 struct Step {
     let ok : u1 := false;
     let value : i64 := 0;
-    let next : i64 := 0;
+    let next : TokenPos := new TokenPos(0);
 };
 
 fn failed () {
@@ -128,60 +132,82 @@ fn lookup (names : str array alias, values : i64 array alias, name : str alias) 
 } -> Step;
 
 %{ 式を評価せず、その直後まで進める。if の選ばれない腕に使う。 }%
-fn skip (tokens : str array alias, pos : i64) {
-    if (pos < 0 || pos >= tokens.len()) $return 0 - 1; fi;
-    let first := tokens[pos];
-    if (first.len() != 1 || first[0] != 40) $return pos + 1; fi;
+fn skip (tokens : str array alias, pos : TokenPos) {
+    if ((pos -> i64) < 0 || (pos -> i64) >= tokens.len())
+        $return new TokenPos(0 - 1);
+    fi;
+    let first := tokens[pos -> i64];
+    if (first.len() != 1 || first[0] != 40)
+        $return new TokenPos((pos -> i64) + 1);
+    fi;
 
     var depth := 1;
-    var i := pos + 1;
+    var i := new TokenPos((pos -> i64) + 1);
     while (depth > 0) {
-        if (i >= tokens.len()) $return 0 - 1; fi;
-        let token := tokens[i];
+        if ((i -> i64) >= tokens.len()) $return new TokenPos(0 - 1); fi;
+        let token := tokens[i -> i64];
         if (token.len() == 1) {
             if (token[0] == 40) depth += 1;
             elif (token[0] == 41) depth -= 1;
             fi;
         } fi;
-        i += 1;
+        i := new TokenPos((i -> i64) + 1);
     };
     i
-} -> i64;
+} -> TokenPos;
 
-fn close_after (tokens : str array alias, pos : i64) {
-    if (pos < 0 || pos >= tokens.len()) $return 0 - 1; fi;
-    let token := tokens[pos];
-    if (token.len() == 1 && token[0] == 41) pos + 1 else 0 - 1 fi
-} -> i64;
+fn close_after (tokens : str array alias, pos : TokenPos) {
+    if ((pos -> i64) < 0 || (pos -> i64) >= tokens.len())
+        $return new TokenPos(0 - 1);
+    fi;
+    let token := tokens[pos -> i64];
+    if (token.len() == 1 && token[0] == 41)
+        new TokenPos((pos -> i64) + 1)
+    else
+        new TokenPos(0 - 1)
+    fi
+} -> TokenPos;
 
-fn eval (tokens : str array alias, pos : i64,
+fn eval (tokens : str array alias, pos : TokenPos,
          names : str array alias, values : i64 array alias) {
-    if (pos < 0 || pos >= tokens.len()) $return failed(); fi;
-    let token := tokens[pos];
+    if ((pos -> i64) < 0 || (pos -> i64) >= tokens.len()) $return failed(); fi;
+    let token := tokens[pos -> i64];
 
     %{ 原子は整数か、環境にある名前。 }%
     if (token.len() != 1 || token[0] != 40) {
         if (is_number(token)) {
-            $return new Step ( ok := true, value := parse_number(token), next := pos + 1 );
+            $return new Step (
+                ok := true,
+                value := parse_number(token),
+                next := new TokenPos((pos -> i64) + 1)
+            );
         } fi;
         let found := lookup(names, values, token);
         if (! found.ok) $return failed(); fi;
-        $return new Step ( ok := true, value := found.value, next := pos + 1 );
+        $return new Step (
+            ok := true,
+            value := found.value,
+            next := new TokenPos((pos -> i64) + 1)
+        );
     } fi;
 
-    if (pos + 1 >= tokens.len()) $return failed(); fi;
-    let op := tokens[pos + 1];
+    if ((pos -> i64) + 1 >= tokens.len()) $return failed(); fi;
+    let op := tokens[(pos -> i64) + 1];
     let kind := operator_kind(op);
     if (kind == 0) $return failed(); fi;
 
     %{ + と * は零個以上の引数を取る。 }%
     if (kind == 1 || kind == 2) {
-        var cursor := pos + 2;
+        var cursor := new TokenPos((pos -> i64) + 2);
         var total := if (kind == 1) 0 else 1 fi;
-        while (cursor < tokens.len()) {
-            let here := tokens[cursor];
+        while ((cursor -> i64) < tokens.len()) {
+            let here := tokens[cursor -> i64];
             if (here.len() == 1 && here[0] == 41) {
-                $return new Step ( ok := true, value := total, next := cursor + 1 );
+                $return new Step (
+                    ok := true,
+                    value := total,
+                    next := new TokenPos((cursor -> i64) + 1)
+                );
             } fi;
             let part := eval(tokens, cursor, names, values);
             if (! part.ok) $return failed(); fi;
@@ -194,16 +220,20 @@ fn eval (tokens : str array alias, pos : i64,
     %{ - と / は先頭を初期値にして、残りを左から畳む。
        - の一引数形だけは符号反転になる。 }%
     if (kind == 3 || kind == 4) {
-        let first := eval(tokens, pos + 2, names, values);
+        let first := eval(tokens, new TokenPos((pos -> i64) + 2), names, values);
         if (! first.ok) $return failed(); fi;
         var cursor := first.next;
         var total := first.value;
         var count := 1;
-        while (cursor < tokens.len()) {
-            let here := tokens[cursor];
+        while ((cursor -> i64) < tokens.len()) {
+            let here := tokens[cursor -> i64];
             if (here.len() == 1 && here[0] == 41) {
                 if (kind == 3 && count == 1) total := 0 - total; fi;
-                $return new Step ( ok := true, value := total, next := cursor + 1 );
+                $return new Step (
+                    ok := true,
+                    value := total,
+                    next := new TokenPos((cursor -> i64) + 1)
+                );
             } fi;
             let part := eval(tokens, cursor, names, values);
             if (! part.ok) $return failed(); fi;
@@ -221,12 +251,12 @@ fn eval (tokens : str array alias, pos : i64,
 
     %{ 比較は二引数。真を 1、偽を 0 として返す。 }%
     if (kind == 5 || kind == 6) {
-        let left := eval(tokens, pos + 2, names, values);
+        let left := eval(tokens, new TokenPos((pos -> i64) + 2), names, values);
         if (! left.ok) $return failed(); fi;
         let right := eval(tokens, left.next, names, values);
         if (! right.ok) $return failed(); fi;
         let next := close_after(tokens, right.next);
-        if (next < 0) $return failed(); fi;
+        if ((next -> i64) < 0) $return failed(); fi;
         let answer := if (kind == 5) {
             if (left.value == right.value) 1 else 0 fi
         } else {
@@ -237,23 +267,23 @@ fn eval (tokens : str array alias, pos : i64,
 
     %{ if は選んだ腕だけ評価する。選ばない腕は skip で構文だけ飛ばす。 }%
     if (kind == 7) {
-        let condition := eval(tokens, pos + 2, names, values);
+        let condition := eval(tokens, new TokenPos((pos -> i64) + 2), names, values);
         if (! condition.ok) $return failed(); fi;
         if (condition.value != 0) {
             let yes := eval(tokens, condition.next, names, values);
             if (! yes.ok) $return failed(); fi;
             let after_no := skip(tokens, yes.next);
-            if (after_no < 0) $return failed(); fi;
+            if ((after_no -> i64) < 0) $return failed(); fi;
             let next := close_after(tokens, after_no);
-            if (next < 0) $return failed(); fi;
+            if ((next -> i64) < 0) $return failed(); fi;
             $return new Step ( ok := true, value := yes.value, next := next );
         } else {
             let no_pos := skip(tokens, condition.next);
-            if (no_pos < 0) $return failed(); fi;
+            if ((no_pos -> i64) < 0) $return failed(); fi;
             let no := eval(tokens, no_pos, names, values);
             if (! no.ok) $return failed(); fi;
             let next := close_after(tokens, no.next);
-            if (next < 0) $return failed(); fi;
+            if ((next -> i64) < 0) $return failed(); fi;
             $return new Step ( ok := true, value := no.value, next := next );
         } fi;
     } fi;
@@ -261,10 +291,10 @@ fn eval (tokens : str array alias, pos : i64,
     %{ let は環境を深く複製してから名前を足す。
        本体から戻れば古い環境がそのまま残り、後始末が要らない。 }%
     if (kind == 8) {
-        if (pos + 2 >= tokens.len()) $return failed(); fi;
-        let name := tokens[pos + 2];
+        if ((pos -> i64) + 2 >= tokens.len()) $return failed(); fi;
+        let name := tokens[(pos -> i64) + 2];
         if (name.len() == 1 && (name[0] == 40 || name[0] == 41)) $return failed(); fi;
-        let bound := eval(tokens, pos + 3, names, values);
+        let bound := eval(tokens, new TokenPos((pos -> i64) + 3), names, values);
         if (! bound.ok) $return failed(); fi;
         var scoped_names := names;
         var scoped_values := values;
@@ -273,18 +303,22 @@ fn eval (tokens : str array alias, pos : i64,
         let body := eval(tokens, bound.next, scoped_names, scoped_values);
         if (! body.ok) $return failed(); fi;
         let next := close_after(tokens, body.next);
-        if (next < 0) $return failed(); fi;
+        if ((next -> i64) < 0) $return failed(); fi;
         $return new Step ( ok := true, value := body.value, next := next );
     } fi;
 
     %{ do は最後の値を返す。空の do は 0。 }%
     if (kind == 9) {
-        var cursor := pos + 2;
+        var cursor := new TokenPos((pos -> i64) + 2);
         var value := 0;
-        while (cursor < tokens.len()) {
-            let here := tokens[cursor];
+        while ((cursor -> i64) < tokens.len()) {
+            let here := tokens[cursor -> i64];
             if (here.len() == 1 && here[0] == 41) {
-                $return new Step ( ok := true, value := value, next := cursor + 1 );
+                $return new Step (
+                    ok := true,
+                    value := value,
+                    next := new TokenPos((cursor -> i64) + 1)
+                );
             } fi;
             let part := eval(tokens, cursor, names, values);
             if (! part.ok) $return failed(); fi;
@@ -299,9 +333,9 @@ fn run_lisp (source : str alias) {
     let tokens := tokenize(source);
     let names : str array := new str array(0, "");
     let values : i64 array := new i64 array(0, 0);
-    let result := eval(tokens, 0, names, values);
+    let result := eval(tokens, new TokenPos(0), names, values);
     if (! result.ok) $return; fi;
-    if (result.next != tokens.len()) $return; fi;
+    if ((result.next -> i64) != tokens.len()) $return; fi;
     result.value
 } -> i64;
 
