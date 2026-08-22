@@ -55,6 +55,8 @@ struct Checker {
     structs: HashMap<String, StructDecl>,
     wraps: HashMap<String, ValueType>,
     flows: HashSet<String>,
+    /// 実際に `flow` 宣言で定義された名前。組み込みの既知名とは分ける。
+    flow_defs: HashSet<String>,
     /// 内側から外へ。段送りはこの順に起きる（C-70）。
     stages: Vec<Stage>,
     /// 名前が見える範囲の上限。**`continue` の被演算子は本体の先頭で見える名前だけ**（C-81）。
@@ -83,6 +85,7 @@ pub fn check_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec<Stati
         structs: HashMap::new(),
         wraps: HashMap::new(),
         flows: HashSet::new(),
+        flow_defs: HashSet::new(),
         stages: vec![Stage { is_loop: false, is_frame: true }],
         visible_limit: None,
         host_names: host
@@ -117,6 +120,27 @@ enum RegionKind {
     Normal,
     /// ループ本体。**中身は何も残ってはいけない**（C-3）。
     LoopBody,
+}
+
+/// `flow` は使用位置で本体を読み直すため、別の `flow` を含めると展開が止まらない
+/// （C-62）。組み込みの組み合わせ子 `$repeat` 自体は `flow` ではないので許す。
+fn flow_name_in(esc: &Escape) -> Option<Span> {
+    if let EscapeKind::Flow { name, args } = &esc.kind {
+        if name != "$repeat" {
+            return Some(esc.span);
+        }
+        for arg in args {
+            if let FlowArg::Escape(inner) = arg {
+                if let Some(span) = flow_name_in(inner) {
+                    return Some(span);
+                }
+            }
+        }
+    }
+    match &esc.operand {
+        Some(Operand::Escape(inner)) => flow_name_in(inner),
+        _ => None,
+    }
 }
 
 impl Checker {
@@ -159,6 +183,9 @@ impl Checker {
                     self.wraps.insert(w.name.clone(), w.base.value.clone());
                 }
                 ExprKind::FlowDecl(f) => {
+                    if !self.flow_defs.insert(f.name.clone()) {
+                        self.err(format!("作用素式 `{}` は再定義できない", f.name), f.span);
+                    }
                     self.flows.insert(f.name.clone());
                 }
                 _ => {}
@@ -373,7 +400,13 @@ impl Checker {
                 self.fn_decl(f);
                 Places::Paradox
             }
-            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) | ExprKind::WrapDecl(_) => {
+            ExprKind::FlowDecl(f) => {
+                if let Some(span) = flow_name_in(&f.body) {
+                    self.err("`flow` の本体に `flow` 名は書けない", span);
+                }
+                Places::Paradox
+            }
+            ExprKind::StructDecl(_) | ExprKind::WrapDecl(_) => {
                 Places::Paradox
             }
 

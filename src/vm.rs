@@ -163,6 +163,7 @@ pub fn compile_with_host(
         scopes: vec![HashMap::new()],
         frame_base: 0,
         flows: HashMap::new(),
+        expanding_flows: Default::default(),
         var_self: Default::default(),
         host_fns: HashMap::new(),
     };
@@ -255,6 +256,8 @@ struct Compiler {
     scopes: Vec<HashMap<String, u16>>,
     frame_base: usize,
     flows: HashMap<String, FlowDecl>,
+    /// 検査を省いた低水準 API でも、不正な `flow` を有限の誤りにする。
+    expanding_flows: std::collections::HashSet<String>,
     /// `var self` を取るメンバ関数の名前（S-1）。**破壊するので書き戻す。**
     var_self: std::collections::HashSet<String>,
     /// ホストが見せている**呼べる名前** → 番号（S-11）
@@ -1145,8 +1148,13 @@ impl Compiler {
                 let Some(d) = self.flows.get(name).cloned() else {
                     return self.err(format!("知らない作用素式 `{name}`"), esc.span);
                 };
+                if !self.expanding_flows.insert(name.clone()) {
+                    return self.err("`flow` の本体に `flow` 名は書けない", esc.span);
+                }
                 // **本体は使用位置で読み直される**（C-15）
-                let mut sh = self.shape(&d.body)?;
+                let result = self.shape(&d.body);
+                self.expanding_flows.remove(name);
+                let mut sh = result?;
                 if let (Shape::Dynamic { payload, .. }, Some(Operand::Value(v))) =
                     (&mut sh, &esc.operand)
                 {
