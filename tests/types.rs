@@ -146,6 +146,16 @@ fn 配列と写像のリテラル() {
 }
 
 #[test]
+fn str_の包みは_new_でだけ行き来する() {
+    ok(r#"var bytes : u8 array := [65, 66]; var text := new str(bytes);"#);
+    ok(r#"var text := "AB"; var bytes := new u8 array(text);"#);
+    bad(
+        r#"var text := "AB"; var bytes : u8 array := text;"#,
+        "型が合わない",
+    );
+}
+
+#[test]
 fn 代入は型が合わねばならない() {
     ok("var a : i64 := 1; a := 2;");
     bad("var a : i64 := 1; a := 1.0;", "型が合わない");

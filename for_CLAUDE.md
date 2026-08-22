@@ -138,11 +138,12 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 - `codex/lisp-alias-tuning`: Vaak LISP の深い複製／alias push-pop と Safe Rust 比較。完了・push 済み
 - `codex/forth-probe`: array を data stack にする小 Forth 系。実例は完了、native が alias ABI 差を発見
 
-### まだ main で直していない監査候補
+### 監査候補の状態
 
-- STEEL の `new u8 array(str)` は未実装
+- STEEL の named struct `??` は `codex/main` `9799da6` で修正済み
+- `new u8 array(str)` は `codex/steel-str-construct-audit` で修正・全件検証済み
 
-これらは意味論を先に確かめ、参照実装を勝たせ、別枝で直すこと。
+いずれも意味論を先に確かめ、参照実装を勝たせた。
 
 ## 2026-08-22: `codex/coercion-audit` の監査結果
 
@@ -172,6 +173,24 @@ x
 現在は三実装とも、`i64` で `256 / 2` を求めて最後に `u8` へ狭めるため 128 になる。
 注釈の文脈を各リテラル・各演算へ届かせ、`256` を先に `u8` の 0 として 0 にするかは、
 C-25 / C-30 だけから一意と断定しなかった。ここは新しい意味判断なしに変えないこと。
+
+## 2026-08-22: `codex/steel-str-construct-audit` の監査結果
+
+`new u8 array(text)` は新機能ではない。C-78 が `new str(bytes)` と両方向に行き来し、
+どちらも深く複製すると既に決めていた。実装は四層で食い違っていた。
+
+- 型検査器は一引数の配列構築を長さ `i64` とだけ解釈し、`str` を拒否した
+- 参照実装は `u8 array` へ剥がす分岐を持たなかった
+- VM は `str` と `u8 array` の値表現を変換しなかった
+- STEEL は同じポインタの型だけを変え、C-78 の深い複製を省いた
+
+包みの値変換を参照実装と VM で共有し、STEEL は平坦なバイト列を `@vaak.copy` で写す。
+暗黙の代入変換は増やさず、行き来には引き続き `new` が要る。VM の公開 `Op` には
+`MakeU8ArrayOne` が増えたため、rtex 側で `Op` を網羅 match していれば追随が要る。
+
+一引数の従来構築 `new u8 array(3)` は長さ 3・零埋めのまま保つ試験も加えた。
+最新 `codex/main` `9799da6` を重ね、LLVM 22.1.8 を PATH に入れた
+`cargo test --release` は **462/462** 通過した。この枝は `codex/main` へはまだ統合していない。
 
 ## 2026-08-22: `codex/steel-coalesce-audit` の監査結果
 

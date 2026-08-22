@@ -62,6 +62,9 @@ pub enum Op {
     MutMethod(u16, u32, u16, Span),
     /// 集合体。
     MakeArray(u16),
+    /// `new u8 array(x)`。`x` が `str` なら包みを剥がし、整数なら零で埋める。
+    /// C-78 の構築は引数の型で通常の配列構築と見分ける。
+    MakeU8ArrayOne,
     MakeMap(u16),
     MakeStruct(u32, u16),
     Index(Span),
@@ -940,6 +943,13 @@ impl Compiler {
                 self.emit(Op::NeedValue(span));
                 let ni = self.name_idx(n);
                 self.emit(Op::MakeStruct(ni, 1));
+            }
+            (ValueType::Array(elem), CtorArgs::Positional(a))
+                if **elem == ValueType::U8 && a.len() == 1 =>
+            {
+                self.expr(&a[0])?;
+                self.emit(Op::NeedValue(span));
+                self.emit(Op::MakeU8ArrayOne);
             }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
                 if a.is_empty() {
@@ -1825,6 +1835,14 @@ impl<'a> Vm<'a> {
                     let elem = items.first().map(|v| v.type_of()).unwrap_or(ValueType::I64);
                     self.stack.push(Slot::Value(Value::array(elem, items)));
                 }
+            }
+            Op::MakeU8ArrayOne => {
+                let source = self.pop().value(Span::NONE)?;
+                let array = crate::interp::make_u8_array_one(source).ok_or_else(|| RtErr {
+                    msg: "`u8 array` は `str` または `i64` の長さから作る".into(),
+                    span: Span::NONE,
+                })?;
+                self.stack.push(Slot::Value(array));
             }
             Op::MakeMap(n) => {
                 let mut entries = BTreeMap::new();

@@ -160,6 +160,11 @@ const CASES: &[&str] = &[
      var p := new P ( x := 1 ); p.bump(); p.x",
     // ラップ型（S-2）
     "wrap M = i64; var m := new M ( 5 ); new i64 ( m )",
+    // str の包みと剥がし（C-78）。どちらも深く複製する
+    r#"var bytes : u8 array := [65, 66, 67]; var text := new str(bytes);
+       text[0] := 90; (bytes[0] -> i64) + (text[0] -> i64)"#,
+    r#"var bytes := new u8 array(3, 97); var text := new str(bytes);
+       var roundtrip := new u8 array(text); roundtrip[1] -> i64"#,
 ];
 
 #[test]
@@ -167,6 +172,27 @@ fn 木と_vm_が同じ結果になる() {
     for src in CASES {
         same(src);
     }
+}
+
+#[test]
+fn strを剥がした配列を書き換えても元は変わらない() {
+    same_value(
+        r#"let text := "ABC"; var bytes := new u8 array(text);
+           bytes[0] := 90; (text[0] -> i64) + (bytes[0] -> i64)"#,
+        "155",
+    );
+}
+
+#[test]
+fn u8配列の一引数構築は長さを失わず零で埋める() {
+    same_value(
+        "var bytes := new u8 array(3);
+         bytes.len() * 1000
+           + (bytes[0] -> i64) * 100
+           + (bytes[1] -> i64) * 10
+           + (bytes[2] -> i64)",
+        "3000",
+    );
 }
 
 #[test]

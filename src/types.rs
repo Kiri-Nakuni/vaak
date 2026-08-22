@@ -702,6 +702,18 @@ impl TypeChecker {
                     }
                 }
             }
+            // `str` は `u8 array` を包んだ型。`new u8 array(s)` は
+            // 長さ一つの構築ではなく、包みを剥がす構築である（C-78）。
+            (ValueType::Array(el), CtorArgs::Positional(a))
+                if **el == ValueType::U8 && a.len() == 1 =>
+            {
+                let got = self.expr(&a[0], None);
+                if got.as_ref() != Some(&ValueType::Str) {
+                    if let Some(got) = got {
+                        self.unify(&ValueType::I64, &got, a[0].span);
+                    }
+                }
+            }
             (ValueType::Array(el), CtorArgs::Positional(a)) => {
                 if let Some(n) = a.first() {
                     self.expect(n, &ValueType::I64);

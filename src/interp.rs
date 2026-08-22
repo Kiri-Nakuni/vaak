@@ -1216,6 +1216,22 @@ fn try_coerce(v: Value, ty: Option<&Type>) -> Option<Value> {
     }
     // 配列と写像は中へ降りる
     match (&t.value, v) {
+        // `str` は `u8 array` を包んだ型（C-77）。包みを行き来するのは
+        // `new` だけだが、VM の `Coerce` もこの一つの変換を共有する。
+        (ValueType::Array(el), Value::Str(bytes)) if **el == ValueType::U8 => {
+            return Some(Value::array(
+                ValueType::U8,
+                bytes.into_iter().map(Value::U8).collect(),
+            ));
+        }
+        (ValueType::Str, Value::Array(array)) => {
+            let bytes = array
+                .items
+                .into_iter()
+                .map(|v| v.as_int().map(|byte| byte as u8))
+                .collect::<Option<Vec<_>>>()?;
+            return Some(Value::str(bytes));
+        }
         (ValueType::Array(el), Value::Array(ar)) => {
             let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
             let items = ar
@@ -1374,6 +1390,25 @@ pub fn coerce_to(v: Value, t: &ValueType) -> Value {
 
 pub fn try_coerce_to(v: Value, t: &ValueType) -> Option<Value> {
     try_coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
+}
+
+/// `new u8 array(x)` の一引数構築を、参照実装と VM で一箇所に保つ。
+///
+/// `str` なら C-78 の深い複製、`i64` なら従来どおり長さを表す。
+/// `try_coerce_scalar` は対象外の型をそのまま返すため、そこで両者を
+/// 見分けると将来の変更で長さを失い得る。入力の型を先に分ける。
+pub(crate) fn make_u8_array_one(source: Value) -> Option<Value> {
+    match source {
+        source @ Value::Str(_) => try_coerce_to(
+            source,
+            &ValueType::Array(Box::new(ValueType::U8)),
+        ),
+        Value::I64(count) => Some(Value::array(
+            ValueType::U8,
+            vec![Value::U8(0); count.max(0) as usize],
+        )),
+        _ => None,
+    }
 }
 
 fn try_coerce_scalar(v: Value, t: &Type) -> Option<Value> {
@@ -1764,6 +1799,20 @@ impl Interp {
                 }
                 Ok(Eval::Value(Value::strukt(name.clone(), out)))
             }
+            // `new u8 array(str)` は C-78 の「剥がす」構築。
+            // 一引数の通常構築 `new u8 array(n)` とは値の型で見分ける。
+            (ValueType::Array(elem), CtorArgs::Positional(a))
+                if **elem == ValueType::U8 && a.len() == 1 =>
+            {
+                let first = match self.need_value(&a[0])? {
+                    Ok(v) => v,
+                    Err(x) => return Ok(Eval::Escape(x)),
+                };
+                match make_u8_array_one(first) {
+                    Some(array) => Ok(Eval::Value(array)),
+                    None => rt("`u8 array` は `str` または `i64` の長さから作る", span),
+                }
+            }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
                 let (n, fill) = match a.len() {
                     0 => (0, Value::I64(0)),
@@ -1814,13 +1863,10 @@ impl Interp {
             // ラップ型：包むのも剥がすのも `new`（C-78）
             (ValueType::Str, CtorArgs::Positional(a)) if a.len() == 1 => {
                 match self.need_value(&a[0])? {
-                    Ok(Value::Array(ar)) => {
-                        let b: Vec<u8> =
-                            ar.items.iter().filter_map(|v| v.as_int()).map(|i| i as u8).collect();
-                        Ok(Eval::Value(Value::str(b)))
-                    }
-                    Ok(Value::Str(b)) => Ok(Eval::Value(Value::Str(b))),
-                    Ok(_) => rt("`str` は `u8 array` から作る", span),
+                    Ok(v) => match try_coerce(v, Some(ty)) {
+                        Some(v @ Value::Str(_)) => Ok(Eval::Value(v)),
+                        _ => rt("`str` は `u8 array` から作る", span),
+                    },
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }

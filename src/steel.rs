@@ -1041,10 +1041,11 @@ impl Steel {
         };
         let n = self.expr(nx)?;
         let Some(n) = n else { return err("`new` の個数に値が無い", nx.span) };
-        // **包む／剥がす**（S-2）。既にその型なら、そのまま通す——
-        // `new Bytes ( <u8 array> )` は長さではなく**包む**という意味である
+        // **包む／剥がす**（C-78 / S-2）。集合体なら長さではなく構築である。
+        // 構築は深い複製なので、同じ置き場を型だけ変えて返してはならない。
         if is_heap(&n.ty) {
-            return Ok(Some(Val { ok: n.ok, v: n.v, ty: t }));
+            let copied = self.deep_copy(&n.v, &t);
+            return Ok(Some(Val { ok: n.ok, v: copied, ty: t }));
         }
         let len = self.widen64(&n);
         // **負の個数は零とみなす。** 落ちるより畳む

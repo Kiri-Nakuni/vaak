@@ -392,6 +392,21 @@ t!(包み型は基底型のまま,
    "wrap Meters = i64; let m := new Meters ( 5 ); new i64 ( m ) * 2");
 t!(包み型の集合体,
    "wrap Bytes = u8 array; var b : Bytes := new Bytes ( new u8 array(3, 97) ); 3");
+t!(strをu8配列へ剥がす,
+   "let text := \"ABC\"; var bytes := new u8 array(text);
+    bytes[0] := 90; (text[0] -> i64) + (bytes[0] -> i64)");
+t!(u8配列をstrへ包む,
+   "var bytes : u8 array := [65, 66, 67]; var text := new str(bytes);
+    text[0] := 90; (bytes[0] -> i64) + (text[0] -> i64)");
+t!(strの包みを往復する,
+   "var bytes := new u8 array(3, 97); var text := new str(bytes);
+    var roundtrip := new u8 array(text); roundtrip[1] -> i64");
+t!(u8配列の一引数構築は長さを失わず零で埋める,
+   "var bytes := new u8 array(3);
+    bytes.len() * 1000
+      + (bytes[0] -> i64) * 100
+      + (bytes[1] -> i64) * 10
+      + (bytes[2] -> i64)");
 
 // ── 複合代入は場所を一度だけ数える ─────────────────────────
 
