@@ -655,3 +655,40 @@ fn 包み型は関数の返りでも剥がれる() {
           fn use2 (h : NodeId) { (h -> i64) * 2 } -> i64; use2(mk(21))");
     同じ("wrap M = i64; var a : M array := [ new M(1), new M(2) ]; (a[1] ?? new M(0)) -> i64");
 }
+
+/// 動く段数の `$repeat`（C-34 の A）。**囲む段の数は組み立て時に分かる。**
+#[test]
+fn 動く段数の脱出() {
+    同じ("var n := 0; {{ $repeat(break, n) 5 }}");
+    同じ("var n := 0 - 3; {{ $repeat(break, n) 5 }}");
+    同じ("var n := 1; {{ $repeat(break, n) 5 }}");
+    同じ("var n := 2; {{ { $repeat(break, n) 7 } ; 3 }}");
+    同じ("var n := 1; {{ { $repeat(break, n) 7 } ; 3 }}");
+    同じ("var n := 3; {{ { { $repeat(break, n) 9 } ; 2 } ; 3 }}");
+    同じ("var n := 2; {{ { $repeat(break break, n) 7 } ; 3 }}");
+    同じ("var s := 0; var n := 1; loop { s += 1; if (s > 3) break fi; $repeat(continue, n) }; s");
+    同じ("var a := 1; var b := 1; {{ { $repeat(break, a + b) 7 } ; 3 }}");
+    // **積み荷を持たない場合は形で比べる。**
+    //
+    // どちらも paradox になるが、**診断の位置が違う**——
+    // 参照は作用素（`break`）を指し、VM は `$repeat` 全体を指す。
+    // これは定数の `$repeat` でも前から起きていて、動く段数とは別の件である
+    same("var n := 1; {{ $repeat(break, n) }}");
+    same("var n := 0; {{ $repeat(break, n) }}");
+}
+
+/// `continue` は**周回の末尾へ行く**。段の終わりへ行くとループが終わる。
+///
+/// `nfor` では `NForNext` が両方を兼ねるので当たっていたが、
+/// `loop` と `while` では別の命令である。
+#[test]
+fn 再開はループを終わらせない() {
+    同じ("var s := 0; loop { s += 1; if (s > 3) break fi; continue }; s");
+    同じ("var s := 0; var i := 0; while (i < 5) { i += 1; if (i == 2) continue fi; s += 1 }; s");
+    同じ("var s := 0; nfor (i, 0, 5) { if (i == 2) continue fi; s += 1 }; s");
+    同じ("var s := 0; loop { s += 1; if (s > 3) break fi; $repeat(continue, 1) }; s");
+    // 入れ子のループでも、内側だけが再開する
+    同じ("var s := 0; nfor (i, 0, 3) { var j := 0; while (j < 3) { j += 1; if (j == 2) continue fi; s += 1 }; }; s");
+    // 二段外へ抜ける再開
+    同じ("var s := 0; nfor (i, 0, 3) { nfor (j, 0, 3) { if (j == 1) break continue fi; s += 1 } }; s");
+}
