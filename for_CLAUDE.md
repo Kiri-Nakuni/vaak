@@ -403,3 +403,60 @@ immutable `PreparedProgram` + mutable `Runner` で hot run から filesystem/par
 配列は range/search/compare/extrema/sort/prefix 等へ細分化し、AC Library のように制約・計算量・
 空区間を公開契約にする。ただし C++ callback/template は写さず、DSU/Fenwick、固定演算 segtree の順に
 pure Vaak で測る。現在その第一段と、LISP の token position を wrap したときの剥がし量を別枝で追試中である。
+
+## 2026-08-22: resolved Place 修正と追試の完了
+
+上で報告した `a[i].field := v` の O(N²) は `codex/vm-nested-place-fastpath` で修正し、
+`codex/main` へ取り込んだ。新しい意味論ではなく、C-20 と C-79 の既存契約を実装したものである。
+
+- 参照実装と VM が `Place(CellId + steps)` を共有し、入れ子経路の根を複製せず末端だけを読む／書く。
+- 添字は左から右へ、RHS より先に一度だけ評価する。
+- 複合代入は RHS の作用後の現在値へ重ね、参照実装の順序へ揃える。
+- VM には `PlaceRoot` / `PlaceField` / `PlaceIndex` / `LoadPlace` / `LoadPlaceLen` /
+  `StorePlace` / `UpdatePlace` が増えた。一段の `a[i]` は従来どおり確保なしの直接命令である。
+- `host_reads` / `host_writes` / `host_touched` も新命令を追跡する。C-96 に従い、host slot は
+  最上位 chunk だけを host 名として数え、関数内の同じ slot 番号を誤認しない。
+- Safe Rust のみで、`Slot = 16 bytes`、`Op = 24 bytes` を維持した。
+
+入れ子代入 N=10k/20k/40k/80k は VM で 6.649/13.779/28.380/58.401 ms とほぼ線形になった。
+構造体 Fenwick は 186.97 ms -> 18.09 ms（約 10.3 倍）、flat 配列版との差は約 14.8 倍から
+1.63 倍へ縮んだ。動的 `$repeat` を含む最新 main 上で `cargo test --release` は **561/561**、
+`cargo check --release --all-targets` も Vaak 本体由来の警告 0 で通った。
+
+公開 `vm::Op` を網羅 match する利用者には上記 variant 追加の追随が要る。通常の
+`Program2` / `Runner` 利用 API は変えていない。別件として、入れ子の破壊的メソッドと利用者定義
+`var self` はまだ旧 `store_back` 経路を通る。また参照実装の通常の入れ子 rvalue 読み取りには、
+中間集合体を clone する経路が残り得る。今回の代入／VM 修正とは分けて監査する。
+
+### 配列ライブラリ追試
+
+`codex/array-library-probe` に range check、i64 linear/binary search、reverse、prefix sum、DSU、
+Fenwick（構造体版と flat 対照版）を置いた。各 source は単独でも全 source 同時でも前置きでき、
+generic/callback/sum/match を足していない。既存 551 + 新規 12 tests、各 file の STEEL 翻訳、
+代表 LLVM native 実行を通した。これは標準ライブラリ候補なので main へは入れていない。
+
+細粒度 module は**読み込み単位**として有効だが、要素ごとの callback 単位にはしない方がよい。
+VM の direct `len` 5.83 ms に対して alias 関数経由は 11.44 ms、inline 二分探索 16.19 ms に対して
+関数版は 20.91 ms だった。固定演算を粗い関数へまとめる AC Library 型の構成が現行実装に合う。
+
+### wrap LISP 追試
+
+`codex/wrap-lisp-probe` で LISP 全体の token position を `wrap TokenPos = i64` にした。
+318 -> 352 行、unwrap 43 箇所、wrap 21 箇所で、比較・添字を透過しても cursor 算術の unwrap が
+19 箇所残る。STEEL の LLVM IR は wrap 前後で byte-identical だった一方、VM は
+`MakeStruct` +22、`Coerce` +43 が実体化し、測定は 34--92% 遅くなった。
+
+よって nominal wrap は ID の種類分けには十分だが、interpreter hot path では zero-cost ではない。
+この token-stream LISP は Node arena を確保せず、実際の ID 取り違えも観測していないので、
+arena 一級化の単独根拠にはしない。
+
+### VSIX / LSP の状態
+
+`codex/vscode-vsix` では portable VSIX と `win32-x64` 対象 VSIX を分けた。後者は
+`extension/bin/win32-x64/vaak-lsp.exe` を同梱し、明示的な `vaak.server.path` が無ければ
+同梱版、無ければ PATH の順に解決する。portable は platform 非依存のまま残す。
+
+実機で出た `spawn EFTYPE` は同梱 executable の問題ではなかった。VS Code user setting が
+`target\\release\\vaak_lsp.pdb` を `vaak.server.path` に指定し、PDB を spawn していたのが原因である。
+設定を削除するか、実行ファイル `target\\release\\vaak-lsp.exe`（ハイフン）へ直せばよい。
+インストール済み同梱 `vaak-lsp.exe` は PE header と Node `spawn` の単体起動まで確認した。
