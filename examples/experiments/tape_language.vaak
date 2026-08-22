@@ -1,0 +1,153 @@
+%{ Brainfuck 相当の最小テープ言語。
+
+   命令:
+     > <    ヘッドを右・左へ動かす。右端ではテープを伸ばす
+     + -    現在セルを u8 として折り返し加減算する
+     [ ]    現在セルが 0 かどうかで反復する
+     ,      入力の次のバイトを読む。入力後は 0
+     .      出力バイトを checksum へ畳む
+
+   それ以外のバイトは読み飛ばす。
+   角括弧は実行前に一度対応付け、実行中の跳躍を O(1) にする。
+   標準出力を要求せず、出力は checksum・最終バイト・個数で観測する。 }%
+
+% STEEL は無名標準ライブラリを注入しないので、同じ定義を明示する。
+flow $return = $repeat(break, getdepth());
+
+struct JumpTable {
+    let ok : u1 := false;
+    let positions : i64 array := new i64 array(0, 0);
+};
+
+struct TapeResult {
+    let ok : u1 := false;
+    let checksum : i64 := 0;
+    let last : i64 := 0;
+    let outputs : i64 := 0;
+    let steps : i64 := 0;
+    let tape_len : i64 := 0;
+};
+
+fn bad_jumps () {
+    new JumpTable ( ok := false )
+} -> JumpTable;
+
+fn bad_tape () {
+    new TapeResult ( ok := false )
+} -> TapeResult;
+
+% `opens` をスタックとして使い、各括弧から相手への添字を作る。
+fn build_jumps (code : str alias) {
+    var positions := new i64 array(code.len(), 0 - 1);
+    var opens := new i64 array(0, 0);
+
+    nfor (i, 0, code.len()) {
+        let op := code[i] ?? 0;
+        if (op == 91) {             % [
+            opens.push(i);
+        } elif (op == 93) {         % ]
+            if (opens.len() == 0) $return bad_jumps(); fi;
+            let begin := opens.pop() ?? 0;
+            positions[begin] := i;
+            positions[i] := begin;
+        } fi;
+    };
+
+    if (opens.len() != 0) $return bad_jumps(); fi;
+    new JumpTable ( ok := true, positions := positions )
+} -> JumpTable;
+
+fn execute_tape (code : str alias, input : str alias,
+                 jumps : JumpTable alias, step_limit : i64) {
+    if (! jumps.ok) $return bad_tape(); fi;
+    var tape := new u8 array(1, 0);
+    var head := 0;
+    var pc := 0;
+    var input_pos := 0;
+    var checksum := 0;
+    var last := 0;
+    var outputs := 0;
+    var steps := 0;
+
+    while (pc < code.len() && steps < step_limit) {
+        let op := code[pc] ?? 0;
+
+        if (op == 62) {             % >
+            head += 1;
+            if (head == tape.len()) tape.push(0); fi;
+        } elif (op == 60) {         % <
+            if (head == 0) $return bad_tape(); fi;
+            head -= 1;
+        } elif (op == 43) {         % +
+            tape[head] += 1;
+        } elif (op == 45) {         % -
+            tape[head] -= 1;
+        } elif (op == 91) {         % [
+            if ((tape[head] ?? 0) == 0) {
+                pc := jumps.positions[pc] ?? pc;
+            } fi;
+        } elif (op == 93) {         % ]
+            if ((tape[head] ?? 0) != 0) {
+                pc := jumps.positions[pc] ?? pc;
+            } fi;
+        } elif (op == 44) {         % ,
+            if (input_pos < input.len()) {
+                tape[head] := input[input_pos] ?? 0;
+                input_pos += 1;
+            } else {
+                tape[head] := 0;
+            } fi;
+        } elif (op == 46) {         % .
+            let byte := (tape[head] ?? 0) -> i64;
+            checksum := (checksum * 131 + byte) mod 251;
+            last := byte;
+            outputs += 1;
+        } fi;
+
+        pc += 1;
+        steps += 1;
+    };
+
+    if (pc < code.len()) $return bad_tape(); fi;
+    new TapeResult (
+        ok := true,
+        checksum := checksum,
+        last := last,
+        outputs := outputs,
+        steps := steps,
+        tape_len := tape.len()
+    )
+} -> TapeResult;
+
+fn run_tape (code : str alias, input : str alias, step_limit : i64) {
+    let jumps := build_jumps(code);
+    if (! jumps.ok) $return bad_tape(); fi;
+    execute_tape(code, input, jumps, step_limit)
+} -> TapeResult;
+
+% 32 と 33 を読み、最初のセルを二番目へ加えて 65 (`A`) を出す。
+let brainfuck := ",>,<[->+<]>.";
+let input := " !";
+
+% 測定器はこの一行だけを書き換える。同じ処理を内側で反復し、起動費用を薄める。
+let benchmark_rounds := 1;
+let benchmark_prepared := false;
+let prepared_jumps := build_jumps(brainfuck);
+var valid := true;
+var aggregate := 0;
+
+nfor (round, 0, benchmark_rounds) {
+    let result := if (benchmark_prepared)
+        execute_tape(brainfuck, input, prepared_jumps, 10000)
+    else
+        run_tape(brainfuck, input, 10000)
+    fi;
+    if (! result.ok || result.checksum != 65 || result.last != 65 ||
+        result.outputs != 1 || result.steps != 167 || result.tape_len != 2) {
+        valid := false;
+    } fi;
+    aggregate := (aggregate + result.checksum + result.last +
+                  result.outputs + result.tape_len) mod 251;
+};
+
+if (valid && aggregate == (benchmark_rounds * 133) mod 251) 42 else 1 fi
