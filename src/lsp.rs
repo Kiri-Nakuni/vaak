@@ -17,10 +17,10 @@
 //! **変換を一箇所に閉じる**——[`Doc`] が行頭表と換算を持つ。
 
 use crate::json::{n, obj, s, write, J};
-use crate::lexer::{Tok, Token};
+use crate::lexer::Tok;
 use crate::span::Span;
 use std::collections::HashMap;
-use std::io::{BufRead, Read, Write as _};
+use std::io::{BufRead, Write as _};
 
 // ========== 文書 ==========
 

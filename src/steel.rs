@@ -1764,8 +1764,6 @@ impl Steel {
                 Ok(None)
             }
             E::FnDecl(_) | E::StructDecl(_) | E::WrapDecl(_) => Ok(None),
-
-            _ => err("STEEL がまだ扱えない構文", e.span),
         }
     }
 
