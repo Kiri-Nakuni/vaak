@@ -7,7 +7,7 @@
 use crate::ast::*;
 use crate::span::Span;
 use crate::value::{Arena, CellId, MapKey, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ================= 評価の結果 =================
 
@@ -97,6 +97,8 @@ pub struct Interp {
     /// ラップ型（S-2）。名前 → 包んだ型。
     wraps: HashMap<String, ValueType>,
     flows: HashMap<String, FlowDecl>,
+    /// 静的検査を通さず呼ばれても、誤った `flow` の展開で再帰し続けない。
+    expanding_flows: HashSet<String>,
     /// 変数の探索はこの位置より外へ行かない。**関数は局所変数を見ない**（C-86）。
     frame_base: usize,
     /// セルの凍結。`const` 別名は元の名前からの書き込みも禁じる（C-78）。
@@ -136,6 +138,7 @@ impl Interp {
             structs: HashMap::new(),
             wraps: HashMap::new(),
             flows: HashMap::new(),
+            expanding_flows: HashSet::new(),
             frame_base: 0,
             frozen: Vec::new(),
             depth_guard: 0,
@@ -583,8 +586,13 @@ impl Interp {
         let Some(decl) = self.flows.get(name).cloned() else {
             return rt(format!("知らない作用素式 `{name}`"), span);
         };
+        if !self.expanding_flows.insert(name.to_string()) {
+            return rt("`flow` の本体に `flow` 名は書けない", span);
+        }
         // 使用位置で読み直す
-        let mut r = self.make_escape(&decl.body)?;
+        let result = self.make_escape(&decl.body);
+        self.expanding_flows.remove(name);
+        let mut r = result?;
         if let (Eval::Escape(x), Some(Operand::Value(v))) = (&mut r, operand) {
             x.payload = match self.need_value(v)? {
                 Ok(v) => Some(v),
