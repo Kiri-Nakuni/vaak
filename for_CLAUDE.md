@@ -138,11 +138,12 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 - `codex/lisp-alias-tuning`: Vaak LISP の深い複製／alias push-pop と Safe Rust 比較。完了・push 済み
 - `codex/forth-probe`: array を data stack にする小 Forth 系。実例は完了、native が alias ABI 差を発見
 
-### まだ main で直していない監査候補
+### 監査候補の状態
 
-- STEEL で named struct の `??` が名前型を失う経路がある（LISP 例は `ok` 欄で回避）
+- STEEL の named struct `??` は `codex/main` `9799da6` で修正済み
+- `new u8 array(str)` は `codex/steel-str-construct-audit` で修正・全件検証済み
 
-これは意味論を先に確かめ、参照実装を勝たせ、別枝で直すこと。
+いずれも意味論を先に確かめ、参照実装を勝たせた。
 
 ## 2026-08-22: `codex/coercion-audit` の監査結果
 
@@ -158,7 +159,7 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
   浮動小数を `i64` へ数値変換していたことを確認した。小数部を失うだけでなく、
   `i64` 範囲外は LLVM poison になった。合流枠を `i128` にし、整数・ptr・f32・f64・f80 を
   ビット列として可逆保存するように直した。
-- 最新 `origin/codex/main` `059a910` を重ね、LLVM 22.1.8 を使った
+- 最新 `origin/codex/main` `cb78072` を重ね、LLVM 22.1.8 を使った
   `cargo test --release` は **453/453** 通過した。
 
 判断を保留したものが一つある。
@@ -187,5 +188,17 @@ C-25 / C-30 だけから一意と断定しなかった。ここは新しい意�
 暗黙の代入変換は増やさず、行き来には引き続き `new` が要る。VM の公開 `Op` には
 `MakeU8ArrayOne` が増えたため、rtex 側で `Op` を網羅 match していれば追随が要る。
 
-最新 `origin/codex/main` `cb78072` を重ね、LLVM 22.1.8 を PATH に入れた
-`cargo test --release` は **457/457** 通過した。
+一引数の従来構築 `new u8 array(3)` は長さ 3・零埋めのまま保つ試験も加えた。
+最新 `codex/main` `9799da6` を重ね、LLVM 22.1.8 を PATH に入れた
+`cargo test --release` は **462/462** 通過した。この枝は `codex/main` へはまだ統合していない。
+
+## 2026-08-22: `codex/steel-coalesce-audit` の監査結果
+
+named struct の `??` は C-29 どおりに直した。右辺が `$return` のような脱出だけのとき、
+STEEL は脱出式へ付けた仮の `i64 paradox` を `??` 全体の型に採っていたため、左辺の
+構造体名を失っていた。
+
+- `E ?? D : T` の `T` は左辺から取る。合流枡は最新 main の `i128` ビット保持方式を維持した。
+- LISP 文書に残っていた `Step.ok` 回避の説明を「修正済み」へ更新した。
+- 参照実装／VM の差分試験と LLVM native 試験で、`?? $return` の後に構造体欄を読めることを固定した。
+- `cb78072` を合流後、LLVM 22.1.8 の `cargo test --release` は **455/455** 通過した。

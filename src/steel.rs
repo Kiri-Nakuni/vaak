@@ -2362,6 +2362,9 @@ impl Steel {
     fn coalesce(&mut self, lhs: &Expr, rhs: &Expr, span: Span) -> R<Val> {
         let l = self.expr(lhs)?;
         let Some(l) = l else { return err("`??` の左に領域が無い", span) };
+        // `E ?? D : T` の T は左辺の型である（C-29）。脱出も式としては
+        // 仮の i64 paradox を返すので、右辺から型を取ると集合体の名前型を失う。
+        let ty = l.ty.clone();
         let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let use_r = self.label("qq.right");
@@ -2374,18 +2377,16 @@ impl Steel {
 
         self.place(&use_r);
         let r = self.expr(rhs)?;
-        let ty = match r {
+        match r {
             Some(r) => {
                 let w = self.to_slot(&r);
                 self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", r.ok));
-                r.ty
             }
             None => {
                 self.emit(&format!("store i1 false, ptr {ok_slot}"));
-                l.ty.clone()
             }
-        };
+        }
         self.br(&done);
 
         self.place(&done);
@@ -2393,7 +2394,7 @@ impl Steel {
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
         self.emit(&format!("{raw} = load i128, ptr {slot}"));
-        let v = self.from_slot(&raw, &ty.clone());
+        let v = self.from_slot(&raw, &ty);
         Ok(Val { ok, v, ty })
     }
 }

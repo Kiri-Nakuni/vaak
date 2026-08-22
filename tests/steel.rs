@@ -371,6 +371,15 @@ t!(構造体を返す,
    "struct P { let x : i64; let y : i64; };
     fn mk (a : i64) { new P ( x := a, y := a + 1 ) } -> P;
     let p := mk(4); p.x * 10 + p.y");
+t!(構造体の除去子は脱出側で型を失わない,
+   "flow $return = $repeat(break, getdepth());
+    struct P { let x : i64 := 42; };
+    fn maybe (yes : u1) { if (yes) new P ( ) fi } -> P;
+    fn use (yes : u1) {
+        let p := maybe(yes) ?? $return;
+        p.x
+    } -> i64;
+    use(true) ?? 0");
 t!(構造体が集合体を持つ,
    "struct Bag { var xs : i64 array; };
     var a := new Bag ( xs := [1,2,3] );
@@ -392,6 +401,12 @@ t!(u8配列をstrへ包む,
 t!(strの包みを往復する,
    "var bytes := new u8 array(3, 97); var text := new str(bytes);
     var roundtrip := new u8 array(text); roundtrip[1] -> i64");
+t!(u8配列の一引数構築は長さを失わず零で埋める,
+   "var bytes := new u8 array(3);
+    bytes.len() * 1000
+      + (bytes[0] -> i64) * 100
+      + (bytes[1] -> i64) * 10
+      + (bytes[2] -> i64)");
 
 // ── 複合代入は場所を一度だけ数える ─────────────────────────
 

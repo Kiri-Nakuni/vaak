@@ -1392,6 +1392,25 @@ pub fn try_coerce_to(v: Value, t: &ValueType) -> Option<Value> {
     try_coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
 }
 
+/// `new u8 array(x)` の一引数構築を、参照実装と VM で一箇所に保つ。
+///
+/// `str` なら C-78 の深い複製、`i64` なら従来どおり長さを表す。
+/// `try_coerce_scalar` は対象外の型をそのまま返すため、そこで両者を
+/// 見分けると将来の変更で長さを失い得る。入力の型を先に分ける。
+pub(crate) fn make_u8_array_one(source: Value) -> Option<Value> {
+    match source {
+        source @ Value::Str(_) => try_coerce_to(
+            source,
+            &ValueType::Array(Box::new(ValueType::U8)),
+        ),
+        Value::I64(count) => Some(Value::array(
+            ValueType::U8,
+            vec![Value::U8(0); count.max(0) as usize],
+        )),
+        _ => None,
+    }
+}
+
 fn try_coerce_scalar(v: Value, t: &Type) -> Option<Value> {
     match (&t.value, &v) {
         (ValueType::U1, _) => Some(v.as_int().map(|i| Value::U1(i != 0)).unwrap_or(v)),
@@ -1789,16 +1808,9 @@ impl Interp {
                     Ok(v) => v,
                     Err(x) => return Ok(Eval::Escape(x)),
                 };
-                match try_coerce_to(first, &ty.value) {
-                    Some(Value::Array(array)) => Ok(Eval::Value(Value::Array(array))),
-                    Some(n) => {
-                        let n = n.as_int().unwrap_or(0).max(0) as usize;
-                        Ok(Eval::Value(Value::array(
-                            ValueType::U8,
-                            vec![Value::U8(0); n],
-                        )))
-                    }
-                    None => rt("`str` を `u8 array` へ剥がせない", span),
+                match make_u8_array_one(first) {
+                    Some(array) => Ok(Eval::Value(array)),
+                    None => rt("`u8 array` は `str` または `i64` の長さから作る", span),
                 }
             }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {

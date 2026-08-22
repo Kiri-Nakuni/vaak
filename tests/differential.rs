@@ -161,8 +161,6 @@ const CASES: &[&str] = &[
     // ラップ型（S-2）
     "wrap M = i64; var m := new M ( 5 ); new i64 ( m )",
     // str の包みと剥がし（C-78）。どちらも深く複製する
-    r#"let text := "ABC"; var bytes := new u8 array(text);
-       bytes[0] := 90; (text[0] -> i64) + (bytes[0] -> i64)"#,
     r#"var bytes : u8 array := [65, 66, 67]; var text := new str(bytes);
        text[0] := 90; (bytes[0] -> i64) + (text[0] -> i64)"#,
     r#"var bytes := new u8 array(3, 97); var text := new str(bytes);
@@ -174,6 +172,27 @@ fn 木と_vm_が同じ結果になる() {
     for src in CASES {
         same(src);
     }
+}
+
+#[test]
+fn strを剥がした配列を書き換えても元は変わらない() {
+    same_value(
+        r#"let text := "ABC"; var bytes := new u8 array(text);
+           bytes[0] := 90; (text[0] -> i64) + (bytes[0] -> i64)"#,
+        "155",
+    );
+}
+
+#[test]
+fn u8配列の一引数構築は長さを失わず零で埋める() {
+    same_value(
+        "var bytes := new u8 array(3);
+         bytes.len() * 1000
+           + (bytes[0] -> i64) * 100
+           + (bytes[1] -> i64) * 10
+           + (bytes[2] -> i64)",
+        "3000",
+    );
 }
 
 #[test]
@@ -351,6 +370,20 @@ fn s16_括弧の領域は自分の底を持つ() {
     同じ("var n := 1; n + (2)");
     同じ("1 + ( 2 ; 3 )");
     同じ("var c : u8 := 50; 1 + ((c - 48) -> i64)");
+}
+
+#[test]
+fn 構造体の除去子は脱出側で型を失わない() {
+    同じ(
+        "flow $return = $repeat(break, getdepth());
+         struct P { let x : i64 := 42; };
+         fn maybe (yes : u1) { if (yes) new P ( ) fi } -> P;
+         fn use (yes : u1) {
+             let p := maybe(yes) ?? $return;
+             p.x
+         } -> i64;
+         use(true) ?? 0",
+    );
 }
 
 /// `hash` は木を辿る実装と VM で同じでなければならない（C-98）。
