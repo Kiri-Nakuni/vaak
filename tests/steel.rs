@@ -404,3 +404,33 @@ t!(浮動小数を挿す,
 t!(欄の集合体へ挿す,
    "struct P { var a : i64 array; }; var p := new P ( a := new i64 array(1, 5) );
     p.a.insert(0, 3); p.a[0] * 10 + p.a[1]");
+
+// ── 写像 ─────────────────────────
+
+t!(空の写像, "var m := new i64 i64 map ( ); m.len()");
+t!(写像リテラル, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m.len()");
+t!(鍵で引く, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m[2]");
+t!(無い鍵は虚無, "var m : i64 i64 map := ( 1 => 10 ); m[9] ?? 42");
+t!(鍵を足す, "var m := new i64 i64 map ( ); m[5] := 7; m[5] * 10 + m.len()");
+t!(同じ鍵は上書き, "var m := new i64 i64 map ( ); m[5] := 7; m[5] := 9; m[5] * 10 + m.len()");
+t!(順に並ぶ, "var m := new i64 i64 map ( ); m[3] := 1; m[1] := 2; m[2] := 3; m.keys()[0] * 100 + m.keys()[1] * 10 + m.keys()[2]");
+t!(たくさん入れる,
+   "var m := new i64 i64 map ( ); var i := 0;
+    while (i < 30) { m[29 - i] := i; i += 1; }; m.len() * 100 + m[14]");
+t!(順に並べ直す,
+   "var m := new i64 i64 map ( ); var i := 0;
+    while (i < 8) { m[7 - i] := i; i += 1; };
+    m.keys()[0] * 10 + m.keys()[7]");
+t!(鍵があるか, "var m : i64 i64 map := ( 1 => 10, 5 => 50 ); if (m.has(5)) 1 else 0 fi");
+t!(無い鍵は無い, "var m : i64 i64 map := ( 1 => 10 ); if (m.has(9)) 1 else 0 fi");
+t!(写像から抜く, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m.remove(1) + m.len()");
+t!(無い鍵を抜くと虚無, "var m : i64 i64 map := ( 1 => 10 ); (m.remove(9) ?? 5) + m.len()");
+t!(抜いた後は引けない, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m.remove(2) ?? 0; m[2] ?? 7");
+t!(写像も深く複製する,
+   "var a : i64 i64 map := ( 1 => 10 ); var b := a; b[1] := 99; a[1] * 100 + b[1]");
+t!(写像を空にする, "var m : i64 i64 map := ( 1 => 1, 2 => 2 ); m.clear(); m.len()");
+t!(文字列の鍵,
+   "var m : str i64 map := ( \"bb\" => 2, \"a\" => 1 ); m[\"bb\"] * 10 + m.len()");
+t!(文字列の鍵は短い順, "var m : str i64 map := ( \"bb\" => 2, \"a\" => 1 ); m.keys()[0].len()");
+t!(写像の値が集合体,
+   "var m := new i64 i64 array map ( ); m[3] := new i64 array(2, 8); m[3][1] ?? 0");
