@@ -1286,6 +1286,18 @@ pub fn run_program_with_fns(
     Runner::new().run_with(p, host, hosts)
 }
 
+/// 実行時エラーでも、そこまでに変わったホストの値を返す。
+///
+/// C-2 により実行時エラーは状態を巻き戻さない。公開の低水準 API は互換性のため
+/// `Result` のまま保ち、ホスト界面だけがこの形を使う。
+pub(crate) fn run_program_with_fns_writeback(
+    p: &Program2,
+    host: Vec<Value>,
+    hosts: &mut dyn crate::value::HostFns,
+) -> (Result<crate::interp::Eval, RtErr>, Vec<Value>) {
+    Runner::new().run_with_writeback(p, host, hosts)
+}
+
 /// ホストの値を渡して走らせ、**走り終わった値を返す**（S-4）。
 ///
 /// 返る `Vec<Value>` は渡した順に対応する。**変わったかどうかはホストが見る。**
@@ -1333,6 +1345,16 @@ impl Runner {
         host: Vec<Value>,
         hosts: &mut dyn crate::value::HostFns,
     ) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
+        let (result, after) = self.run_with_writeback(p, host, hosts);
+        result.map(|eval| (eval, after))
+    }
+
+    fn run_with_writeback(
+        &mut self,
+        p: &Program2,
+        host: Vec<Value>,
+        hosts: &mut dyn crate::value::HostFns,
+    ) -> (Result<crate::interp::Eval, RtErr>, Vec<Value>) {
         let mut vm = Vm {
             p,
             hosts,
@@ -1361,7 +1383,7 @@ impl Vm<'_> {
         &mut self,
         p: &Program2,
         host: Vec<Value>,
-    ) -> Result<(crate::interp::Eval, Vec<Value>), RtErr> {
+    ) -> (Result<crate::interp::Eval, RtErr>, Vec<Value>) {
         // ホストの値をセルに置き、最上位の枠へ結び付ける
         let base = self.arena.mark();
         let n = host.len();
@@ -1377,16 +1399,16 @@ impl Vm<'_> {
                 f.cells[*s as usize] = CellId((base + i) as u32);
             }
         }
-        let out = self.run()?;
+        let out = self.run();
         // 走り終わってから**取り出す**。写さない——セルはもう要らない
         let after: Vec<Value> = (0..n)
             .map(|i| self.arena.take(CellId((base + i) as u32)).unwrap_or(Value::I64(0)))
             .collect();
-        let ev = match out {
+        let ev = out.map(|out| match out {
             Slot::Value(v) => crate::interp::Eval::Value(v),
             Slot::Paradox(sp) => crate::interp::Eval::Paradox(sp),
-        };
-        Ok((ev, after))
+        });
+        (ev, after)
     }
 }
 
