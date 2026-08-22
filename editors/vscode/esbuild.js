@@ -42,13 +42,12 @@ function copyRuntimeFiles() {
 
 async function main() {
   const options = {
-    absWorkingDir: root,
-    entryPoints: ["./src/extension.ts"],
+    entryPoints: [path.join(root, "src", "extension.ts")],
     bundle: true,
     external: ["vscode"],
     format: "cjs",
     minify: production,
-    outfile: "./out/extension.js",
+    outfile: path.join(out, "extension.js"),
     platform: "node",
     sourcemap: !production,
   };
