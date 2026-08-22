@@ -252,3 +252,66 @@ core を変えずに API を監査したところ、次の既存穴も見つか�
 - `HostBinding::read_at` / `write_at` は未実装である。
 
 この実験枝では診断だけとし、core 修正はしていない。
+
+## 2026-08-22: arena を一級機能にする提案（未決定）
+
+再帰 AST、DAG、symbol table、IR、組版 node の作業表を、現在は `T array` と裸の整数
+`NodeId` で表せる。`codex/selfhost-arena-probe` ではこの形だけで深さ 256 の AST を非再帰に
+評価できたので、セルフホストが不可能なわけではない。ただし、arena ごとの ID を取り違えやすく、
+構築・範囲検査・型注釈の boilerplate が大きい。専用 stack より先に、こちらを一級化する価値がある。
+
+第一案は **nominal・typed・append-only arena** である。以下は説明用の仮構文で、決定ではない。
+
+```vaak
+arena Ast = Node;
+
+struct Node {
+    let kind : u8 := 0;
+    let value : i64 := 0;
+    let children : Ast handle array := [];
+};
+
+var ast : Ast := new Ast();
+let leaf : Ast handle := ast.alloc(new Node(value := 42));
+let root : Ast handle := ast.alloc(new Node(children := [leaf]));
+let node := ast[root] ?? $return;
+```
+
+### 意味論を大きく変えないための線
+
+- `Ast` は通常の**所有値**である。代入・値引数では arena 全体を深く複製し、`alias` 引数なら写さない。
+  C-33 / C-48 を変えない。
+- `Ast handle` は参照や別名ではなく、arena の slot を表す小さい**値**である。配列・構造体へ格納し、
+  関数から返せる。arena を明示した `ast[h]` でしか辿れない。
+- arena を深く複製しても slot の並びを保つ。同じ値の中で一緒に複製された handle は、複製先でも
+  同じ slot を指す。handle 単独は arena instance への所有権を持たないので、arena と組にして運ぶ。
+- 型依存検査では `Ast handle` を scalar leaf として扱う。`Node -> Ast handle -> Node` は物理的な
+  値の再帰ではないため、C-63 の「値型の依存グラフは DAG」を保てる。
+- 初版は **append-only** とし、`.alloc(value) -> Ast handle`、`.len()`、`arena[handle]` だけに絞る。
+  `remove`、slot 再利用、`clear` は入れない。範囲外 handle は paradox。これなら dangling/ABA/GC が無い。
+- arena 自体は現在の領域 allocator に所有され、領域を抜ければまとめて捨てる。個別 drop、GC、
+  refcount、cycle collector は足さない。
+- STEEL では既存 array descriptor に近い連続 buffer、handle は整数へ落とせる。`.alloc` は
+  `len` を返してから push するため amortized O(1)。参照実装と VM を先に揃え、STEEL は差分試験に従う。
+
+nominal な `Ast handle` は `Symbol handle` 等との取り違えを静的に防ぐ。一方、同じ `Ast` 型の arena
+instance 二つの取り違えまで型だけでは防げない。初版では handle を **typed index** と割り切り、
+arena+root を一つの構造体で運ぶ規約にするのが小さい。instance identity/generation を handle に入れる案は、
+arena の深い複製時に identity と外部 handle をどう対応させるかという新しい意味判断が要るため後段とする。
+
+### 採らない第一案
+
+- `Rc` / shared reference: C-33 の深い複製と C-48 の自己完結値を崩し、cycle、weak、drop、COW の
+  意味論まで必要になるので採らない。
+- `box` / `indirect T`: 所有木には自然だが、DAG の共有ができず、複製が常に O(tree)、細かな確保も増える。
+  arena の代わりではなく、必要なら後から追加する第二の道である。
+- 生 pointer / host borrow を Vaak 値へ入れる: lifetime と失効通知を核へ持ち込むため採らない。
+  rtex node は引き続き epoch 付き opaque handle と native NodeOps で仲介する。
+
+arena だけでは tagged `kind` と `switch` の boilerplate は残る。再帰 AST の書き味を完成させる第二候補は、
+payload に `Ast handle` を持てる有限 sum と exhaustive match である。arena/handle を先に入れれば、
+sum 自体は再帰値を持たず、現在の深い複製・DAG 規則を保ったまま追加できる。
+
+実装順を付けるなら、(1) append-only typed arena/handle、(2) 参照実装と VM の差分試験、
+(3) STEEL lowering、(4) arena+root を使う selfhost AST の実例、(5) sum/match の判断、である。
+`remove`・再利用・instance identity は、実際に必要性と費用が測れてから決める。
