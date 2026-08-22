@@ -14,6 +14,7 @@ struct Config {
     samples: usize,
     input: Input,
     tsv: bool,
+    only_tuned: bool,
 }
 
 #[derive(Debug)]
@@ -94,30 +95,32 @@ fn run() -> Result<(), String> {
     }
 
     let mut measurements = Vec::with_capacity(4);
-    measurements.push(measure(
-        "naive",
-        "parse+eval",
-        config.samples,
-        config.iterations,
-        || {
-            let program = rust_lisp::naive::parse(black_box(source.as_str()))
-                .expect("事前検査済みの入力を解析できる");
-            black_box(program.eval().expect("事前検査済みの入力を評価できる"))
-        },
-    ));
-    measurements.push(measure(
-        "naive",
-        "eval-only",
-        config.samples,
-        config.iterations,
-        || {
-            black_box(
-                naive_program
-                    .eval()
-                    .expect("事前検査済みの構文木を評価できる"),
-            )
-        },
-    ));
+    if !config.only_tuned {
+        measurements.push(measure(
+            "naive",
+            "parse+eval",
+            config.samples,
+            config.iterations,
+            || {
+                let program = rust_lisp::naive::parse(black_box(source.as_str()))
+                    .expect("事前検査済みの入力を解析できる");
+                black_box(program.eval().expect("事前検査済みの入力を評価できる"))
+            },
+        ));
+        measurements.push(measure(
+            "naive",
+            "eval-only",
+            config.samples,
+            config.iterations,
+            || {
+                black_box(
+                    naive_program
+                        .eval()
+                        .expect("事前検査済みの構文木を評価できる"),
+                )
+            },
+        ));
+    }
     measurements.push(measure(
         "tuned",
         "parse+eval",
@@ -233,6 +236,7 @@ fn parse_arguments() -> Result<Option<Config>, String> {
     let mut input = Input::Generated;
     let mut has_custom_input = false;
     let mut tsv = false;
+    let mut only_tuned = false;
     let mut arguments = std::env::args().skip(1);
 
     while let Some(argument) = arguments.next() {
@@ -256,6 +260,7 @@ fn parse_arguments() -> Result<Option<Config>, String> {
                 has_custom_input = true;
             }
             "--tsv" => tsv = true,
+            "--only-tuned" => only_tuned = true,
             _ => {
                 return Err(format!(
                     "未知の引数: {argument}\n--help で使い方を表示できます"
@@ -270,6 +275,7 @@ fn parse_arguments() -> Result<Option<Config>, String> {
         samples,
         input,
         tsv,
+        only_tuned,
     }))
 }
 
@@ -308,6 +314,7 @@ OPTIONS:
     --source EXPR   生成入力の代わりに同じ S 式を直接渡す
     --file PATH     生成入力の代わりに UTF-8 ファイルを読む
     --tsv           集計しやすい TSV で出力する
+    --only-tuned    naive を走らせず、調整版だけを測る
     -h, --help      この説明を表示する
 
 `--source` / `--file` を使わない場合は、Vaak 側と同じ depth の入力を生成する。

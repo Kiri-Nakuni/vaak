@@ -9,6 +9,9 @@
 表現できるかを見るための対照実験です。外部 crate は足しておらず、新規コードには
 `#![forbid(unsafe_code)]` を置いています。
 
+STEEL native と同じ process から交互に測った最終比較は
+[小 LISP の別名調整と Safe Rust 比較](lisp-performance.md)に分けています。
+
 ## 揃えた意味
 
 両実装は、Vaak 版と同じ次の形を受け取ります。
@@ -68,6 +71,9 @@ arena の中は添字だけなので、自己参照構造や `unsafe` は要り�
 cargo run --release --example bench_lisp_rust -- \
   --depth 48 --iterations 2000 --samples 7
 ```
+
+調整版だけを測り直す場合は `--only-tuned` を加えます。素朴版の大量確保で CPU の温度や
+動作周波数を変えずに済むため、STEEL との横比較ではこちらを使います。
 
 `--depth N` は概ね次の形を作り、答えは `N - 1` です。
 
