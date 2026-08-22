@@ -534,3 +534,12 @@ fn 十進以外の表記() {
     同じ("0xFF_FF");
     同じ("var x : u8 := 0b1111_0000; x");
 }
+
+/// 包み型は**実装から見れば基底型**である（S-2）。関数の返りでも剥がれる。
+#[test]
+fn 包み型は関数の返りでも剥がれる() {
+    同じ("wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId; mk(7) -> i64");
+    同じ("wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId;
+          fn use2 (h : NodeId) { (h -> i64) * 2 } -> i64; use2(mk(21))");
+    同じ("wrap M = i64; var a : M array := [ new M(1), new M(2) ]; (a[1] ?? new M(0)) -> i64");
+}

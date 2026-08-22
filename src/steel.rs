@@ -3342,7 +3342,11 @@ impl Steel {
             // **paradox を引数に渡せる。** 型は paradox との直和である
             vals.push((ity(&ty), c, v.ok));
         }
-        let ret = f.ret.as_ref().map(|t| t.value.clone()).unwrap_or(ValueType::I64);
+        // **包みを剥がす**（S-2）。剥がさないと構造体と間違えて `ptr` になる
+        let ret = match f.ret.as_ref() {
+            Some(t) => self.resolve(&t.value),
+            None => ValueType::I64,
+        };
         let sig: Vec<String> =
             vals.iter().map(|(t, v, ok)| format!("{t} {v}, i1 {ok}")).collect();
         let t = self.tmp();

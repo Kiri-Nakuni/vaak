@@ -650,3 +650,16 @@ t!(十六進, "0xff");
 t!(八進, "0o777");
 t!(区切りつき, "1_000");
 t!(区切りつき十六進, "0xFF_FF");
+
+// ── 包み型は関数の返りでも剥がれる ─────────────────────────
+
+t!(包み型を返す関数,
+   "wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId;
+    (mk(7) -> i64) * 10 + 1");
+t!(包み型を返して包み型で受ける,
+   "wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId;
+    fn use2 (h : NodeId) { (h -> i64) * 2 } -> i64;
+    use2(mk(21))");
+t!(包み型の配列を返す,
+   "wrap Bytes = u8 array; fn mk () { new Bytes(new u8 array(2, 5)) } -> Bytes;
+    var b := mk(); (b -> u8 array)[1] -> i64");
