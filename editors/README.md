@@ -21,7 +21,7 @@ cargo install --path .
 | | 出所 |
 |---|---|
 | tree-sitter（`grammar.js`） | 手書き。**`cargo test --test grammar` が字句器と突き合わせる** |
-| TextMate（`.tmLanguage.json`） | **生成物。** `scripts/gen-tm-grammar.py` が字句器から作る |
+| TextMate（`.tmLanguage.json`） | **生成物。** テンプレートへ字句器の一覧を埋める |
 | 意味トークン | **字句器そのもの。** `src/lsp.rs` が `vaak::lexer::lex` を呼ぶ |
 
 **片方に鍵語を足してもう片方に足し忘れたら、試験が落ちる。**

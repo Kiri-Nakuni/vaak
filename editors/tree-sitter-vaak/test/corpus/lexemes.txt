@@ -1,0 +1,37 @@
+==================
+字句を分類する
+==================
+
+%{ 外 %{ 入れ子 }% }%
+var 名前 : i64 array alias := [1, 2.5, 3e2];
+true false $done "a\n" ?? |> mod=
+% 行コメント
+
+---
+
+(source_file
+  (block_comment)
+  (keyword)
+  (identifier)
+  (punctuation)
+  (type_name)
+  (keyword)
+  (keyword)
+  (operator)
+  (punctuation)
+  (integer)
+  (punctuation)
+  (float)
+  (punctuation)
+  (float)
+  (punctuation)
+  (punctuation)
+  (boolean)
+  (boolean)
+  (flow_name)
+  (string
+    (escape_sequence))
+  (operator)
+  (operator)
+  (operator)
+  (line_comment))

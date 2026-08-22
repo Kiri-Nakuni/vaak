@@ -1,0 +1,20 @@
+{
+  "grammars": [
+    {
+      "name": "vaak",
+      "camelcase": "Vaak",
+      "scope": "source.vaak",
+      "path": ".",
+      "file-types": [
+        "vaak",
+        "vk"
+      ],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Highlighting grammar for the Vaak embedded language"
+  }
+}

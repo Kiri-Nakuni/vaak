@@ -54,6 +54,33 @@ fn lexer_keywords() -> BTreeSet<String> {
     out
 }
 
+/// 長い綴りを先にした正規表現の選択肢へ変える。
+///
+/// TextMate 文法の生成器と同じ順序にする。語境界を付けるので意味上は順序に
+/// 依存しないが、生成物を決定的にして差分を読みやすくするために揃える。
+fn regex_alternation(words: &BTreeSet<String>) -> String {
+    let mut words: Vec<_> = words.iter().cloned().collect();
+    words.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    words.join("|")
+}
+
+fn parser_types() -> BTreeSet<String> {
+    let p = std::fs::read_to_string("src/parser.rs").unwrap();
+    let mut out = BTreeSet::new();
+    for line in p.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix('"') {
+            if let Some(j) = rest.find('"') {
+                if rest[j..].contains("=> ValueType::") {
+                    out.insert(rest[..j].to_string());
+                }
+            }
+        }
+    }
+    assert!(!out.is_empty(), "組み込みの型を読み取れなかった");
+    out
+}
+
 #[test]
 fn 鍵語が一致する() {
     let g = std::fs::read_to_string("editors/tree-sitter-vaak/grammar.js").unwrap();
@@ -77,31 +104,44 @@ fn 組み込みの型が一致する() {
     let g = std::fs::read_to_string("editors/tree-sitter-vaak/grammar.js").unwrap();
     let from_grammar = choices(&g, "type_name");
 
-    let p = std::fs::read_to_string("src/parser.rs").unwrap();
-    let mut from_parser = BTreeSet::new();
-    for line in p.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix('"') {
-            if let Some(j) = rest.find('"') {
-                if rest[j..].contains("=> ValueType::") {
-                    from_parser.insert(rest[..j].to_string());
-                }
-            }
-        }
-    }
+    let from_parser = parser_types();
     assert_eq!(from_grammar, from_parser, "組み込みの型が食い違っている");
 }
 
 #[test]
 fn textmate_文法も一致する() {
-    // **VS Code の文法は生成物である。** `scripts/gen-tm-grammar.py` が
-    // `src/lexer.rs` と `src/parser.rs` から作る。**手で直さない。**
-    let out = std::process::Command::new("python3")
-        .args(["scripts/gen-tm-grammar.py", "--check"])
-        .output()
-        .expect("python3 が要る");
-    assert!(
-        out.status.success(),
-        "TextMate 文法が古い。`python3 scripts/gen-tm-grammar.py` を走らせること"
+    // **VS Code の文法は生成物である。** 鍵語・型・真偽値だけを Rust の
+    // 一次資料から埋める。試験自体は Python の実行環境に依存させない。
+    let mut keywords = lexer_keywords();
+    let booleans: BTreeSet<_> = ["false", "true"].into_iter().map(String::from).collect();
+    keywords.retain(|word| !booleans.contains(word));
+
+    let expected = std::fs::read_to_string("scripts/vaak.tmLanguage.template.json")
+        .unwrap()
+        .replace("@VAAK_BOOLEANS@", &regex_alternation(&booleans))
+        .replace("@VAAK_KEYWORDS@", &regex_alternation(&keywords))
+        .replace("@VAAK_TYPES@", &regex_alternation(&parser_types()))
+        .replace("\r\n", "\n");
+    let actual = std::fs::read_to_string("editors/vscode/syntaxes/vaak.tmLanguage.json")
+        .unwrap()
+        .replace("\r\n", "\n");
+
+    assert_eq!(
+        actual, expected,
+        "TextMate 文法が古い。`python scripts/gen-tm-grammar.py` を走らせること"
+    );
+}
+
+#[test]
+fn zedの問合せも一致する() {
+    let grammar = std::fs::read_to_string("editors/tree-sitter-vaak/queries/highlights.scm")
+        .unwrap()
+        .replace("\r\n", "\n");
+    let extension = std::fs::read_to_string("editors/zed/languages/vaak/highlights.scm")
+        .unwrap()
+        .replace("\r\n", "\n");
+    assert_eq!(
+        extension, grammar,
+        "Zed の問合せが古い。`node scripts/sync-grammar.mjs` を走らせること"
     );
 }
