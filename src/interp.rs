@@ -2265,10 +2265,13 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
 fn key_to_value(k: &MapKey, t: &ValueType) -> Value {
     match k {
         MapKey::Bytes(b) => Value::str(b.clone()),
-        MapKey::Float(bits) => match t {
-            ValueType::F32 => Value::F32(f64::from_bits(*bits) as f32),
-            _ => Value::F64(f64::from_bits(*bits)),
-        },
+        MapKey::Float(k) => {
+            let x = crate::value::float_from_key(*k);
+            match t {
+                ValueType::F32 => Value::F32(x as f32),
+                _ => Value::F64(x),
+            }
+        }
         MapKey::Int(i) => match t {
             ValueType::U1 => Value::U1(*i != 0),
             ValueType::U8 => Value::U8(*i as u8),
@@ -2300,7 +2303,7 @@ pub fn set_field(base: &mut Value, name: &str, v: Value) -> bool {
 
 pub fn set_index(base: &mut Value, i: &Value, v: Value) -> bool {
     let step = match base {
-        Value::Map(_) => match i.as_key() {
+        Value::Map(_) | Value::Hash(_) => match i.as_key() {
             Some(k) => Step::Key(k),
             None => return false,
         },
