@@ -7,7 +7,7 @@
 //! **違うのは「どう辿るか」だけ。** 意味論を二度実装しない（C-61 の教訓）。
 
 use crate::ast::*;
-use crate::interp::{arith_pub, coerce_pub, read_method_pub, write_method_pub, EKind};
+use crate::interp::{arith_pub, read_method_pub, try_coerce_pub, write_method_pub, EKind};
 use crate::span::Span;
 use crate::value::{Arena, CellId, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -27,6 +27,8 @@ pub enum Op {
     Ref(u16),
     /// 名前の指すセルに書く（上を消費）。
     Store(u16),
+    /// コンパイラが既に型を揃えた値をそのまま書く。値引数の入口だけで使う。
+    StoreExact(u16),
     /// 名前を別の名前のセルへ向ける。**値は動かさない**（C-20）。
     Alias(u16, u16),
     /// その名前が指すセルを、現在の字句的な段／フレームの間だけ凍らせる。
@@ -85,7 +87,7 @@ pub enum Op {
     Continue { deferred: Option<u32>, span: Span },
     /// 段数が実行時に決まる脱出（`$repeat`）。上に回数がある。
     BreakDyn { payload: bool, span: Span },
-    /// 型注釈に合わせる。
+    /// 型注釈に合わせる。paradox はそのまま通す。
     Coerce(u32),
     /// フレームの深さを積む。`getdepth()`。
     Depth,
@@ -378,12 +380,24 @@ impl Compiler {
             if p.ty.is_alias && p.kind == BindKind::Const {
                 self.emit(Op::Freeze(s));
             }
+            // 値引数のリテラルは仮引数の型を受け取る（C-25）。
+            // 呼び出し側で既定型の値にしても、ここでセルの幅へ揃える。
+            if !p.ty.is_alias {
+                self.emit(Op::Load(s));
+                let ti = self.type_idx(&p.ty);
+                self.emit(Op::Coerce(ti));
+                self.emit(Op::StoreExact(s));
+            }
         }
         self.chunk.self_is_var = f.owner.is_some()
             && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false);
         if let ExprKind::Block(items) = &f.body.kind {
             self.collect(items);
             self.region(items, f.body.span)?;
+        }
+        if let Some(ret) = &f.ret {
+            let ti = self.type_idx(ret);
+            self.emit(Op::Coerce(ti));
         }
         self.emit(Op::Ret);
 
@@ -915,6 +929,8 @@ impl Compiler {
                     };
                     self.expr(d)?;
                     self.emit(Op::NeedValue(span));
+                    let ti = self.type_idx(&f.ty);
+                    self.emit(Op::Coerce(ti));
                 }
                 let ni = self.name_idx(n);
                 self.emit(Op::MakeStruct(ni, s.fields.len() as u16));
@@ -1558,7 +1574,8 @@ impl Program2 {
                         }
                     }
                     // 丸ごと読む・書く・別名にする → 全部要る
-                    Op::Load(x) | Op::Store(x) | Op::Declare(x) if *x == slot => return None,
+                    Op::Load(x) | Op::Store(x) | Op::StoreExact(x) | Op::Declare(x)
+                        if *x == slot => return None,
                     Op::LoadField(x, _, _) if *x == slot => return None,
                     Op::Alias(a, b) if *a == slot || *b == slot => return None,
                     _ => {}
@@ -1579,6 +1596,7 @@ impl Program2 {
                 c.ops.iter().any(|op| match op {
                     Op::Load(x)
                     | Op::Store(x)
+                    | Op::StoreExact(x)
                     | Op::Declare(x)
                     | Op::LoadIndex(x, _)
                     | Op::StoreIndex(x, _)
@@ -1708,6 +1726,19 @@ impl<'a> Vm<'a> {
                 if self.frozen.contains(&c) {
                     return self.err("凍っているセルには書けない（`const` の別名がある）", Span::NONE);
                 }
+                let target = self
+                    .arena
+                    .get(c)
+                    .map(Value::type_of)
+                    .unwrap_or_else(|| v.type_of());
+                let Some(v) = crate::interp::try_coerce_to(v, &target) else {
+                    return self.err("浮動小数を狭めると非有限になる", Span::NONE);
+                };
+                self.arena.set(c, v);
+            }
+            Op::StoreExact(s) => {
+                let v = self.pop().value(Span::NONE)?;
+                let c = self.cell(s);
                 self.arena.set(c, v);
             }
             Op::Declare(s) => {
@@ -1739,8 +1770,14 @@ impl<'a> Vm<'a> {
             }
             Op::Coerce(t) => {
                 let ty = self.p.chunks[self.cur()].types[t as usize].clone();
-                let v = self.pop().value(ty.span)?;
-                self.stack.push(Slot::Value(coerce_pub(v, Some(&ty))));
+                match self.pop() {
+                    Slot::Value(v) => match try_coerce_pub(v, Some(&ty)) {
+                        Some(v) => self.stack.push(Slot::Value(v)),
+                        None => self.stack.push(Slot::Paradox(ty.span)),
+                    },
+                    Slot::Paradox(sp) => self.stack.push(Slot::Paradox(sp)),
+                    Slot::Cell(_) => return self.err("セル参照は値ではない", ty.span),
+                }
             }
             Op::NeedValue(sp) => {
                 let t = self.pop();

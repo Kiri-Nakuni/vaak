@@ -357,7 +357,10 @@ impl Interp {
             // **注釈はその領域の値の型を決める**（C-30）。
             // インタプリタは型を解決する——検査はしない
             ExprKind::Ascribe { expr, ty } => match self.need_value(expr)? {
-                Ok(v) => Ok(Eval::Value(coerce_to(v, &ty.value))),
+                Ok(v) => Ok(match try_coerce_to(v, &ty.value) {
+                    Some(v) => Eval::Value(v),
+                    None => Eval::Paradox(e.span),
+                }),
                 Err(x) => Ok(Eval::Escape(x)),
             },
 
@@ -796,7 +799,7 @@ impl Interp {
                         Ok(v) => v,
                         Err(x) => return Ok(Eval::Escape(x)),
                     };
-                    let v = coerce(v, b.ty.as_ref());
+                    let v = require_coerce(v, b.ty.as_ref(), e.span)?;
                     let cell = self.arena.alloc(Some(v));
                     self.declare(&b.name, Binding { cell, kind: d.kind, is_alias: false });
                 }
@@ -953,6 +956,20 @@ impl Interp {
     }
 
     fn write_place(&mut self, p: &Place, v: Value, span: Span) -> R<()> {
+        // **セルの型は一度決まったら変わらない。** 代入右辺のリテラルも
+        // その場所の型を受け取る（C-25 / C-94）。
+        // 写像・hash はまだ無い鍵への代入が**挿入**なので、値を読まず型だけ辿る。
+        let (cell, steps) = match p {
+            Place::Cell(c) => (*c, &[][..]),
+            Place::Field(c, steps) => (*c, &steps[..]),
+        };
+        let target = self
+            .arena
+            .get(cell)
+            .and_then(|root| step_type(root, steps))
+            .ok_or_else(|| RuntimeError { msg: "経路がたどれない".into(), span })?;
+        let v = try_coerce_to(v, &target)
+            .ok_or_else(|| RuntimeError { msg: "浮動小数を狭めると非有限になる".into(), span })?;
         match p {
             Place::Cell(c) => {
                 self.arena.set(*c, v);
@@ -1008,17 +1025,55 @@ fn step_get(v: &Value, s: &Step) -> Option<Value> {
     }
 }
 
+/// 経路の置き場所の型だけを辿る。写像・hash の最終鍵は未挿入でも型が分かる。
+fn step_type(v: &Value, steps: &[Step]) -> Option<ValueType> {
+    let Some((first, rest)) = steps.split_first() else {
+        return Some(v.type_of());
+    };
+    if rest.is_empty() {
+        return match (v, first) {
+            (Value::Struct(sv), Step::Field(n)) => sv
+                .fields
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, value)| value.type_of()),
+            (Value::Array(ar), Step::Index(_)) => Some(ar.elem.clone()),
+            (Value::Str(_), Step::Index(_)) => Some(ValueType::U8),
+            (Value::Map(mp), Step::Key(_) | Step::Index(_)) => Some(mp.val.clone()),
+            (Value::Hash(h), Step::Key(_) | Step::Index(_)) => Some(h.val.clone()),
+            _ => None,
+        };
+    }
+    let next = step_get(v, first)?;
+    step_type(&next, rest)
+}
+
 fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
     let Some((first, rest)) = steps.split_first() else {
+        // 構造体の欄も含め、置き場所が現在持つ型を保つ。
+        // 集合体だけを特別扱いすると、`p.x := 300` が `u8` の欄へ
+        // `i64` を入れてしまう（C-25 / C-94）。
+        let Some(new) = try_coerce_to(new, &v.type_of()) else {
+            return false;
+        };
         *v = new;
         return true;
     };
     // **集合体は自分の要素の型を知っている。** 書き込む値をそれに揃える（C-94）
     let new = if rest.is_empty() {
         match v {
-            Value::Array(ar) => coerce_to(new, &ar.elem),
-            Value::Map(mp) => coerce_to(new, &mp.val),
-            Value::Hash(h) => coerce_to(new, &h.val),
+            Value::Array(ar) => match try_coerce_to(new, &ar.elem) {
+                Some(v) => v,
+                None => return false,
+            },
+            Value::Map(mp) => match try_coerce_to(new, &mp.val) {
+                Some(v) => v,
+                None => return false,
+            },
+            Value::Hash(h) => match try_coerce_to(new, &h.val) {
+                Some(v) => v,
+                None => return false,
+            },
             _ => new,
         }
     } else {
@@ -1120,16 +1175,42 @@ fn can_narrow(from: BindKind, to: BindKind) -> bool {
 /// 型検査は「リテラルは置かれた場所の型を受け取る」として通すので、
 /// ここで降りないと**検査器と評価器で食い違う**（C-94）。
 pub fn coerce_pub(v: Value, ty: Option<&Type>) -> Value {
-    coerce(v, ty)
+    let original = v.clone();
+    try_coerce(v, ty).unwrap_or(original)
 }
 
-fn coerce(v: Value, ty: Option<&Type>) -> Value {
-    let Some(t) = ty else { return v };
+/// 型注釈で決まった表現へ揃える。
+///
+/// `f64` では有限でも `f32` へ狭めると infinity になる値がある。
+/// **非有限値は言語に存在しない**（C-84）ので、その場合は値を作らない。
+pub fn try_coerce_pub(v: Value, ty: Option<&Type>) -> Option<Value> {
+    try_coerce(v, ty)
+}
+
+fn require_coerce(v: Value, ty: Option<&Type>, span: Span) -> R<Value> {
+    try_coerce(v, ty)
+        .ok_or_else(|| RuntimeError { msg: "浮動小数を狭めると非有限になる".into(), span })
+}
+
+/// 関数本体の外界面を返り値型へ揃える。
+/// 非有限になる狭化は値を作らず paradox になる（C-84）。
+fn coerce_result(result: Eval, ty: Option<&Type>, span: Span) -> Eval {
+    match (result, ty) {
+        (Eval::Value(v), Some(t)) => match try_coerce(v, Some(t)) {
+            Some(v) => Eval::Value(v),
+            None => Eval::Paradox(span),
+        },
+        (other, _) => other,
+    }
+}
+
+fn try_coerce(v: Value, ty: Option<&Type>) -> Option<Value> {
+    let Some(t) = ty else { return Some(v) };
     // ラップ型を基底型で構築したら**剥がす**（S-2）。包みの欄は名前を持たない
     if !matches!(t.value, ValueType::Named(_)) {
         if let Value::Struct(sv) = &v {
             if sv.fields.len() == 1 && sv.fields[0].0.is_empty() {
-                return coerce(sv.fields[0].1.clone(), ty);
+                return try_coerce(sv.fields[0].1.clone(), ty);
             }
         }
     }
@@ -1157,25 +1238,32 @@ fn coerce(v: Value, ty: Option<&Type>) -> Value {
         }
         (ValueType::Array(el), Value::Array(ar)) => {
             let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
-            return Value::array((**el).clone(), ar.items.into_iter().map(|x| coerce(x, Some(&et))).collect());
+            let items = ar
+                .items
+                .into_iter()
+                .map(|x| try_coerce(x, Some(&et)))
+                .collect::<Option<Vec<_>>>()?;
+            return Some(Value::array((**el).clone(), items));
         }
         (ValueType::Map(kt, vt), Value::Map(mp)) => {
             let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
-            return Value::map((**kt).clone(), (**vt).clone(), mp.entries
-                    .into_iter()
-                    .map(|(k, x)| (k, coerce(x, Some(&vty))))
-                    .collect());
+            let entries = mp
+                .entries
+                .into_iter()
+                .map(|(k, x)| Some((k, try_coerce(x, Some(&vty))?)))
+                .collect::<Option<_>>()?;
+            return Some(Value::map((**kt).clone(), (**vt).clone(), entries));
         }
         (ValueType::Hash(kt, vt), Value::Hash(hv)) => {
             let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
             let mut out = crate::value::HashVal::new((**kt).clone(), (**vt).clone());
             // **入れた順を保つ**（C-98）。穴は飛ばす
             for (k, x) in hv.entries.into_iter().flatten() {
-                out.insert(k, coerce(x, Some(&vty)));
+                out.insert(k, try_coerce(x, Some(&vty))?);
             }
-            return Value::Hash(Box::new(out));
+            return Some(Value::Hash(Box::new(out)));
         }
-        (_, other) => return coerce_scalar(other, t),
+        (_, other) => return try_coerce_scalar(other, t),
     }
 }
 
@@ -1300,20 +1388,35 @@ pub fn find_dialect_type(items: &[Expr]) -> Option<(String, Span)> {
 }
 
 pub fn coerce_to(v: Value, t: &ValueType) -> Value {
-    coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
+    let original = v.clone();
+    try_coerce_to(v, t).unwrap_or(original)
 }
 
-fn coerce_scalar(v: Value, t: &Type) -> Value {
+pub fn try_coerce_to(v: Value, t: &ValueType) -> Option<Value> {
+    try_coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
+}
+
+fn try_coerce_scalar(v: Value, t: &Type) -> Option<Value> {
     match (&t.value, &v) {
-        (ValueType::U1, _) => v.as_int().map(|i| Value::U1(i != 0)).unwrap_or(v),
-        (ValueType::U8, _) => v.as_int().map(|i| Value::U8(i as u8)).unwrap_or(v),
-        (ValueType::U16, _) => v.as_int().map(|i| Value::U16(i as u16)).unwrap_or(v),
-        (ValueType::U32, _) => v.as_int().map(|i| Value::U32(i as u32)).unwrap_or(v),
-        (ValueType::I32, _) => v.as_int().map(|i| Value::I32(i as i32)).unwrap_or(v),
-        (ValueType::I64, _) => v.as_int().map(|i| Value::I64(i as i64)).unwrap_or(v),
-        (ValueType::F32, _) => v.as_float().map(|f| Value::F32(f as f32)).unwrap_or(v),
-        (ValueType::F64, _) => v.as_float().map(Value::F64).unwrap_or(v),
-        _ => v,
+        (ValueType::U1, _) => Some(v.as_int().map(|i| Value::U1(i != 0)).unwrap_or(v)),
+        (ValueType::U8, _) => Some(v.as_int().map(|i| Value::U8(i as u8)).unwrap_or(v)),
+        (ValueType::U16, _) => Some(v.as_int().map(|i| Value::U16(i as u16)).unwrap_or(v)),
+        (ValueType::U32, _) => Some(v.as_int().map(|i| Value::U32(i as u32)).unwrap_or(v)),
+        (ValueType::I32, _) => Some(v.as_int().map(|i| Value::I32(i as i32)).unwrap_or(v)),
+        (ValueType::I64, _) => Some(v.as_int().map(|i| Value::I64(i as i64)).unwrap_or(v)),
+        (ValueType::F32, _) => match v.as_float() {
+            Some(f) => {
+                let narrowed = f as f32;
+                narrowed.is_finite().then_some(Value::F32(narrowed))
+            }
+            None => Some(v),
+        },
+        (ValueType::F64, _) => match v.as_float() {
+            Some(f) if f.is_finite() => Some(Value::F64(f)),
+            Some(_) => None,
+            None => Some(v),
+        },
+        _ => Some(v),
     }
 }
 
@@ -1351,14 +1454,25 @@ fn arith(op: BinOp, a: Value, b: Value, span: Span) -> R<Eval> {
                 Mod => x % y,
                 _ => return rt("浮動小数に使えない演算子", span),
             };
-            // **inf も NaN も、この言語には存在しない**
-            if !r.is_finite() {
-                return Ok(Eval::Paradox(span));
-            }
-            return Ok(Eval::Value(match a {
-                Value::F32(_) => Value::F32(r as f32),
-                _ => Value::F64(r),
-            }));
+            // **inf も NaN も、この言語には存在しない。** `f32` の演算は
+            // `f64` で計算した途中値ではなく、`f32` へ丸めた後を確かめる。
+            // `3e38 + 3e38` は f64 では有限でも f32 では infinity になる。
+            let out = match a {
+                Value::F32(_) => {
+                    let narrowed = r as f32;
+                    if !narrowed.is_finite() {
+                        return Ok(Eval::Paradox(span));
+                    }
+                    Value::F32(narrowed)
+                }
+                _ => {
+                    if !r.is_finite() {
+                        return Ok(Eval::Paradox(span));
+                    }
+                    Value::F64(r)
+                }
+            };
+            return Ok(Eval::Value(out));
         }
     }
 
@@ -1666,7 +1780,7 @@ impl Interp {
                     } else {
                         return rt(format!("欄 `{}` に値が無い", f.name), span);
                     };
-                    out.push((f.name.clone(), coerce(v, Some(&f.ty))));
+                    out.push((f.name.clone(), require_coerce(v, Some(&f.ty), f.span)?));
                 }
                 Ok(Eval::Value(Value::strukt(name.clone(), out)))
             }
@@ -1713,7 +1827,11 @@ impl Interp {
                     }
                 };
                 // 充填値も**要素の型**でなければならない（C-94）
-                let fill = coerce_to(fill, elem);
+                let fill = require_coerce(
+                    fill,
+                    Some(&Type { value: (**elem).clone(), is_alias: false, span }),
+                    span,
+                )?;
                 Ok(Eval::Value(Value::array((**elem).clone(), vec![fill; n as usize])))
             }
             // ラップを剥がす：`new i64 ( m )` のように基底型で構築する
@@ -1725,7 +1843,10 @@ impl Interp {
                     Ok(Value::Struct(sv)) if sv.fields.len() == 1 && sv.fields[0].0.is_empty() => {
                         Ok(Eval::Value(sv.fields[0].1.clone()))
                     }
-                    Ok(v) => Ok(Eval::Value(coerce(v, Some(ty)))),
+                    Ok(v) => Ok(match try_coerce(v, Some(ty)) {
+                        Some(v) => Eval::Value(v),
+                        None => Eval::Paradox(span),
+                    }),
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
@@ -1769,7 +1890,7 @@ impl Interp {
                         Ok(v) => v,
                         Err(x) => return Ok(Eval::Escape(x)),
                     };
-                    out.push((f.name.clone(), coerce(v, Some(&f.ty))));
+                    out.push((f.name.clone(), require_coerce(v, Some(&f.ty), f.span)?));
                 }
                 Ok(Eval::Value(Value::strukt(name.clone(), out)))
             }
@@ -1916,7 +2037,8 @@ impl Interp {
                     Ok(v) => v,
                     Err(x) => return Ok(Eval::Escape(x)),
                 };
-                let cell = self.arena.alloc(Some(coerce(v, Some(&p.ty))));
+                let v = require_coerce(v, Some(&p.ty), a.span)?;
+                let cell = self.arena.alloc(Some(v));
                 bound.push((p.name.clone(), p.kind, cell, false));
             }
         }
@@ -1942,7 +2064,7 @@ impl Interp {
 
         let r = r?;
         // 脱出は**フレームで止まる**。**上限まで抜けるのは許される**（C-66）
-        Ok(match r {
+        let out = match r {
             Eval::Escape(mut x) => {
                 if x.stages > 1 {
                     // **この段送りに `outward` が掛かっているときだけ越えられる**
@@ -1965,7 +2087,8 @@ impl Interp {
             }
             Eval::Akasha => Eval::Paradox(span),
             other => other,
-        })
+        };
+        Ok(coerce_result(out, f.decl.ret.as_ref(), span))
     }
 
     /// メンバ関数。**レシーバは複製されない。破壊的である**（C-20）。
@@ -2030,7 +2153,8 @@ impl Interp {
                     Ok(v) => v,
                     Err(x) => return Ok(Eval::Escape(x)),
                 };
-                let cell = self.arena.alloc(Some(coerce(v, Some(&p.ty))));
+                let v = require_coerce(v, Some(&p.ty), a.span)?;
+                let cell = self.arena.alloc(Some(v));
                 bound.push((p.name.clone(), p.kind, cell, false));
             }
         }
@@ -2061,7 +2185,7 @@ impl Interp {
         }
 
         let r = r?;
-        Ok(match r {
+        let out = match r {
             Eval::Escape(mut x) => {
                 if x.stages > 1 {
                     if x.outward & 1 != 0 {
@@ -2083,7 +2207,8 @@ impl Interp {
             }
             Eval::Akasha => Eval::Paradox(span),
             other => other,
-        })
+        };
+        Ok(coerce_result(out, d.ret.as_ref(), span))
     }
 
     /// 標準ライブラリのメンバ関数（S-3）。**言語が知るのはバイトまで。**
@@ -2238,7 +2363,10 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
             let Some(v) = args.first() else { return rt("`push` は値を一つ取る", span) };
             // **集合体は自分の要素の型を知っている**（C-94）。書き込む値をそれに揃える
             let el = ar.elem.clone();
-            ar.items.push(coerce_to(v.clone(), &el));
+            let Some(v) = try_coerce_to(v.clone(), &el) else {
+                return rt("浮動小数を狭めると非有限になる", span);
+            };
+            ar.items.push(v);
             paradox
         }
         ("push", Value::Str(b)) => {
@@ -2282,7 +2410,10 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
                 return Ok(paradox);
             }
             let el = ar.elem.clone();
-            ar.items.insert(i as usize, coerce_to(v.clone(), &el));
+            let Some(v) = try_coerce_to(v.clone(), &el) else {
+                return rt("浮動小数を狭めると非有限になる", span);
+            };
+            ar.items.insert(i as usize, v);
             paradox
         }
         // **範囲外は paradox**
