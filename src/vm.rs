@@ -2370,7 +2370,7 @@ impl<'a> Vm<'a> {
                     span,
                 }));
             }
-            Op::BreakDyn { payload, resume, op_span, span } => {
+            Op::BreakDyn { payload, resume, op_span: _, span } => {
                 let n = self.pop().value(span)?.as_int().unwrap_or(0);
                 let p = if payload { Some(self.pop().value(span)?) } else { None };
                 // `n` が 0 以下なら作用素を一つも重ねない（C-75 の 5）
