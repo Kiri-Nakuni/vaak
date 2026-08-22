@@ -158,6 +158,7 @@ fn ty(t: &ValueType) -> String {
         Str => "str".into(),
         Array(i) => format!("{} array", ty(i)),
         Map(k, v) => format!("{} {} map", ty(k), ty(v)),
+        Hash(k, v) => format!("{} {} hash", ty(k), ty(v)),
         Named(n) => n.clone(),
     }
 }

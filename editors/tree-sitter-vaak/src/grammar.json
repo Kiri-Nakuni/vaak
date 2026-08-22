@@ -160,6 +160,10 @@
         },
         {
           "type": "STRING",
+          "value": "hash"
+        },
+        {
+          "type": "STRING",
           "value": "alias"
         }
       ]

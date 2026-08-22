@@ -989,6 +989,8 @@ fn step_get(v: &Value, s: &Step) -> Option<Value> {
         }
         (Value::Map(mp), Step::Key(k)) => mp.entries.get(k).cloned(),
         (Value::Map(mp), Step::Index(i)) => mp.entries.get(&MapKey::Int(*i)).cloned(),
+        (Value::Hash(h), Step::Key(k)) => h.get(k).cloned(),
+        (Value::Hash(h), Step::Index(i)) => h.get(&MapKey::Int(*i)).cloned(),
         _ => None,
     }
 }
@@ -1003,6 +1005,7 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
         match v {
             Value::Array(ar) => coerce_to(new, &ar.elem),
             Value::Map(mp) => coerce_to(new, &mp.val),
+            Value::Hash(h) => coerce_to(new, &h.val),
             _ => new,
         }
     } else {
@@ -1060,6 +1063,29 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
                 }
             }
         }
+        (Value::Hash(h), Step::Key(k)) => {
+            if rest.is_empty() {
+                h.insert(k.clone(), new);
+                true
+            } else {
+                match h.get_mut(k) {
+                    Some(slot) => step_set(slot, rest, new),
+                    None => false,
+                }
+            }
+        }
+        (Value::Hash(h), Step::Index(i)) => {
+            let k = MapKey::Int(*i);
+            if rest.is_empty() {
+                h.insert(k, new);
+                true
+            } else {
+                match h.get_mut(&k) {
+                    Some(slot) => step_set(slot, rest, new),
+                    None => false,
+                }
+            }
+        }
         _ => false,
     }
 }
@@ -1107,6 +1133,15 @@ fn coerce(v: Value, ty: Option<&Type>) -> Value {
                     .map(|(k, x)| (k, coerce(x, Some(&vty))))
                     .collect());
         }
+        (ValueType::Hash(kt, vt), Value::Hash(hv)) => {
+            let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
+            let mut out = crate::value::HashVal::new((**kt).clone(), (**vt).clone());
+            // **入れた順を保つ**（C-98）。穴は飛ばす
+            for (k, x) in hv.entries.into_iter().flatten() {
+                out.insert(k, coerce(x, Some(&vty)));
+            }
+            return Value::Hash(Box::new(out));
+        }
         (_, other) => return coerce_scalar(other, t),
     }
 }
@@ -1121,7 +1156,9 @@ pub fn is_dialect_only(t: &ValueType) -> bool {
     match t {
         ValueType::F80 => true,
         ValueType::Array(e) => is_dialect_only(e),
-        ValueType::Map(k, v) => is_dialect_only(k) || is_dialect_only(v),
+        ValueType::Map(k, v) | ValueType::Hash(k, v) => {
+            is_dialect_only(k) || is_dialect_only(v)
+        }
         _ => false,
     }
 }
@@ -1637,6 +1674,9 @@ impl Interp {
                 }
             }
             (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::map((**k).clone(), (**v).clone(), Default::default()))),
+            (ValueType::Hash(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::Hash(
+                Box::new(crate::value::HashVal::new((**k).clone(), (**v).clone())),
+            ))),
             // ラップ型：包むのも剥がすのも `new`（C-78）
             (ValueType::Str, CtorArgs::Positional(a)) if a.len() == 1 => {
                 match self.need_value(&a[0])? {
@@ -1721,7 +1761,7 @@ impl Interp {
             };
             if let Some(coll) = self.arena.get(b.cell) {
                 let step = match (coll, &i) {
-                    (Value::Map(_), _) => match i.as_key() {
+                    (Value::Map(_) | Value::Hash(_), _) => match i.as_key() {
                         Some(k) => Step::Key(k),
                         None => return rt("写像の鍵にできない値", index.span),
                     },
@@ -1746,7 +1786,7 @@ impl Interp {
             Err(x) => return Ok(Eval::Escape(x)),
         };
         let step = match (&b, &i) {
-            (Value::Map(_), _) => match i.as_key() {
+            (Value::Map(_) | Value::Hash(_), _) => match i.as_key() {
                 Some(k) => Step::Key(k),
                 None => return rt("写像の鍵にできない値", index.span),
             },
@@ -2089,7 +2129,14 @@ fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
         ("len", Value::Array(ar)) => Eval::Value(Value::I64(ar.items.len() as i64)),
         ("len", Value::Str(s)) => Eval::Value(Value::I64(s.len() as i64)),
         ("len", Value::Map(mp)) => Eval::Value(Value::I64(mp.entries.len() as i64)),
+        ("len", Value::Hash(h)) => Eval::Value(Value::I64(h.len() as i64)),
 
+        ("has", Value::Hash(h)) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`has` は鍵を一つ取る", span);
+            };
+            Eval::Value(Value::U1(h.get(&k).is_some()))
+        }
         ("has", Value::Map(mp)) => {
             let Some(k) = args.first().and_then(|v| v.as_key()) else {
                 return rt("`has` は鍵を一つ取る", span);
@@ -2098,6 +2145,11 @@ fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
         }
         // 並びは鍵の順。**全順序なので決まる**（C-75）
         ("keys", Value::Map(mp)) => Eval::Value(Value::array(mp.key.clone(), mp.entries.keys().map(|k| key_to_value(k, &mp.key)).collect())),
+        // **入れた順**（C-98）。穴は飛ばす
+        ("keys", Value::Hash(h)) => Eval::Value(Value::array(
+            h.key.clone(),
+            h.iter().map(|(k, _)| key_to_value(k, &h.key)).collect(),
+        )),
 
         // **符号位置の数。**「1文字」とは言わない
         ("utf8_len", Value::Str(s)) => match std::str::from_utf8(s) {
@@ -2161,6 +2213,10 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
             b.clear();
             paradox
         }
+        ("clear", Value::Hash(h)) => {
+            h.clear();
+            paradox
+        }
         ("clear", Value::Map(mp)) => {
             mp.entries.clear();
             paradox
@@ -2185,6 +2241,15 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
                 return Ok(paradox);
             }
             Eval::Value(ar.items.remove(i as usize))
+        }
+        ("remove", Value::Hash(h)) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`remove` は鍵を一つ取る", span);
+            };
+            match h.remove(&k) {
+                Some(v) => Eval::Value(v),
+                None => paradox,
+            }
         }
         ("remove", Value::Map(mp)) => {
             let Some(k) = args.first().and_then(|v| v.as_key()) else {
@@ -2225,7 +2290,7 @@ pub fn get_field(v: &Value, name: &str) -> Option<Value> {
 
 pub fn get_index(base: &Value, i: &Value) -> Option<Value> {
     let step = match base {
-        Value::Map(_) => Step::Key(i.as_key()?),
+        Value::Map(_) | Value::Hash(_) => Step::Key(i.as_key()?),
         _ => Step::Index(i.as_int()?),
     };
     step_get(base, &step)

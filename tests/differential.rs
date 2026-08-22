@@ -271,3 +271,27 @@ fn s16_括弧の領域は自分の底を持つ() {
     同じ("1 + ( 2 ; 3 )");
     同じ("var c : u8 := 50; 1 + ((c - 48) -> i64)");
 }
+
+/// `hash` は木を辿る実装と VM で同じでなければならない（C-98）。
+#[test]
+fn hashも二つの実装で一致する() {
+    同じ("var h := new i64 i64 hash ( ); h.len()");
+    同じ("var h := new i64 i64 hash ( ); h[5] := 7; h[5]");
+    同じ("var h := new i64 i64 hash ( ); h[5] := 7; h[9] := 3; h[5] * 100 + h[9] * 10 + h.len()");
+    同じ("var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h[2]");
+    同じ("var h : i64 i64 hash := ( 1 => 10 ); h[9]");
+    同じ("var h : i64 i64 hash := ( 1 => 10 ); h[9] ?? 42");
+    // **入れた順**である
+    同じ("var h := new i64 i64 hash ( ); h[9] := 1; h[3] := 2; h[7] := 3; var k := h.keys(); k[0] * 100 + k[1] * 10 + k[2]");
+    同じ("var h : i64 i64 hash := ( 1 => 1, 5 => 5 ); h.has(5)");
+    同じ("var h : i64 i64 hash := ( 1 => 1 ); h.has(9)");
+    同じ("var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h.remove(1) + h.len()");
+    同じ("var h : i64 i64 hash := ( 1 => 10 ); h.remove(9)");
+    同じ("var h : i64 i64 hash := ( 1 => 1, 2 => 2 ); h.remove(2) ?? 0; h[2] ?? 7");
+    同じ("var h : i64 i64 hash := ( 1 => 1, 2 => 2 ); h.clear(); h.len()");
+    同じ("var a : i64 i64 hash := ( 1 => 10 ); var b := a; b[1] := 99; a[1] * 100 + b[1]");
+    同じ("var h : str i64 hash := ( \"a\" => 1, \"bb\" => 2 ); h[\"bb\"] * 10 + h.len()");
+    // 抜いてから入れ直すと**末尾へ回る**
+    同じ("var h := new i64 i64 hash ( ); h[1] := 1; h[2] := 2; h.remove(1) ?? 0; h[1] := 9; var k := h.keys(); k[0] * 10 + k[1]");
+    同じ("var h := new i64 i64 hash ( ); var i := 0; while (i < 100) { h[i * 7] := i; i += 1; }; h.len() + h[7 * 40]");
+}

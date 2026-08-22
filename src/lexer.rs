@@ -44,6 +44,7 @@ pub enum Tok {
     False,
     Array,
     Map,
+    Hash,
     Alias,
 
     // --- 括弧と区切り ---
@@ -255,6 +256,7 @@ impl<'a> Lexer<'a> {
             "outward" => Tok::Outward,
             "array" => Tok::Array,
             "map" => Tok::Map,
+            "hash" => Tok::Hash,
             "alias" => Tok::Alias,
             // **真偽の literal。`u1` である**（C-97）
             "true" => Tok::True,

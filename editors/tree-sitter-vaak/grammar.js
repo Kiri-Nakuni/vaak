@@ -58,6 +58,7 @@ module.exports = grammar({
       'mod',
       'array',
       'map',
+      'hash',
       'alias',
     ),
 

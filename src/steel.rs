@@ -107,6 +107,8 @@ pub struct Steel {
     decls: Vec<String>,
     /// 型ごとの写す関数。**一度だけ出す**
     copy_fns: Vec<String>,
+    /// **文脈が求めている型**（C-94）。写像・配列のリテラルは自分では型を決められない
+    want: Option<ValueType>,
     /// 構造体の宣言。**欄の並びが位置を決める**
     structs: HashMap<String, StructDecl>,
     /// 包み型（S-2）。名前 → 包んだ型
@@ -138,7 +140,11 @@ fn ity(t: &ValueType) -> String {
         // **方言が足した基底型**（S-20）。符号 1・指数 15・仮数 64 ビット
         ValueType::F80 => "x86_fp80".into(),
         // **集合体は場所を指す**
-        ValueType::Array(_) | ValueType::Str | ValueType::Named(_) => "ptr".into(),
+        ValueType::Array(_)
+        | ValueType::Str
+        | ValueType::Map(..)
+        | ValueType::Hash(..)
+        | ValueType::Named(_) => "ptr".into(),
         _ => format!("i{}", width(t).unwrap_or(64)),
     }
 }
@@ -150,7 +156,24 @@ fn is_float(t: &ValueType) -> bool {
 /// **場に置かれるもの。** 値そのものではなく、場所を指す。
 fn is_heap(t: &ValueType) -> bool {
     // **`Named` はここに来る時点で構造体である**——包みは `resolve` で剥がしてある
-    matches!(t, ValueType::Array(_) | ValueType::Str | ValueType::Named(_))
+    matches!(
+        t,
+        ValueType::Array(_)
+            | ValueType::Str
+            | ValueType::Map(..)
+            | ValueType::Hash(..)
+            | ValueType::Named(_)
+    )
+}
+
+/// **鍵の値で飛ぶ連想**（C-98）。写像とは頭の形も並びの約束も違う
+fn is_hash(t: &ValueType) -> bool {
+    matches!(t, ValueType::Hash(..))
+}
+
+/// **写像だけは頭の形が違う。** 個数・容量・鍵の並び・値の並びの四つを持つ
+fn is_map(t: &ValueType) -> bool {
+    matches!(t, ValueType::Map(..))
 }
 
 /// 集合体の要素の型。`str` は `u8 array` を包んだもの（C-77）。
@@ -234,6 +257,7 @@ impl Steel {
             strings: Vec::new(),
             decls: Vec::new(),
             copy_fns: Vec::new(),
+            want: None,
             structs: HashMap::new(),
             wraps: HashMap::new(),
             struct_tys: Vec::new(),
@@ -753,6 +777,7 @@ impl Steel {
             ValueType::Str => "str".into(),
             ValueType::Array(e) => format!("a{}", Self::mangle(e)),
             ValueType::Map(k, v) => format!("m{}_{}", Self::mangle(k), Self::mangle(v)),
+            ValueType::Hash(k, v) => format!("h{}_{}", Self::mangle(k), Self::mangle(v)),
             ValueType::Named(n) => format!("n{n}"),
         }
     }
@@ -767,6 +792,98 @@ impl Steel {
     fn copy_fn(&mut self, ty: &ValueType) -> String {
         // **包みを剥がしてから見る**（S-2）。剥がさないと構造体と間違える
         let ty = &self.resolve(ty);
+        // **hash も頭の形が違う。** 並びと bucket を持っている
+        if let ValueType::Hash(kt, vt) = ty {
+            let (kt, vt) = ((**kt).clone(), (**vt).clone());
+            let fname = format!("@vaak.copy.{}", type_tag(ty));
+            if self.copy_fns.contains(&fname) {
+                return fname;
+            }
+            self.copy_fns.push(fname.clone());
+            let ht = ValueType::Hash(Box::new(kt.clone()), Box::new(vt.clone()));
+            let stem = match self.hash_fns(&ht) {
+                Ok(x) => x,
+                Err(_) => return fname,
+            };
+            let ent = self.hash_ent_ty(&ht);
+            let (ki, vi) = (ity(&kt), ity(&vt));
+            let kcopy = if is_heap(&kt) {
+                let f = self.copy_fn(&kt);
+                format!("  %kc = call ptr {f}(ptr %k)\n")
+            } else {
+                format!("  %kc = bitcast {ki} %k to {ki}\n")
+            };
+            let vcopy = if is_heap(&vt) {
+                let f = self.copy_fn(&vt);
+                format!("  %vc = call ptr {f}(ptr %v)\n")
+            } else {
+                format!("  %vc = bitcast {vi} %v to {vi}\n")
+            };
+            // **入れ直す。** 並びも鎖も作り直るので、穴が消えて順序は保たれる
+            let body = format!(
+                "define internal ptr {fname}(ptr %p) {{\n\
+                 entry:\n  \
+                 %q = call ptr @vaak.hash.new()\n  \
+                 %ng = getelementptr i8, ptr %p, i64 8\n  \
+                 %n = load i64, ptr %ng\n  \
+                 %eg = getelementptr i8, ptr %p, i64 24\n  \
+                 %ents = load ptr, ptr %eg\n  \
+                 br label %head\n\
+                 head:\n  \
+                 %i = phi i64 [ 0, %entry ], [ %i2, %next ]\n  \
+                 %go = icmp slt i64 %i, %n\n  \
+                 br i1 %go, label %body, label %done\n\
+                 body:\n  \
+                 %lp = getelementptr {ent}, ptr %ents, i64 %i, i32 3\n  \
+                 %lv = load i8, ptr %lp\n  \
+                 %alive = icmp ne i8 %lv, 0\n  \
+                 br i1 %alive, label %take, label %next\n\
+                 take:\n  \
+                 %kp = getelementptr {ent}, ptr %ents, i64 %i, i32 0\n  \
+                 %k = load {ki}, ptr %kp\n  \
+                 %vp = getelementptr {ent}, ptr %ents, i64 %i, i32 1\n  \
+                 %v = load {vi}, ptr %vp\n\
+                 {kcopy}{vcopy}  \
+                 call void {stem}.put(ptr %q, {ki} %kc, {vi} %vc)\n  \
+                 br label %next\n\
+                 next:\n  \
+                 %i2 = add i64 %i, 1\n  \
+                 br label %head\n\
+                 done:\n  ret ptr %q\n\
+                 }}"
+            );
+            self.head_global(&body);
+            return fname;
+        }
+        // **写像は頭の形が違う。** 並びを二つ持っている
+        if let ValueType::Map(kt, vt) = ty {
+            let (kt, vt) = ((**kt).clone(), (**vt).clone());
+            let fname = format!("@vaak.copy.{}", type_tag(ty));
+            if self.copy_fns.contains(&fname) {
+                return fname;
+            }
+            self.copy_fns.push(fname.clone());
+            let (ks, vs) = (elem_size(&kt), elem_size(&vt));
+            let mut body = format!(
+                "define internal ptr {fname}(ptr %p) {{\nentry:\n  %q = call ptr @vaak.map.clone(ptr %p, i64 {ks}, i64 {vs})\n  %n = load i64, ptr %q\n"
+            );
+            // 場を持つ鍵・値は**一つずつ深く写す**
+            for (which, ty2, sz) in
+                [("keys", kt.clone(), ks), ("vals", vt.clone(), vs)]
+            {
+                let _ = sz;
+                if !is_heap(&ty2) {
+                    continue;
+                }
+                let inner = self.copy_fn(&ty2);
+                body.push_str(&format!(
+                    "  %d{which} = call ptr @vaak.map.{which}(ptr %q)\n  br label %h{which}\n                     h{which}:\n  %i{which} = phi i64 [ 0, %entry ], [ %j{which}, %b{which} ]\n                       %g{which} = icmp slt i64 %i{which}, %n\n                       br i1 %g{which}, label %b{which}, label %e{which}\n                     b{which}:\n                       %p{which} = getelementptr ptr, ptr %d{which}, i64 %i{which}\n                       %v{which} = load ptr, ptr %p{which}\n                       %c{which} = call ptr {inner}(ptr %v{which})\n                       store ptr %c{which}, ptr %p{which}\n                       %j{which} = add i64 %i{which}, 1\n  br label %h{which}\n                     e{which}:\n"
+                ));
+            }
+            body.push_str("  ret ptr %q\n}");
+            self.head_global(&body);
+            return fname;
+        }
         // **構造体は欄ごとに写す**
         if let ValueType::Named(name) = ty {
             let name = name.clone();
@@ -880,6 +997,24 @@ impl Steel {
         let CtorArgs::Positional(a) = args else {
             return err("集合体は位置で構築する", span);
         };
+        // `new K V hash ( )` — **空**
+        if is_hash(&t) {
+            if !a.is_empty() {
+                return err("`new … hash` は空でなければならない", span);
+            }
+            self.hash_fns(&t)?;
+            let p = self.tmp();
+            self.emit(&format!("{p} = call ptr @vaak.hash.new()"));
+            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+        }
+        // `new K V map ( )` — **空。** 中身は写像リテラルで書く
+        if is_map(&t) {
+            if !a.is_empty() {
+                return err("`new … map` は空でなければならない（中身は `( 鍵 => 値 )` で書く）", span);
+            }
+            let p = self.map_new();
+            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+        }
         let el = elem_of(&t).unwrap_or(ValueType::I64);
         // `new T array ( )` — 空
         let Some(nx) = a.first() else {
@@ -1212,6 +1347,52 @@ impl Steel {
                 if !is_heap(&b.ty) {
                     return err("添字を取れるのは集合体だけ", base.span);
                 }
+                // **hash も鍵で引く。** 引き方が違うだけ
+                if is_hash(&b.ty) {
+                    let ValueType::Hash(kt, vt) = &b.ty else { unreachable!() };
+                    let (kt, vt) = ((**kt).clone(), (**vt).clone());
+                    let stem = self.hash_fns(&b.ty.clone())?;
+                    let kc = self.conv(&i.v.clone(), &i.ty.clone(), &kt);
+                    let at = self.tmp();
+                    self.emit(&format!(
+                        "{at} = call i64 {stem}.find(ptr {}, {} {kc})",
+                        b.v,
+                        ity(&kt)
+                    ));
+                    let hit = self.tmp();
+                    self.emit(&format!("{hit} = icmp sge i64 {at}, 0"));
+                    let vty = ity(&vt);
+                    let slot = self.alloca(&vty);
+                    let zero = self.zero_of(&vt);
+                    self.emit(&format!("store {vty} {zero}, ptr {slot}"));
+                    let take = self.label("hget.hit");
+                    let after = self.label("hget.after");
+                    self.cbr(&hit, &take, &after);
+                    self.place(&take);
+                    let ents = self.hash_entries(&b.v.clone());
+                    let ent = self.hash_ent_ty(&b.ty.clone());
+                    let vp = self.tmp();
+                    self.emit(&format!(
+                        "{vp} = getelementptr {ent}, ptr {ents}, i64 {at}, i32 1"
+                    ));
+                    let got = self.tmp();
+                    self.emit(&format!("{got} = load {vty}, ptr {vp}"));
+                    self.emit(&format!("store {vty} {got}, ptr {slot}"));
+                    self.br(&after);
+                    self.place(&after);
+                    let out = self.tmp();
+                    self.emit(&format!("{out} = load {vty}, ptr {slot}"));
+                    let ok1 = self.both_ok(&b.ok, &i.ok);
+                    let ok = self.both_ok(&ok1, &hit);
+                    return Ok(Some(Val { ok, v: out, ty: vt }));
+                }
+                // **写像は添字ではなく鍵で引く**
+                if is_map(&b.ty) {
+                    let got = self.map_get(&b.v.clone(), &b.ty.clone(), i.clone(), e.span)?;
+                    let ok1 = self.both_ok(&b.ok, &i.ok);
+                    let ok = self.both_ok(&ok1, &got.ok);
+                    return Ok(Some(Val { ok, v: got.v, ty: got.ty }));
+                }
                 let idx = self.widen64(&i);
                 let (inb, safe) = self.bounds(&b.v.clone(), &idx);
                 let g = self.elem_ptr(&b.v.clone(), &safe, &b.ty.clone());
@@ -1328,7 +1509,12 @@ impl Steel {
                     let BindInit::Value(init) = &b.init else {
                         return err("`&=` は STEEL がまだ扱えない", b.span);
                     };
-                    let v = self.expr(init)?;
+                    // **注釈があるなら、それが求める型である**（C-94）
+                    let saved = self.want.take();
+                    self.want = b.ty.as_ref().map(|t| self.resolve(&t.value));
+                    let v = self.expr(init);
+                    self.want = saved;
+                    let v = v?;
                     let Some(v) = v else {
                         return err("束縛する値が無い", b.span);
                     };
@@ -1387,6 +1573,40 @@ impl Steel {
                     };
                     if !is_heap(&b.ty) {
                         return err("添字を取れるのは集合体だけ", base.span);
+                    }
+                    // **hash も枠を持たない**
+                    if is_hash(&b.ty) {
+                        if *op != AssignOp::Set {
+                            return err("hash への複合代入は STEEL がまだ扱えない", e.span);
+                        }
+                        let ValueType::Hash(kt, vt) = &b.ty else { unreachable!() };
+                        let (kt, vt) = ((**kt).clone(), (**vt).clone());
+                        let stem = self.hash_fns(&b.ty.clone())?;
+                        let kc = if is_heap(&kt) {
+                            self.deep_copy(&i.v.clone(), &kt)
+                        } else {
+                            self.conv(&i.v.clone(), &i.ty.clone(), &kt)
+                        };
+                        let vc = if is_heap(&vt) {
+                            self.deep_copy(&r.v.clone(), &vt)
+                        } else {
+                            self.conv(&r.v.clone(), &r.ty.clone(), &vt)
+                        };
+                        self.emit(&format!(
+                            "call void {stem}.put(ptr {}, {} {kc}, {} {vc})",
+                            b.v,
+                            ity(&kt),
+                            ity(&vt)
+                        ));
+                        return Ok(None);
+                    }
+                    // **写像は枠を持たない。** 無い鍵は挿す
+                    if is_map(&b.ty) {
+                        if *op != AssignOp::Set {
+                            return err("写像への複合代入は STEEL がまだ扱えない", e.span);
+                        }
+                        self.map_put(&b.v.clone(), &b.ty.clone(), i, r, e.span)?;
+                        return Ok(None);
                     }
                     let idx = self.widen64(&i);
                     let (inb, safe) = self.bounds(&b.v.clone(), &idx);
@@ -1453,6 +1673,58 @@ impl Steel {
                 Ok(None)
             }
 
+            // `( 鍵 => 値, … )` — **文脈の型が要る**（C-94）
+            E::MapLit(pairs) => {
+                let Some(t) = self.want.clone() else {
+                    return err("写像リテラルには型が要る", e.span);
+                };
+                let t = self.resolve(&t);
+                // **同じリテラルが両方に使える。** 文脈の型が決める（C-98）
+                if is_hash(&t) {
+                    let ValueType::Hash(kt, vt) = &t else { unreachable!() };
+                    let (kt, vt) = ((**kt).clone(), (**vt).clone());
+                    let stem = self.hash_fns(&t)?;
+                    let h = self.tmp();
+                    self.emit(&format!("{h} = call ptr @vaak.hash.new()"));
+                    for (k, v) in pairs {
+                        let kv = self.expr(k)?;
+                        let vv = self.expr(v)?;
+                        let (Some(kv), Some(vv)) = (kv, vv) else {
+                            return err("hash の要素に値が無い", e.span);
+                        };
+                        let kc = if is_heap(&kt) {
+                            self.deep_copy(&kv.v.clone(), &kt)
+                        } else {
+                            self.conv(&kv.v.clone(), &kv.ty.clone(), &kt)
+                        };
+                        let vc = if is_heap(&vt) {
+                            self.deep_copy(&vv.v.clone(), &vt)
+                        } else {
+                            self.conv(&vv.v.clone(), &vv.ty.clone(), &vt)
+                        };
+                        self.emit(&format!(
+                            "call void {stem}.put(ptr {h}, {} {kc}, {} {vc})",
+                            ity(&kt),
+                            ity(&vt)
+                        ));
+                    }
+                    return Ok(Some(Val { ok: "true".into(), v: h, ty: t }));
+                }
+                if !is_map(&t) {
+                    return err("写像リテラルに写像でない型が求められている", e.span);
+                }
+                let m = self.map_new();
+                for (k, v) in pairs {
+                    let kv = self.expr(k)?;
+                    let vv = self.expr(v)?;
+                    let (Some(kv), Some(vv)) = (kv, vv) else {
+                        return err("写像の要素に値が無い", e.span);
+                    };
+                    self.map_put(&m, &t, kv, vv, e.span)?;
+                }
+                Ok(Some(Val { ok: "true".into(), v: m, ty: t }))
+            }
+
             E::If(i) => self.if_expr(i, e.span).map(Some),
             E::Loop(body) => self.loop_expr(None, body, e.span).map(Some),
             E::While { cond, body } => self.loop_expr(Some(cond), body, e.span).map(Some),
@@ -1495,6 +1767,479 @@ impl Steel {
 
             _ => err("STEEL がまだ扱えない構文", e.span),
         }
+    }
+
+    /// 鍵の型ごとの二分探索。返すのは（置き場、見つかったか）。
+    ///
+    /// **見つからなくても置き場を返す**——そこへ挿せば順序が保たれる。
+    /// 引くのと挿すのが同じ一度の探索で済む。
+    fn map_find_fn(&mut self, kty: &ValueType) -> R<String> {
+        let tag = type_tag(kty);
+        let name = format!("@vaak.find.{tag}");
+        if self.copy_fns.contains(&name) {
+            return Ok(name);
+        }
+        self.copy_fns.push(name.clone());
+        let kt = ity(kty);
+        // 鍵を比べて -1／0／1 を出す
+        let cmp = if matches!(kty, ValueType::Str) {
+            "  %c = call i32 @vaak.strcmp(ptr %kv, ptr %k)\n".to_string()
+        } else if is_float(kty) {
+            // **浮動小数の鍵は断る。** 参照実装はビット列で並べており、
+            // 幅ごとに違う並びになる。合わせ切れないものを黙って違えない
+            return err("STEEL は浮動小数を写像の鍵にできない", Span::default());
+        } else {
+            let (lt, gt) = if signed(kty) { ("slt", "sgt") } else { ("ult", "ugt") };
+            format!(
+                "  %lt = icmp {lt} {kt} %kv, %k\n  \
+                 %gt = icmp {gt} {kt} %kv, %k\n  \
+                 %a = select i1 %lt, i32 -1, i32 0\n  \
+                 %c = select i1 %gt, i32 1, i32 %a\n"
+            )
+        };
+        let body = format!(
+            "define internal {{ i64, i1 }} {name}(ptr %m, {kt} %k) {{\n\
+             entry:\n  \
+             %n = load i64, ptr %m\n  \
+             %keys = call ptr @vaak.map.keys(ptr %m)\n  \
+             br label %head\n\
+             head:\n  \
+             %lo = phi i64 [ 0, %entry ], [ %lo2, %step ]\n  \
+             %hi = phi i64 [ %n, %entry ], [ %hi2, %step ]\n  \
+             %go = icmp slt i64 %lo, %hi\n  \
+             br i1 %go, label %body, label %miss\n\
+             body:\n  \
+             %sum = add i64 %lo, %hi\n  \
+             %mid = lshr i64 %sum, 1\n  \
+             %kp = getelementptr {kt}, ptr %keys, i64 %mid\n  \
+             %kv = load {kt}, ptr %kp\n\
+             {cmp}  \
+             %eq = icmp eq i32 %c, 0\n  \
+             br i1 %eq, label %hit, label %step\n\
+             step:\n  \
+             %less = icmp slt i32 %c, 0\n  \
+             %mid1 = add i64 %mid, 1\n  \
+             %lo2 = select i1 %less, i64 %mid1, i64 %lo\n  \
+             %hi2 = select i1 %less, i64 %hi, i64 %mid\n  \
+             br label %head\n\
+             hit:\n  \
+             %h1 = insertvalue {{ i64, i1 }} undef, i64 %mid, 0\n  \
+             %h2 = insertvalue {{ i64, i1 }} %h1, i1 true, 1\n  \
+             ret {{ i64, i1 }} %h2\n\
+             miss:\n  \
+             %m1 = insertvalue {{ i64, i1 }} undef, i64 %lo, 0\n  \
+             %m2 = insertvalue {{ i64, i1 }} %m1, i1 false, 1\n  \
+             ret {{ i64, i1 }} %m2\n\
+             }}"
+        );
+        self.head_global(&body);
+        Ok(name)
+    }
+
+    /// 零。**型ごとに書き方が違う**
+    fn zero_of(&mut self, t: &ValueType) -> String {
+        if is_heap(t) {
+            "null".into()
+        } else if matches!(t, ValueType::F80) {
+            "0xK00000000000000000000".into()
+        } else if is_float(t) {
+            "0.0".into()
+        } else {
+            "0".into()
+        }
+    }
+
+    fn hash_entries(&mut self, h: &str) -> String {
+        let g = self.tmp();
+        self.emit(&format!("{g} = getelementptr i8, ptr {h}, i64 24"));
+        let e = self.tmp();
+        self.emit(&format!("{e} = load ptr, ptr {g}"));
+        e
+    }
+
+    fn hash_ent_ty(&mut self, ht: &ValueType) -> String {
+        let ValueType::Hash(k, v) = ht else { return "%err".into() };
+        format!("%hent.{}_{}", type_tag(k), type_tag(v))
+    }
+
+    /// `hash` の一式を出す（C-98）。**鍵と値の組ごとに一度だけ。**
+    ///
+    /// 連鎖法である。開番地法より**抜くのが素直**で、
+    /// 並びが密なので入れた順もそのまま取れる。
+    fn hash_fns(&mut self, ht: &ValueType) -> R<String> {
+        let ValueType::Hash(kt, vt) = ht else {
+            return err("hash ではない", Span::default());
+        };
+        let (kt, vt) = ((**kt).clone(), (**vt).clone());
+        let tag = format!("{}_{}", type_tag(&kt), type_tag(&vt));
+        let stem = format!("@vaak.h.{tag}");
+        if self.copy_fns.contains(&stem) {
+            return Ok(stem);
+        }
+        self.copy_fns.push(stem.clone());
+        let (ki, vi) = (ity(&kt), ity(&vt));
+        let ent = format!("%hent.{tag}");
+        // **並べ方は LLVM に決めさせる。** 揃えを自分で数えない
+        self.head_global(&format!("{ent} = type {{ {ki}, {vi}, i64, i8 }}"));
+
+        // 鍵を数にする／比べる
+        let (hash_call, eq) = if matches!(kt, ValueType::Str) {
+            (
+                "  %hv = call i64 @vaak.hash.str(ptr %k)\n".to_string(),
+                "  %c = call i32 @vaak.strcmp(ptr %ek, ptr %k)\n  %same = icmp eq i32 %c, 0\n"
+                    .to_string(),
+            )
+        } else if is_float(&kt) {
+            // **浮動小数は鍵にしない**（`map` と同じ理由）
+            return err("STEEL は浮動小数を hash の鍵にできない", Span::default());
+        } else {
+            let w = width(&kt).unwrap_or(64);
+            let widen = if w >= 64 {
+                "  %kw = bitcast i64 %k to i64\n".to_string()
+            } else if signed(&kt) {
+                format!("  %kw = sext {ki} %k to i64\n")
+            } else {
+                format!("  %kw = zext {ki} %k to i64\n")
+            };
+            (
+                format!("{widen}  %hv = call i64 @vaak.hash.i64(i64 %kw)\n"),
+                format!("  %same = icmp eq {ki} %ek, %k\n"),
+            )
+        };
+
+        // 引く：要素の位置か -1
+        self.head_global(&format!(
+            "define internal i64 {stem}.find(ptr %h, {ki} %k) {{\n\
+             entry:\n  \
+             %nbg = getelementptr i8, ptr %h, i64 40\n  \
+             %nbk = load i64, ptr %nbg\n  \
+             %empty = icmp eq i64 %nbk, 0\n  \
+             br i1 %empty, label %none, label %go\n\
+             go:\n\
+             {hash_call}  \
+             %mask = sub i64 %nbk, 1\n  \
+             %slot = and i64 %hv, %mask\n  \
+             %bg = getelementptr i8, ptr %h, i64 32\n  \
+             %buk = load ptr, ptr %bg\n  \
+             %sp = getelementptr i64, ptr %buk, i64 %slot\n  \
+             %first = load i64, ptr %sp\n  \
+             %eg = getelementptr i8, ptr %h, i64 24\n  \
+             %ents = load ptr, ptr %eg\n  \
+             br label %walk\n\
+             walk:\n  \
+             %i = phi i64 [ %first, %go ], [ %next, %step ]\n  \
+             %end = icmp slt i64 %i, 0\n  \
+             br i1 %end, label %none, label %look\n\
+             look:\n  \
+             %ekp = getelementptr {ent}, ptr %ents, i64 %i, i32 0\n  \
+             %ek = load {ki}, ptr %ekp\n\
+             {eq}  \
+             br i1 %same, label %hit, label %step\n\
+             step:\n  \
+             %np = getelementptr {ent}, ptr %ents, i64 %i, i32 2\n  \
+             %next = load i64, ptr %np\n  \
+             br label %walk\n\
+             hit:\n  ret i64 %i\n\
+             none:\n  ret i64 -1\n\
+             }}"
+        ));
+
+        // 大きくする：並びを倍にし、bucket を組み直す
+        self.head_global(&format!(
+            "define internal void {stem}.grow(ptr %h) {{\n\
+             entry:\n  \
+             %cg = getelementptr i8, ptr %h, i64 16\n  \
+             %cap = load i64, ptr %cg\n  \
+             %tw = shl i64 %cap, 1\n  \
+             %sm = icmp slt i64 %tw, 8\n  \
+             %cap2 = select i1 %sm, i64 8, i64 %tw\n  \
+             %sz = getelementptr {ent}, ptr null, i64 1\n  \
+             %esz = ptrtoint ptr %sz to i64\n  \
+             %bytes = mul i64 %cap2, %esz\n  \
+             %ne = call ptr @vaak.alloc(i64 %bytes)\n  \
+             %eg = getelementptr i8, ptr %h, i64 24\n  \
+             %oe = load ptr, ptr %eg\n  \
+             %ng = getelementptr i8, ptr %h, i64 8\n  \
+             %n = load i64, ptr %ng\n  \
+             %ob = mul i64 %n, %esz\n  \
+             %has = icmp sgt i64 %n, 0\n  \
+             br i1 %has, label %cp, label %tab\n\
+             cp:\n  \
+             call void @llvm.memcpy.p0.p0.i64(ptr %ne, ptr %oe, i64 %ob, i1 false)\n  \
+             br label %tab\n\
+             tab:\n  \
+             store ptr %ne, ptr %eg\n  \
+             store i64 %cap2, ptr %cg\n  \
+             %nbk = shl i64 %cap2, 1\n  \
+             %bb = mul i64 %nbk, 8\n  \
+             %nb = call ptr @vaak.alloc(i64 %bb)\n  \
+             %bg = getelementptr i8, ptr %h, i64 32\n  \
+             store ptr %nb, ptr %bg\n  \
+             %kg = getelementptr i8, ptr %h, i64 40\n  \
+             store i64 %nbk, ptr %kg\n  \
+             br label %clr\n\
+             clr:\n  \
+             %ci = phi i64 [ 0, %tab ], [ %ci2, %clrb ]\n  \
+             %cgo = icmp slt i64 %ci, %nbk\n  \
+             br i1 %cgo, label %clrb, label %relink\n\
+             clrb:\n  \
+             %cp2 = getelementptr i64, ptr %nb, i64 %ci\n  \
+             store i64 -1, ptr %cp2\n  \
+             %ci2 = add i64 %ci, 1\n  \
+             br label %clr\n\
+             relink:\n  \
+             %ri = phi i64 [ 0, %clr ], [ %ri2, %rnext ]\n  \
+             %rgo = icmp slt i64 %ri, %n\n  \
+             br i1 %rgo, label %rbody, label %rdone\n\
+             rbody:\n  \
+             %lp = getelementptr {ent}, ptr %ne, i64 %ri, i32 3\n  \
+             %lv = load i8, ptr %lp\n  \
+             %alive = icmp ne i8 %lv, 0\n  \
+             br i1 %alive, label %rlink, label %rnext\n\
+             rlink:\n  \
+             %rkp = getelementptr {ent}, ptr %ne, i64 %ri, i32 0\n  \
+             %k = load {ki}, ptr %rkp\n\
+             {hash_call}  \
+             %rmask = sub i64 %nbk, 1\n  \
+             %rslot = and i64 %hv, %rmask\n  \
+             %rsp = getelementptr i64, ptr %nb, i64 %rslot\n  \
+             %head = load i64, ptr %rsp\n  \
+             %rnp = getelementptr {ent}, ptr %ne, i64 %ri, i32 2\n  \
+             store i64 %head, ptr %rnp\n  \
+             store i64 %ri, ptr %rsp\n  \
+             br label %rnext\n\
+             rnext:\n  \
+             %ri2 = add i64 %ri, 1\n  \
+             br label %relink\n\
+             rdone:\n  ret void\n\
+             }}"
+        ));
+
+        // 入れる：あれば値を替え、無ければ末尾へ足して鎖に繋ぐ
+        self.head_global(&format!(
+            "define internal void {stem}.put(ptr %h, {ki} %k, {vi} %v) {{\n\
+             entry:\n  \
+             %at = call i64 {stem}.find(ptr %h, {ki} %k)\n  \
+             %miss = icmp slt i64 %at, 0\n  \
+             br i1 %miss, label %new, label %set\n\
+             set:\n  \
+             %eg0 = getelementptr i8, ptr %h, i64 24\n  \
+             %e0 = load ptr, ptr %eg0\n  \
+             %vp0 = getelementptr {ent}, ptr %e0, i64 %at, i32 1\n  \
+             store {vi} %v, ptr %vp0\n  \
+             ret void\n\
+             new:\n  \
+             %ng = getelementptr i8, ptr %h, i64 8\n  \
+             %n = load i64, ptr %ng\n  \
+             %cg = getelementptr i8, ptr %h, i64 16\n  \
+             %cap = load i64, ptr %cg\n  \
+             %full = icmp sge i64 %n, %cap\n  \
+             br i1 %full, label %big, label %ok\n\
+             big:\n  \
+             call void {stem}.grow(ptr %h)\n  \
+             br label %ok\n\
+             ok:\n  \
+             %eg = getelementptr i8, ptr %h, i64 24\n  \
+             %ents = load ptr, ptr %eg\n  \
+             %kp = getelementptr {ent}, ptr %ents, i64 %n, i32 0\n  \
+             store {ki} %k, ptr %kp\n  \
+             %vp = getelementptr {ent}, ptr %ents, i64 %n, i32 1\n  \
+             store {vi} %v, ptr %vp\n  \
+             %lp = getelementptr {ent}, ptr %ents, i64 %n, i32 3\n  \
+             store i8 1, ptr %lp\n  \
+             %kg = getelementptr i8, ptr %h, i64 40\n  \
+             %nbk = load i64, ptr %kg\n\
+             {hash_call}  \
+             %mask = sub i64 %nbk, 1\n  \
+             %slot = and i64 %hv, %mask\n  \
+             %bg = getelementptr i8, ptr %h, i64 32\n  \
+             %buk = load ptr, ptr %bg\n  \
+             %sp = getelementptr i64, ptr %buk, i64 %slot\n  \
+             %head = load i64, ptr %sp\n  \
+             %np = getelementptr {ent}, ptr %ents, i64 %n, i32 2\n  \
+             store i64 %head, ptr %np\n  \
+             store i64 %n, ptr %sp\n  \
+             %n1 = add i64 %n, 1\n  \
+             store i64 %n1, ptr %ng\n  \
+             %live = load i64, ptr %h\n  \
+             %live1 = add i64 %live, 1\n  \
+             store i64 %live1, ptr %h\n  \
+             ret void\n\
+             }}"
+        ));
+
+        // 抜く：鎖から外して穴にする
+        self.head_global(&format!(
+            "define internal {{ {vi}, i1 }} {stem}.del(ptr %h, {ki} %k) {{\n\
+             entry:\n  \
+             %at = call i64 {stem}.find(ptr %h, {ki} %k)\n  \
+             %miss = icmp slt i64 %at, 0\n  \
+             br i1 %miss, label %none, label %kill\n\
+             kill:\n  \
+             %eg = getelementptr i8, ptr %h, i64 24\n  \
+             %ents = load ptr, ptr %eg\n  \
+             %vp = getelementptr {ent}, ptr %ents, i64 %at, i32 1\n  \
+             %v = load {vi}, ptr %vp\n  \
+             %lp = getelementptr {ent}, ptr %ents, i64 %at, i32 3\n  \
+             store i8 0, ptr %lp\n  \
+             %kg = getelementptr i8, ptr %h, i64 40\n  \
+             %nbk = load i64, ptr %kg\n\
+             {hash_call}  \
+             %mask = sub i64 %nbk, 1\n  \
+             %slot = and i64 %hv, %mask\n  \
+             %bg = getelementptr i8, ptr %h, i64 32\n  \
+             %buk = load ptr, ptr %bg\n  \
+             %sp = getelementptr i64, ptr %buk, i64 %slot\n  \
+             %first = load i64, ptr %sp\n  \
+             %isfirst = icmp eq i64 %first, %at\n  \
+             br i1 %isfirst, label %unhead, label %walk\n\
+             unhead:\n  \
+             %mynp = getelementptr {ent}, ptr %ents, i64 %at, i32 2\n  \
+             %mynext = load i64, ptr %mynp\n  \
+             store i64 %mynext, ptr %sp\n  \
+             br label %out\n\
+             walk:\n  \
+             %p = phi i64 [ %first, %kill ], [ %pn, %pstep ]\n  \
+             %pend = icmp slt i64 %p, 0\n  \
+             br i1 %pend, label %out, label %pcheck\n\
+             pcheck:\n  \
+             %pnp = getelementptr {ent}, ptr %ents, i64 %p, i32 2\n  \
+             %pn = load i64, ptr %pnp\n  \
+             %found = icmp eq i64 %pn, %at\n  \
+             br i1 %found, label %unlink, label %pstep\n\
+             unlink:\n  \
+             %anp = getelementptr {ent}, ptr %ents, i64 %at, i32 2\n  \
+             %an = load i64, ptr %anp\n  \
+             store i64 %an, ptr %pnp\n  \
+             br label %out\n\
+             pstep:\n  \
+             br label %walk\n\
+             out:\n  \
+             %live = load i64, ptr %h\n  \
+             %live1 = sub i64 %live, 1\n  \
+             store i64 %live1, ptr %h\n  \
+             %r1 = insertvalue {{ {vi}, i1 }} undef, {vi} %v, 0\n  \
+             %r2 = insertvalue {{ {vi}, i1 }} %r1, i1 true, 1\n  \
+             ret {{ {vi}, i1 }} %r2\n\
+             none:\n  \
+             %z1 = insertvalue {{ {vi}, i1 }} undef, {vi} {zero}, 0\n  \
+             %z2 = insertvalue {{ {vi}, i1 }} %z1, i1 false, 1\n  \
+             ret {{ {vi}, i1 }} %z2\n\
+             }}",
+            zero = if is_heap(&vt) {
+                "null".to_string()
+            } else if is_float(&vt) {
+                if matches!(vt, ValueType::F80) {
+                    "0xK00000000000000000000".into()
+                } else {
+                    "0.0".into()
+                }
+            } else {
+                "0".to_string()
+            }
+        ));
+        Ok(stem)
+    }
+
+    /// 空の写像を作る。
+    fn map_new(&mut self) -> String {
+        let p = self.tmp();
+        self.emit(&format!("{p} = call ptr @vaak.map.new()"));
+        p
+    }
+
+    /// `m[k] := v` の中身。**引いた場所へ書くか、無ければそこへ挿す。**
+    ///
+    /// 探索は一度で済む——二分探索が「無いならどこへ挿すか」も返すからである。
+    fn map_put(&mut self, m: &str, mt: &ValueType, k: Val, v: Val, span: Span) -> R<()> {
+        let ValueType::Map(kt, vt) = mt else {
+            return err("写像ではない", span);
+        };
+        let (kt, vt) = ((**kt).clone(), (**vt).clone());
+        let (ks, vs) = (elem_size(&kt), elem_size(&vt));
+        let kc = if is_heap(&kt) {
+            self.deep_copy(&k.v.clone(), &kt)
+        } else {
+            self.conv(&k.v.clone(), &k.ty.clone(), &kt)
+        };
+        let vc = if is_heap(&vt) {
+            self.deep_copy(&v.v.clone(), &vt)
+        } else {
+            self.conv(&v.v.clone(), &v.ty.clone(), &vt)
+        };
+        let f = self.map_find_fn(&kt)?;
+        let r = self.tmp();
+        self.emit(&format!("{r} = call {{ i64, i1 }} {f}(ptr {m}, {} {kc})", ity(&kt)));
+        let at = self.tmp();
+        self.emit(&format!("{at} = extractvalue {{ i64, i1 }} {r}, 0"));
+        let hit = self.tmp();
+        self.emit(&format!("{hit} = extractvalue {{ i64, i1 }} {r}, 1"));
+        let ins = self.label("put.new");
+        let after = self.label("put.set");
+        self.cbr(&hit, &after, &ins);
+        self.place(&ins);
+        self.emit(&format!("call void @vaak.map.reserve(ptr {m}, i64 {ks}, i64 {vs})"));
+        self.emit(&format!(
+            "call void @vaak.map.open(ptr {m}, i64 {at}, i64 {ks}, i64 {vs})"
+        ));
+        // **鍵は挿すときだけ書く。** 既にあるなら等しいので上書きは無駄である
+        let keys = self.tmp();
+        self.emit(&format!("{keys} = call ptr @vaak.map.keys(ptr {m})"));
+        let kp = self.tmp();
+        self.emit(&format!("{kp} = getelementptr {}, ptr {keys}, i64 {at}", ity(&kt)));
+        self.emit(&format!("store {} {kc}, ptr {kp}", ity(&kt)));
+        self.br(&after);
+        self.place(&after);
+        let vals = self.tmp();
+        self.emit(&format!("{vals} = call ptr @vaak.map.vals(ptr {m})"));
+        let vp = self.tmp();
+        self.emit(&format!("{vp} = getelementptr {}, ptr {vals}, i64 {at}", ity(&vt)));
+        self.emit(&format!("store {} {vc}, ptr {vp}", ity(&vt)));
+        Ok(())
+    }
+
+    /// `m[k]` — **無ければ paradox。**
+    fn map_get(&mut self, m: &str, mt: &ValueType, k: Val, span: Span) -> R<Val> {
+        let ValueType::Map(kt, vt) = mt else {
+            return err("写像ではない", span);
+        };
+        let (kt, vt) = ((**kt).clone(), (**vt).clone());
+        let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
+        let f = self.map_find_fn(&kt)?;
+        let r = self.tmp();
+        self.emit(&format!("{r} = call {{ i64, i1 }} {f}(ptr {m}, {} {kc})", ity(&kt)));
+        let at = self.tmp();
+        self.emit(&format!("{at} = extractvalue {{ i64, i1 }} {r}, 0"));
+        let hit = self.tmp();
+        self.emit(&format!("{hit} = extractvalue {{ i64, i1 }} {r}, 1"));
+        // **見つからなければ読まない。** 空の写像では並びがまだ無い（null）ので、
+        // 添字を丸めて読む手は使えない。枝を分ける
+        let vty = ity(&vt);
+        let slot = self.alloca(&vty);
+        let zero = if is_float(&vt) {
+            self.conv("0", &ValueType::I64, &vt)
+        } else if is_heap(&vt) {
+            "null".into()
+        } else {
+            "0".into()
+        };
+        self.emit(&format!("store {vty} {zero}, ptr {slot}"));
+        let take = self.label("get.hit");
+        let after = self.label("get.after");
+        self.cbr(&hit, &take, &after);
+        self.place(&take);
+        let vals = self.tmp();
+        self.emit(&format!("{vals} = call ptr @vaak.map.vals(ptr {m})"));
+        let vp = self.tmp();
+        self.emit(&format!("{vp} = getelementptr {vty}, ptr {vals}, i64 {at}"));
+        let got = self.tmp();
+        self.emit(&format!("{got} = load {vty}, ptr {vp}"));
+        self.emit(&format!("store {vty} {got}, ptr {slot}"));
+        self.br(&after);
+        self.place(&after);
+        let out = self.tmp();
+        self.emit(&format!("{out} = load {vty}, ptr {slot}"));
+        Ok(Val { ok: hit, v: out, ty: vt })
     }
 
     /// 場所への**読み・演算・書き**。`:=` なら読まずに書く。
@@ -1902,6 +2647,107 @@ impl Steel {
         if !is_heap(&ty) {
             return err("押し引きできるのは集合体だけ", base.span);
         }
+        // **hash の `remove` も鍵で抜く**
+        if is_hash(&ty) {
+            let cur = self.tmp();
+            self.emit(&format!("{cur} = load ptr, ptr {slot}"));
+            if name == "clear" {
+                // **生きている数と並びの長さを零に。** bucket は繋ぎ替えなくてよい
+                self.emit(&format!("store i64 0, ptr {cur}"));
+                let ng = self.tmp();
+                self.emit(&format!("{ng} = getelementptr i8, ptr {cur}, i64 8"));
+                self.emit(&format!("store i64 0, ptr {ng}"));
+                let bg = self.tmp();
+                self.emit(&format!("{bg} = getelementptr i8, ptr {cur}, i64 40"));
+                self.emit(&format!("store i64 0, ptr {bg}"));
+                return Ok(None);
+            }
+            if name != "remove" {
+                return err(format!("`{name}` は hash に使えない"), span);
+            }
+            let ValueType::Hash(kt, vt) = &ty else { unreachable!() };
+            let (kt, vt) = ((**kt).clone(), (**vt).clone());
+            let Some(a) = args.first() else {
+                return err("`remove` は鍵を一つ取る", span);
+            };
+            let k = self.expr(a)?;
+            let Some(k) = k else { return err("鍵に値が無い", a.span) };
+            let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
+            let stem = self.hash_fns(&ty)?;
+            let r = self.tmp();
+            self.emit(&format!(
+                "{r} = call {{ {}, i1 }} {stem}.del(ptr {cur}, {} {kc})",
+                ity(&vt),
+                ity(&kt)
+            ));
+            let v = self.tmp();
+            self.emit(&format!("{v} = extractvalue {{ {}, i1 }} {r}, 0", ity(&vt)));
+            let ok = self.tmp();
+            self.emit(&format!("{ok} = extractvalue {{ {}, i1 }} {r}, 1", ity(&vt)));
+            return Ok(Some(Val { ok, v, ty: vt }));
+        }
+        // **写像の `remove` は鍵で抜く。** 添字ではない
+        if is_map(&ty) {
+            let cur = self.tmp();
+            self.emit(&format!("{cur} = load ptr, ptr {slot}"));
+            if name == "clear" {
+                self.emit(&format!("store i64 0, ptr {cur}"));
+                return Ok(None);
+            }
+            if name != "remove" {
+                return err(format!("`{name}` は写像に使えない"), span);
+            }
+            let ValueType::Map(kt, vt) = &ty else { unreachable!() };
+            let (kt, vt) = ((**kt).clone(), (**vt).clone());
+            let Some(a) = args.first() else {
+                return err("`remove` は鍵を一つ取る", span);
+            };
+            let k = self.expr(a)?;
+            let Some(k) = k else { return err("鍵に値が無い", a.span) };
+            let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
+            let f = self.map_find_fn(&kt)?;
+            let r = self.tmp();
+            self.emit(&format!(
+                "{r} = call {{ i64, i1 }} {f}(ptr {cur}, {} {kc})",
+                ity(&kt)
+            ));
+            let at = self.tmp();
+            self.emit(&format!("{at} = extractvalue {{ i64, i1 }} {r}, 0"));
+            let hit = self.tmp();
+            self.emit(&format!("{hit} = extractvalue {{ i64, i1 }} {r}, 1"));
+            let vty = ity(&vt);
+            let out = self.alloca(&vty);
+            let zero = if is_float(&vt) {
+                self.conv("0", &ValueType::I64, &vt)
+            } else if is_heap(&vt) {
+                "null".into()
+            } else {
+                "0".into()
+            };
+            self.emit(&format!("store {vty} {zero}, ptr {out}"));
+            let take = self.label("del.hit");
+            let after = self.label("del.after");
+            self.cbr(&hit, &take, &after);
+            self.place(&take);
+            // **詰める前に読む。** 後では消えている
+            let vals = self.tmp();
+            self.emit(&format!("{vals} = call ptr @vaak.map.vals(ptr {cur})"));
+            let vp = self.tmp();
+            self.emit(&format!("{vp} = getelementptr {vty}, ptr {vals}, i64 {at}"));
+            let got = self.tmp();
+            self.emit(&format!("{got} = load {vty}, ptr {vp}"));
+            self.emit(&format!("store {vty} {got}, ptr {out}"));
+            self.emit(&format!(
+                "call void @vaak.map.close(ptr {cur}, i64 {at}, i64 {}, i64 {})",
+                elem_size(&kt),
+                elem_size(&vt)
+            ));
+            self.br(&after);
+            self.place(&after);
+            let v = self.tmp();
+            self.emit(&format!("{v} = load {vty}, ptr {out}"));
+            return Ok(Some(Val { ok: hit, v, ty: vt }));
+        }
         let el = elem_of(&ty).unwrap_or(ValueType::I64);
         let es = elem_size(&el);
         let cur = self.tmp();
@@ -1950,6 +2796,92 @@ impl Steel {
                 self.emit(&format!("store i64 {safe}, ptr {cur}"));
                 Ok(Some(Val { ok: some, v: out, ty: el }))
             }
+            // `a.insert(i, v)` — **枠の外なら何も起きない**（paradox）
+            "insert" => {
+                let (Some(ia), Some(va)) = (args.first(), args.get(1)) else {
+                    return err("`insert` は添字と値を取る", span);
+                };
+                let i = self.expr(ia)?;
+                let v = self.expr(va)?;
+                let (Some(i), Some(v)) = (i, v) else {
+                    return err("`insert` の引数に値が無い", span);
+                };
+                let idx = self.widen64(&i);
+                let c = if is_heap(&el) {
+                    self.deep_copy(&v.v.clone(), &el)
+                } else {
+                    self.conv(&v.v.clone(), &v.ty.clone(), &el)
+                };
+                let n = self.coll_len(&cur);
+                // **末尾へ挿すのは許す**（`i == n`）。押すのと同じである
+                let lo = self.tmp();
+                self.emit(&format!("{lo} = icmp sge i64 {idx}, 0"));
+                let hi = self.tmp();
+                self.emit(&format!("{hi} = icmp sle i64 {idx}, {n}"));
+                let ok = self.tmp();
+                self.emit(&format!("{ok} = and i1 {lo}, {hi}"));
+                let dothis = self.label("ins.do");
+                let after = self.label("ins.after");
+                self.cbr(&ok, &dothis, &after);
+                self.place(&dothis);
+                // **枠の中と分かってから伸ばす。** 外なら個数も置き場も動かさない
+                let q = self.tmp();
+                self.emit(&format!("{q} = call ptr @vaak.grow(ptr {cur}, i64 {es})"));
+                self.emit(&format!("store ptr {q}, ptr {slot}"));
+                let dst = self.tmp();
+                self.emit(&format!("{dst} = add i64 {idx}, 1"));
+                let from = self.elem_ptr(&q, &idx, &ty);
+                let to = self.elem_ptr(&q, &dst, &ty);
+                let cnt = self.tmp();
+                self.emit(&format!("{cnt} = sub i64 {n}, {idx}"));
+                let bytes = self.tmp();
+                self.emit(&format!("{bytes} = mul i64 {cnt}, {es}"));
+                // **重なるので memmove である。** memcpy では壊れる
+                self.emit(&format!(
+                    "call void @llvm.memmove.p0.p0.i64(ptr {to}, ptr {from}, i64 {bytes}, i1 false)"
+                ));
+                self.emit(&format!("store {} {c}, ptr {from}", ity(&el)));
+                self.br(&after);
+                self.place(&after);
+                Ok(None)
+            }
+
+            // `a.remove(i)` — **抜いた値を返す。** 枠の外なら paradox
+            "remove" => {
+                let Some(ia) = args.first() else {
+                    return err("`remove` は添字を一つ取る", span);
+                };
+                let i = self.expr(ia)?;
+                let Some(i) = i else { return err("`remove` の添字に値が無い", ia.span) };
+                let idx = self.widen64(&i);
+                let n = self.coll_len(&cur);
+                let (ok, safe) = self.bounds(&cur, &idx);
+                // **ずらす前に読む。** 後では消えている
+                let g = self.elem_ptr(&cur, &safe, &ty);
+                let out = self.tmp();
+                self.emit(&format!("{out} = load {}, ptr {g}", ity(&el)));
+                let dothis = self.label("rm.do");
+                let after = self.label("rm.after");
+                self.cbr(&ok, &dothis, &after);
+                self.place(&dothis);
+                let src = self.tmp();
+                self.emit(&format!("{src} = add i64 {safe}, 1"));
+                let from = self.elem_ptr(&cur, &src, &ty);
+                let cnt = self.tmp();
+                self.emit(&format!("{cnt} = sub i64 {n}, {src}"));
+                let bytes = self.tmp();
+                self.emit(&format!("{bytes} = mul i64 {cnt}, {es}"));
+                self.emit(&format!(
+                    "call void @llvm.memmove.p0.p0.i64(ptr {g}, ptr {from}, i64 {bytes}, i1 false)"
+                ));
+                let less = self.tmp();
+                self.emit(&format!("{less} = sub i64 {n}, 1"));
+                self.emit(&format!("store i64 {less}, ptr {cur}"));
+                self.br(&after);
+                self.place(&after);
+                Ok(Some(Val { ok, v: out, ty: el }))
+            }
+
             _ => err(format!("`{name}` は STEEL がまだ扱えない"), span),
         }
     }
@@ -1986,7 +2918,7 @@ impl Steel {
         // **書き換えるメンバ関数は場所を要る。** 伸ばすと置き場が変わりうるので、
         // 新しい置き場を**元の枠へ書き戻さねばならない**
         if let ExprKind::Field { base, name } = &callee.kind {
-            if matches!(name.as_str(), "push" | "pop" | "clear") {
+            if matches!(name.as_str(), "push" | "pop" | "clear" | "insert" | "remove") {
                 return self.mutating_method(base, name, args, span);
             }
         }
@@ -2001,6 +2933,172 @@ impl Steel {
                 "len" => {
                     let n = self.coll_len(&b.v.clone());
                     Ok(Some(Val { ok: b.ok, v: n, ty: ValueType::I64 }))
+                }
+                "has" if is_hash(&b.ty) => {
+                    let ValueType::Hash(kt, _) = &b.ty else { unreachable!() };
+                    let kt = (**kt).clone();
+                    let Some(a) = args.first() else {
+                        return err("`has` は鍵を一つ取る", span);
+                    };
+                    let k = self.expr(a)?;
+                    let Some(k) = k else { return err("鍵に値が無い", a.span) };
+                    let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
+                    let stem = self.hash_fns(&b.ty.clone())?;
+                    let at = self.tmp();
+                    self.emit(&format!(
+                        "{at} = call i64 {stem}.find(ptr {}, {} {kc})",
+                        b.v,
+                        ity(&kt)
+                    ));
+                    let hit = self.tmp();
+                    self.emit(&format!("{hit} = icmp sge i64 {at}, 0"));
+                    Ok(Some(Val { ok: b.ok, v: hit, ty: ValueType::U1 }))
+                }
+                // `h.keys()` — **入れた順**（C-98）。穴は飛ばす
+                "keys" if is_hash(&b.ty) => {
+                    let ValueType::Hash(kt, _) = &b.ty else { unreachable!() };
+                    let kt = (**kt).clone();
+                    let at_ty = ValueType::Array(Box::new(kt.clone()));
+                    let live = self.coll_len(&b.v.clone());
+                    let arr = self.new_collection(&live, &at_ty);
+                    let dst = self.tmp();
+                    self.emit(&format!("{dst} = call ptr @vaak.data(ptr {arr})"));
+                    let ng = self.tmp();
+                    self.emit(&format!("{ng} = getelementptr i8, ptr {}, i64 8", b.v));
+                    let n = self.tmp();
+                    self.emit(&format!("{n} = load i64, ptr {ng}"));
+                    let ents = self.hash_entries(&b.v.clone());
+                    let ent = self.hash_ent_ty(&b.ty.clone());
+                    let ki = ity(&kt);
+                    let ix = self.alloca("i64");
+                    let ox = self.alloca("i64");
+                    self.emit(&format!("store i64 0, ptr {ix}"));
+                    self.emit(&format!("store i64 0, ptr {ox}"));
+                    let head = self.label("hk.head");
+                    let body = self.label("hk.body");
+                    let take = self.label("hk.take");
+                    let next = self.label("hk.next");
+                    let done = self.label("hk.done");
+                    self.br(&head);
+                    self.place(&head);
+                    let i = self.tmp();
+                    self.emit(&format!("{i} = load i64, ptr {ix}"));
+                    let go = self.tmp();
+                    self.emit(&format!("{go} = icmp slt i64 {i}, {n}"));
+                    self.cbr(&go, &body, &done);
+                    self.place(&body);
+                    let lp = self.tmp();
+                    self.emit(&format!(
+                        "{lp} = getelementptr {ent}, ptr {ents}, i64 {i}, i32 3"
+                    ));
+                    let lv = self.tmp();
+                    self.emit(&format!("{lv} = load i8, ptr {lp}"));
+                    let alive = self.tmp();
+                    self.emit(&format!("{alive} = icmp ne i8 {lv}, 0"));
+                    self.cbr(&alive, &take, &next);
+                    self.place(&take);
+                    let kp = self.tmp();
+                    self.emit(&format!(
+                        "{kp} = getelementptr {ent}, ptr {ents}, i64 {i}, i32 0"
+                    ));
+                    let kv = self.tmp();
+                    self.emit(&format!("{kv} = load {ki}, ptr {kp}"));
+                    let kv2 = if is_heap(&kt) {
+                        // **同じ場所を指させない**（C-48）
+                        let f = self.copy_fn(&kt);
+                        let c = self.tmp();
+                        self.emit(&format!("{c} = call ptr {f}(ptr {kv})"));
+                        c
+                    } else {
+                        kv
+                    };
+                    let o = self.tmp();
+                    self.emit(&format!("{o} = load i64, ptr {ox}"));
+                    let op = self.tmp();
+                    self.emit(&format!("{op} = getelementptr {ki}, ptr {dst}, i64 {o}"));
+                    self.emit(&format!("store {ki} {kv2}, ptr {op}"));
+                    let o2 = self.tmp();
+                    self.emit(&format!("{o2} = add i64 {o}, 1"));
+                    self.emit(&format!("store i64 {o2}, ptr {ox}"));
+                    self.br(&next);
+                    self.place(&next);
+                    let i2 = self.tmp();
+                    self.emit(&format!("{i2} = add i64 {i}, 1"));
+                    self.emit(&format!("store i64 {i2}, ptr {ix}"));
+                    self.br(&head);
+                    self.place(&done);
+                    Ok(Some(Val { ok: b.ok, v: arr, ty: at_ty }))
+                }
+                // `m.has(k)` — **引くだけ。値は取り出さない**
+                "has" if is_map(&b.ty) => {
+                    let ValueType::Map(kt, _) = &b.ty else { unreachable!() };
+                    let kt = (**kt).clone();
+                    let Some(a) = args.first() else {
+                        return err("`has` は鍵を一つ取る", span);
+                    };
+                    let k = self.expr(a)?;
+                    let Some(k) = k else { return err("鍵に値が無い", a.span) };
+                    let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
+                    let f = self.map_find_fn(&kt)?;
+                    let r = self.tmp();
+                    self.emit(&format!(
+                        "{r} = call {{ i64, i1 }} {f}(ptr {}, {} {kc})",
+                        b.v,
+                        ity(&kt)
+                    ));
+                    let hit = self.tmp();
+                    self.emit(&format!("{hit} = extractvalue {{ i64, i1 }} {r}, 1"));
+                    // **`u1` は `i1` である。** 広げない
+                    Ok(Some(Val { ok: b.ok, v: hit, ty: ValueType::U1 }))
+                }
+                // `m.keys()` — **鍵の配列を作る。** 並びは鍵の順（既にそうなっている）
+                //
+                // **確保が呼び出しとして書かれている**（C-6）。高いことが見える
+                "keys" if is_map(&b.ty) => {
+                    let ValueType::Map(kt, _) = &b.ty else { unreachable!() };
+                    let kt = (**kt).clone();
+                    let at = ValueType::Array(Box::new(kt.clone()));
+                    let n = self.coll_len(&b.v.clone());
+                    let arr = self.new_collection(&n, &at);
+                    let src = self.tmp();
+                    self.emit(&format!("{src} = call ptr @vaak.map.keys(ptr {})", b.v));
+                    let dst = self.tmp();
+                    self.emit(&format!("{dst} = call ptr @vaak.data(ptr {arr})"));
+                    let bytes = self.tmp();
+                    self.emit(&format!("{bytes} = mul i64 {n}, {}", elem_size(&kt)));
+                    self.emit(&format!(
+                        "call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {src}, i64 {bytes}, i1 false)"
+                    ));
+                    // **場を持つ鍵は写す。** 配列と写像が同じ場所を指してはいけない（C-48）
+                    if is_heap(&kt) {
+                        let f = self.copy_fn(&kt);
+                        let head = self.label("keys.head");
+                        let body = self.label("keys.body");
+                        let done = self.label("keys.done");
+                        let ix = self.alloca("i64");
+                        self.emit(&format!("store i64 0, ptr {ix}"));
+                        self.br(&head);
+                        self.place(&head);
+                        let i = self.tmp();
+                        self.emit(&format!("{i} = load i64, ptr {ix}"));
+                        let go = self.tmp();
+                        self.emit(&format!("{go} = icmp slt i64 {i}, {n}"));
+                        self.cbr(&go, &body, &done);
+                        self.place(&body);
+                        let ep = self.tmp();
+                        self.emit(&format!("{ep} = getelementptr ptr, ptr {dst}, i64 {i}"));
+                        let ev = self.tmp();
+                        self.emit(&format!("{ev} = load ptr, ptr {ep}"));
+                        let cv = self.tmp();
+                        self.emit(&format!("{cv} = call ptr {f}(ptr {ev})"));
+                        self.emit(&format!("store ptr {cv}, ptr {ep}"));
+                        let i2 = self.tmp();
+                        self.emit(&format!("{i2} = add i64 {i}, 1"));
+                        self.emit(&format!("store i64 {i2}, ptr {ix}"));
+                        self.br(&head);
+                        self.place(&done);
+                    }
+                    Ok(Some(Val { ok: b.ok, v: arr, ty: at }))
                 }
                 _ => err(format!("`{name}` は STEEL がまだ扱えない"), span),
             };
@@ -2262,6 +3360,249 @@ entry:
   ret ptr %d
 }
 
+; ================= 写像 =================
+;
+; **並べた配列である。** `.keys()` の並びは鍵の順と決まっている（全順序なので決まる）
+; ので、順序を保つ表でなければならない。二分探索で引く。
+;
+; 頭は三十二バイト。
+;
+;   [ 0.. 8)  個数
+;   [ 8..16)  容量
+;   [16..24)  鍵の並び
+;   [24..32)  値の並び
+;
+; 先頭が個数なので `@vaak.len` がそのまま効く。
+
+define internal ptr @vaak.map.new() {
+entry:
+  %p = call ptr @vaak.alloc(i64 32)
+  ; **場は使い回されるので、零で埋め直す。** 前の中身が残っている
+  store i64 0, ptr %p
+  %c = getelementptr i8, ptr %p, i64 8
+  store i64 0, ptr %c
+  %k = getelementptr i8, ptr %p, i64 16
+  store ptr null, ptr %k
+  %v = getelementptr i8, ptr %p, i64 24
+  store ptr null, ptr %v
+  ret ptr %p
+}
+
+define internal ptr @vaak.map.keys(ptr %m) {
+entry:
+  %g = getelementptr i8, ptr %m, i64 16
+  %k = load ptr, ptr %g
+  ret ptr %k
+}
+
+define internal ptr @vaak.map.vals(ptr %m) {
+entry:
+  %g = getelementptr i8, ptr %m, i64 24
+  %v = load ptr, ptr %g
+  ret ptr %v
+}
+
+; 一つ分の空きを作る。足りなければ倍にして写す
+define internal void @vaak.map.reserve(ptr %m, i64 %ks, i64 %vs) {
+entry:
+  %n = load i64, ptr %m
+  %cg = getelementptr i8, ptr %m, i64 8
+  %c = load i64, ptr %cg
+  %fits = icmp slt i64 %n, %c
+  br i1 %fits, label %done, label %grow
+grow:
+  %twice = shl i64 %c, 1
+  %small = icmp slt i64 %twice, 4
+  %c2 = select i1 %small, i64 4, i64 %twice
+  %kb = mul i64 %c2, %ks
+  %vb = mul i64 %c2, %vs
+  %nk = call ptr @vaak.alloc(i64 %kb)
+  %nv = call ptr @vaak.alloc(i64 %vb)
+  %kg = getelementptr i8, ptr %m, i64 16
+  %vg = getelementptr i8, ptr %m, i64 24
+  %ok = load ptr, ptr %kg
+  %ov = load ptr, ptr %vg
+  %hasold = icmp sgt i64 %n, 0
+  br i1 %hasold, label %copy, label %put
+copy:
+  %okb = mul i64 %n, %ks
+  %ovb = mul i64 %n, %vs
+  call void @llvm.memcpy.p0.p0.i64(ptr %nk, ptr %ok, i64 %okb, i1 false)
+  call void @llvm.memcpy.p0.p0.i64(ptr %nv, ptr %ov, i64 %ovb, i1 false)
+  br label %put
+put:
+  store ptr %nk, ptr %kg
+  store ptr %nv, ptr %vg
+  store i64 %c2, ptr %cg
+  br label %done
+done:
+  ret void
+}
+
+; `at` に一つ分の隙間を開ける。**空きは呼び手が先に作っておく**
+define internal void @vaak.map.open(ptr %m, i64 %at, i64 %ks, i64 %vs) {
+entry:
+  %n = load i64, ptr %m
+  %keys = call ptr @vaak.map.keys(ptr %m)
+  %vals = call ptr @vaak.map.vals(ptr %m)
+  %cnt = sub i64 %n, %at
+  %ko = mul i64 %at, %ks
+  %vo = mul i64 %at, %vs
+  %ksrc = getelementptr i8, ptr %keys, i64 %ko
+  %vsrc = getelementptr i8, ptr %vals, i64 %vo
+  %kdst = getelementptr i8, ptr %ksrc, i64 %ks
+  %vdst = getelementptr i8, ptr %vsrc, i64 %vs
+  %kb = mul i64 %cnt, %ks
+  %vb = mul i64 %cnt, %vs
+  call void @llvm.memmove.p0.p0.i64(ptr %kdst, ptr %ksrc, i64 %kb, i1 false)
+  call void @llvm.memmove.p0.p0.i64(ptr %vdst, ptr %vsrc, i64 %vb, i1 false)
+  %n1 = add i64 %n, 1
+  store i64 %n1, ptr %m
+  ret void
+}
+
+; `at` の一つを抜いて詰める
+define internal void @vaak.map.close(ptr %m, i64 %at, i64 %ks, i64 %vs) {
+entry:
+  %n = load i64, ptr %m
+  %keys = call ptr @vaak.map.keys(ptr %m)
+  %vals = call ptr @vaak.map.vals(ptr %m)
+  %at1 = add i64 %at, 1
+  %cnt = sub i64 %n, %at1
+  %ko = mul i64 %at, %ks
+  %vo = mul i64 %at, %vs
+  %kdst = getelementptr i8, ptr %keys, i64 %ko
+  %vdst = getelementptr i8, ptr %vals, i64 %vo
+  %ksrc = getelementptr i8, ptr %kdst, i64 %ks
+  %vsrc = getelementptr i8, ptr %vdst, i64 %vs
+  %kb = mul i64 %cnt, %ks
+  %vb = mul i64 %cnt, %vs
+  call void @llvm.memmove.p0.p0.i64(ptr %kdst, ptr %ksrc, i64 %kb, i1 false)
+  call void @llvm.memmove.p0.p0.i64(ptr %vdst, ptr %vsrc, i64 %vb, i1 false)
+  %n1 = sub i64 %n, 1
+  store i64 %n1, ptr %m
+  ret void
+}
+
+; 並びごと写す。**深く写すのは呼び手の仕事**（鍵や値が場を持つときだけ）
+define internal ptr @vaak.map.clone(ptr %m, i64 %ks, i64 %vs) {
+entry:
+  %n = load i64, ptr %m
+  %q = call ptr @vaak.map.new()
+  %none = icmp eq i64 %n, 0
+  br i1 %none, label %out, label %work
+work:
+  %kb = mul i64 %n, %ks
+  %vb = mul i64 %n, %vs
+  %nk = call ptr @vaak.alloc(i64 %kb)
+  %nv = call ptr @vaak.alloc(i64 %vb)
+  %ok = call ptr @vaak.map.keys(ptr %m)
+  %ov = call ptr @vaak.map.vals(ptr %m)
+  call void @llvm.memcpy.p0.p0.i64(ptr %nk, ptr %ok, i64 %kb, i1 false)
+  call void @llvm.memcpy.p0.p0.i64(ptr %nv, ptr %ov, i64 %vb, i1 false)
+  store i64 %n, ptr %q
+  %qc = getelementptr i8, ptr %q, i64 8
+  store i64 %n, ptr %qc
+  %qk = getelementptr i8, ptr %q, i64 16
+  store ptr %nk, ptr %qk
+  %qv = getelementptr i8, ptr %q, i64 24
+  store ptr %nv, ptr %qv
+  br label %out
+out:
+  ret ptr %q
+}
+
+; ================= hash =================
+;
+; **鍵の値で飛ぶ連想**（C-98）。`map` と違い `.keys()` は**入れた順**である。
+;
+; 連鎖法。並びは密で、抜くと穴が空く。
+;
+;   [ 0.. 8)  生きている数     ← 先頭なので `@vaak.len` が効く
+;   [ 8..16)  並びの長さ（穴込み）
+;   [16..24)  並びの容量
+;   [24..32)  並び
+;   [32..40)  bucket（要素の位置。無ければ -1）
+;   [40..48)  bucket の数（2 の冪）
+;
+; 要素は `{ 鍵, 値, 次, 生きているか }`。**次**が同じ bucket の鎖である。
+
+define internal ptr @vaak.hash.new() {
+entry:
+  %p = call ptr @vaak.alloc(i64 48)
+  store i64 0, ptr %p
+  %a = getelementptr i8, ptr %p, i64 8
+  store i64 0, ptr %a
+  %b = getelementptr i8, ptr %p, i64 16
+  store i64 0, ptr %b
+  %c = getelementptr i8, ptr %p, i64 24
+  store ptr null, ptr %c
+  %d = getelementptr i8, ptr %p, i64 32
+  store ptr null, ptr %d
+  %e = getelementptr i8, ptr %p, i64 40
+  store i64 0, ptr %e
+  ret ptr %p
+}
+
+; 整数の混ぜ方（splitmix64 の仕上げ）。**下位だけ見ても散る**ようにする
+define internal i64 @vaak.hash.i64(i64 %x0) {
+entry:
+  %s1 = lshr i64 %x0, 30
+  %x1 = xor i64 %x0, %s1
+  %m1 = mul i64 %x1, -4658895280553007687
+  %s2 = lshr i64 %m1, 27
+  %x2 = xor i64 %m1, %s2
+  %m2 = mul i64 %x2, -7723592293110705685
+  %s3 = lshr i64 %m2, 31
+  %x3 = xor i64 %m2, %s3
+  ret i64 %x3
+}
+
+; 文字列は FNV-1a
+define internal i64 @vaak.hash.str(ptr %p) {
+entry:
+  %n = load i64, ptr %p
+  %d = getelementptr i8, ptr %p, i64 16
+  br label %head
+head:
+  %i = phi i64 [ 0, %entry ], [ %i2, %body ]
+  %h = phi i64 [ -3750763034362895579, %entry ], [ %h2, %body ]
+  %go = icmp slt i64 %i, %n
+  br i1 %go, label %body, label %done
+body:
+  %bp = getelementptr i8, ptr %d, i64 %i
+  %b = load i8, ptr %bp
+  %bz = zext i8 %b to i64
+  %hx = xor i64 %h, %bz
+  %h2 = mul i64 %hx, 1099511628211
+  %i2 = add i64 %i, 1
+  br label %head
+done:
+  ret i64 %h
+}
+
+; 文字列の順序。**短い方が前、同じ長さなら中身のバイト順**
+define internal i32 @vaak.strcmp(ptr %a, ptr %b) {
+entry:
+  %na = load i64, ptr %a
+  %nb = load i64, ptr %b
+  %da = getelementptr i8, ptr %a, i64 16
+  %db = getelementptr i8, ptr %b, i64 16
+  %alt = icmp slt i64 %na, %nb
+  %min = select i1 %alt, i64 %na, i64 %nb
+  %c = call i32 @memcmp(ptr %da, ptr %db, i64 %min)
+  %ne = icmp ne i32 %c, 0
+  br i1 %ne, label %out, label %bylen
+bylen:
+  %agt = icmp sgt i64 %na, %nb
+  %x = select i1 %alt, i32 -1, i32 0
+  %y = select i1 %agt, i32 1, i32 %x
+  br label %out
+out:
+  %r = phi i32 [ %c, %entry ], [ %y, %bylen ]
+  ret i32 %r
+}
+
 ; **写す。** 要素が場を持たないときはこれで足りる
 define internal ptr @vaak.copy(ptr %p, i64 %esize) {
 entry:
@@ -2297,6 +3638,7 @@ entry:
 
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)
+declare i32 @memcmp(ptr, ptr, i64)
 "#;
 
 /// プログラム全体を LLVM IR に。
@@ -2411,4 +3753,16 @@ fn assign_binop(op: AssignOp) -> Option<BinOp> {
         AssignOp::BitOr => BinOp::BitOr,
         _ => return None,
     })
+}
+
+/// 型ごとの名札。**同じ型に同じ関数を二度出さないため**
+fn type_tag(t: &ValueType) -> String {
+    match t {
+        ValueType::Str => "str".into(),
+        ValueType::Array(e) => format!("a{}", type_tag(e)),
+        ValueType::Map(k, v) => format!("m{}_{}", type_tag(k), type_tag(v)),
+        ValueType::Hash(k, v) => format!("h{}_{}", type_tag(k), type_tag(v)),
+        ValueType::Named(n) => format!("n{n}"),
+        other => ity(other).replace('*', "p"),
+    }
 }

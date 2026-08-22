@@ -234,7 +234,7 @@ impl TypeChecker {
                         self.expr(index, Some(&ValueType::I64));
                         Some(ValueType::U8)
                     }
-                    ValueType::Map(k, v) => {
+                    ValueType::Map(k, v) | ValueType::Hash(k, v) => {
                         self.expect(index, k);
                         Some((**v).clone())
                     }
@@ -265,8 +265,12 @@ impl TypeChecker {
             }
 
             ExprKind::MapLit(pairs) => {
+                // **`hash` にも同じリテラルが使える。** 文脈の型が決める（C-98）
+                let as_hash = matches!(want, Some(ValueType::Hash(..)));
                 let (mut kt, mut vt) = match want {
-                    Some(ValueType::Map(k, v)) => (Some((**k).clone()), Some((**v).clone())),
+                    Some(ValueType::Map(k, v)) | Some(ValueType::Hash(k, v)) => {
+                        (Some((**k).clone()), Some((**v).clone()))
+                    }
                     _ => (None, None),
                 };
                 for (k, v) in pairs {
@@ -283,10 +287,11 @@ impl TypeChecker {
                         _ => {}
                     }
                 }
-                Some(ValueType::Map(
+                let (k, v) = (
                     Box::new(kt.unwrap_or(ValueType::I64)),
                     Box::new(vt.unwrap_or(ValueType::I64)),
-                ))
+                );
+                Some(if as_hash { ValueType::Hash(k, v) } else { ValueType::Map(k, v) })
             }
 
             ExprKind::Construct { ty, args } => {
@@ -599,7 +604,9 @@ impl TypeChecker {
                     Some(ValueType::I32)
                 }
                 "keys" => match &bt {
-                    Some(ValueType::Map(k, _)) => Some(ValueType::Array(k.clone())),
+                    Some(ValueType::Map(k, _)) | Some(ValueType::Hash(k, _)) => {
+                        Some(ValueType::Array(k.clone()))
+                    }
                     _ => None,
                 },
                 "remove" => match &bt {
@@ -609,7 +616,7 @@ impl TypeChecker {
                         }
                         Some((**el).clone())
                     }
-                    Some(ValueType::Map(k, v)) => {
+                    Some(ValueType::Map(k, v)) | Some(ValueType::Hash(k, v)) => {
                         for a in args {
                             self.expect(a, &k.clone());
                         }
@@ -803,6 +810,7 @@ pub fn show(t: &ValueType) -> String {
         Str => "str".into(),
         Array(i) => format!("{} array", show(i)),
         Map(k, v) => format!("{} {} map", show(k), show(v)),
+        Hash(k, v) => format!("{} {} hash", show(k), show(v)),
         Named(n) => n.clone(),
     }
 }

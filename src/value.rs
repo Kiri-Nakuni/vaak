@@ -7,7 +7,7 @@
 //! 個々の値を辿る解放処理は走らない。
 
 use crate::ast::ValueType;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// ホストが**呼べる名前**に答える側（S-11）。
 ///
@@ -61,6 +61,7 @@ pub enum Value {
     Str(Box<Vec<u8>>),
     Array(Box<ArrayVal>),
     Map(Box<MapVal>),
+    Hash(Box<HashVal>),
     Struct(Box<StructVal>),
 }
 
@@ -68,6 +69,96 @@ pub enum Value {
 pub struct ArrayVal {
     pub elem: ValueType,
     pub items: Vec<Value>,
+}
+
+/// **鍵の値で飛ぶ連想**（C-98）。
+///
+/// 二段になっている:
+///
+/// ```text
+/// entries : [ Some((鍵, 値)), None, Some((鍵, 値)), … ]   ← 入れた順。抜くと穴が空く
+/// index   : 鍵 → entries の位置
+/// ```
+///
+/// **抜くのは穴を空けるだけ**（O(1)）。`.keys()` は穴を飛ばして読むので、
+/// **入れた順が費用ゼロで取れる。**
+#[derive(Clone, Debug)]
+pub struct HashVal {
+    pub key: ValueType,
+    pub val: ValueType,
+    pub entries: Vec<Option<(MapKey, Value)>>,
+    pub index: HashMap<MapKey, usize>,
+}
+
+impl HashVal {
+    pub fn new(key: ValueType, val: ValueType) -> Self {
+        Self { key, val, entries: Vec::new(), index: HashMap::new() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    pub fn get(&self, k: &MapKey) -> Option<&Value> {
+        let i = *self.index.get(k)?;
+        self.entries[i].as_ref().map(|(_, v)| v)
+    }
+
+    pub fn get_mut(&mut self, k: &MapKey) -> Option<&mut Value> {
+        let i = *self.index.get(k)?;
+        self.entries[i].as_mut().map(|(_, v)| v)
+    }
+
+    pub fn insert(&mut self, k: MapKey, v: Value) {
+        if let Some(&i) = self.index.get(&k) {
+            if let Some((_, slot)) = self.entries[i].as_mut() {
+                *slot = v;
+                return;
+            }
+        }
+        self.index.insert(k.clone(), self.entries.len());
+        self.entries.push(Some((k, v)));
+    }
+
+    pub fn remove(&mut self, k: &MapKey) -> Option<Value> {
+        let i = self.index.remove(k)?;
+        let taken = self.entries[i].take().map(|(_, v)| v);
+        // **穴が半分を越えたら詰め直す。** 抜き続けても並びが伸び続けない
+        if self.entries.len() >= 16 && self.index.len() * 2 < self.entries.len() {
+            self.compact();
+        }
+        taken
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.index.clear();
+    }
+
+    /// 穴を詰める。**入れた順は保つ。**
+    fn compact(&mut self) {
+        let live: Vec<_> = self.entries.drain(..).flatten().collect();
+        self.index.clear();
+        for (i, (k, _)) in live.iter().enumerate() {
+            self.index.insert(k.clone(), i);
+        }
+        self.entries = live.into_iter().map(Some).collect();
+    }
+
+    /// 入れた順の（鍵, 値）。穴は飛ばす。
+    pub fn iter(&self) -> impl Iterator<Item = (&MapKey, &Value)> {
+        self.entries.iter().flatten().map(|(k, v)| (k, v))
+    }
+}
+
+impl PartialEq for HashVal {
+    /// **並びも含めて等しいか。** 入れた順が観測できる以上、順序は値の一部である
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.val == other.val
+            && self.len() == other.len()
+            && self.iter().zip(other.iter()).all(|(a, b)| a == b)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -102,7 +193,9 @@ impl Value {
 }
 
 /// 写像の鍵。**NaN が存在しないので比較は全順序である**（C-75）。
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+///
+/// `Hash` も導く——`hash` は同じ鍵を使う（C-98）。
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum MapKey {
     Int(i128),
     Bytes(Vec<u8>),
@@ -124,6 +217,7 @@ impl Value {
             Value::Str(_) => ValueType::Str,
             Value::Array(a) => ValueType::Array(Box::new(a.elem.clone())),
             Value::Map(m) => ValueType::Map(Box::new(m.key.clone()), Box::new(m.val.clone())),
+            Value::Hash(h) => ValueType::Hash(Box::new(h.key.clone()), Box::new(h.val.clone())),
             Value::Struct(t) => ValueType::Named(t.name.clone()),
         }
     }
@@ -185,6 +279,11 @@ impl Value {
                     .iter()
                     .map(|(k, v)| format!("{} => {}", show_key(k), v.show()))
                     .collect();
+                format!("({})", s.join(", "))
+            }
+            Value::Hash(h) => {
+                let s: Vec<String> =
+                    h.iter().map(|(k, v)| format!("{} => {}", show_key(k), v.show())).collect();
                 format!("({})", s.join(", "))
             }
             Value::Struct(t) => {

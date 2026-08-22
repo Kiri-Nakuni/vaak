@@ -908,7 +908,7 @@ fn type_deps(t: &ValueType) -> Vec<String> {
     match t {
         ValueType::Named(n) => vec![n.clone()],
         ValueType::Array(i) => type_deps(i),
-        ValueType::Map(k, v) => {
+        ValueType::Map(k, v) | ValueType::Hash(k, v) => {
             let mut o = type_deps(k);
             o.extend(type_deps(v));
             o

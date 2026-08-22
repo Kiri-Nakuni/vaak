@@ -23,7 +23,7 @@ authors = ["Arimura Akihiro"]
 
 [grammars.vaak]
 repository = "ssh://git@git.trap.jp:2200/Suima/vaak.git"
-rev = "2244e19a0ab3470b26ba6c671a7241692ccd930b"
+rev = "2e412f34cc0925c62a75958ebb332dfb9469e21d"
 path = "editors/tree-sitter-vaak"
 
 [language_servers.vaak-lsp]

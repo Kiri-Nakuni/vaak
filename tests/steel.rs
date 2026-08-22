@@ -383,3 +383,87 @@ t!(欄の集合体を押す,
 t!(浮動小数を押す,
    "var a := new f64 array(0, 0.0); a.push(1.5); a.push(2.5);
     if (a[0] + a[1] == 4.0) 1 else 0 fi");
+
+// ── 挿す・抜く ─────────────────────────
+
+t!(先頭へ挿す, "var a := new i64 array(2, 5); a.insert(0, 9); a[0] * 100 + a[1] * 10 + a[2]");
+t!(途中へ挿す, "var a := new i64 array(0, 0); a.push(1); a.push(3); a.insert(1, 2); a[0]*100+a[1]*10+a[2]");
+t!(末尾へ挿す, "var a := new i64 array(0, 0); a.push(1); a.insert(1, 7); a[1] * 10 + a.len()");
+t!(枠の外へ挿すと何も起きない, "var a := new i64 array(2, 4); a.insert(5, 9); a.len() * 10 + a[0]");
+t!(負の添字へ挿すと何も起きない, "var a := new i64 array(2, 4); a.insert(0 - 1, 9); a.len()");
+t!(抜くと詰まる, "var a := new i64 array(0, 0); a.push(1); a.push(2); a.push(3); a.remove(1); a[0]*10+a[1]");
+t!(抜いた値が出る, "var a := new i64 array(0, 0); a.push(7); a.push(8); a.remove(0)");
+t!(抜くと減る, "var a := new i64 array(4, 1); a.remove(2); a.len()");
+t!(枠の外を抜くと虚無, "var a := new i64 array(2, 1); a.remove(9) ?? 42");
+t!(枠の外を抜いても減らない, "var a := new i64 array(2, 1); a.remove(9) ?? 0; a.len()");
+t!(末尾を抜く, "var a := new i64 array(0, 0); a.push(4); a.push(6); a.remove(1) * 10 + a.len()");
+t!(挿してから抜く, "var a := new i64 array(0, 0); a.push(1); a.insert(0, 9); a.remove(1) + a[0]");
+t!(浮動小数を挿す,
+   "var a := new f64 array(0, 0.0); a.push(2.0); a.insert(0, 1.5);
+    if (a[0] + a[1] == 3.5) 1 else 0 fi");
+t!(欄の集合体へ挿す,
+   "struct P { var a : i64 array; }; var p := new P ( a := new i64 array(1, 5) );
+    p.a.insert(0, 3); p.a[0] * 10 + p.a[1]");
+
+// ── 写像 ─────────────────────────
+
+t!(空の写像, "var m := new i64 i64 map ( ); m.len()");
+t!(写像リテラル, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m.len()");
+t!(鍵で引く, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m[2]");
+t!(無い鍵は虚無, "var m : i64 i64 map := ( 1 => 10 ); m[9] ?? 42");
+t!(鍵を足す, "var m := new i64 i64 map ( ); m[5] := 7; m[5] * 10 + m.len()");
+t!(同じ鍵は上書き, "var m := new i64 i64 map ( ); m[5] := 7; m[5] := 9; m[5] * 10 + m.len()");
+t!(順に並ぶ, "var m := new i64 i64 map ( ); m[3] := 1; m[1] := 2; m[2] := 3; m.keys()[0] * 100 + m.keys()[1] * 10 + m.keys()[2]");
+t!(たくさん入れる,
+   "var m := new i64 i64 map ( ); var i := 0;
+    while (i < 30) { m[29 - i] := i; i += 1; }; m.len() * 100 + m[14]");
+t!(順に並べ直す,
+   "var m := new i64 i64 map ( ); var i := 0;
+    while (i < 8) { m[7 - i] := i; i += 1; };
+    m.keys()[0] * 10 + m.keys()[7]");
+t!(鍵があるか, "var m : i64 i64 map := ( 1 => 10, 5 => 50 ); if (m.has(5)) 1 else 0 fi");
+t!(無い鍵は無い, "var m : i64 i64 map := ( 1 => 10 ); if (m.has(9)) 1 else 0 fi");
+t!(写像から抜く, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m.remove(1) + m.len()");
+t!(無い鍵を抜くと虚無, "var m : i64 i64 map := ( 1 => 10 ); (m.remove(9) ?? 5) + m.len()");
+t!(抜いた後は引けない, "var m : i64 i64 map := ( 1 => 10, 2 => 20 ); m.remove(2) ?? 0; m[2] ?? 7");
+t!(写像も深く複製する,
+   "var a : i64 i64 map := ( 1 => 10 ); var b := a; b[1] := 99; a[1] * 100 + b[1]");
+t!(写像を空にする, "var m : i64 i64 map := ( 1 => 1, 2 => 2 ); m.clear(); m.len()");
+t!(文字列の鍵,
+   "var m : str i64 map := ( \"bb\" => 2, \"a\" => 1 ); m[\"bb\"] * 10 + m.len()");
+t!(文字列の鍵は短い順, "var m : str i64 map := ( \"bb\" => 2, \"a\" => 1 ); m.keys()[0].len()");
+t!(写像の値が集合体,
+   "var m := new i64 i64 array map ( ); m[3] := new i64 array(2, 8); m[3][1] ?? 0");
+
+// ── hash：鍵の値で飛ぶ（C-98） ─────────────────────────
+
+t!(空のhash, "var h := new i64 i64 hash ( ); h.len()");
+t!(hashリテラル, "var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h.len()");
+t!(hashを引く, "var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h[2]");
+t!(hashの無い鍵は虚無, "var h : i64 i64 hash := ( 1 => 10 ); h[9] ?? 42");
+t!(hashへ足す, "var h := new i64 i64 hash ( ); h[5] := 7; h[5] * 10 + h.len()");
+t!(hashは上書きする, "var h := new i64 i64 hash ( ); h[5] := 7; h[5] := 9; h[5] * 10 + h.len()");
+t!(hashは入れた順,
+   "var h := new i64 i64 hash ( ); h[9] := 1; h[3] := 2; h[7] := 3;
+    var k := h.keys(); k[0] * 100 + k[1] * 10 + k[2]");
+t!(hashで在るか, "var h : i64 i64 hash := ( 1 => 1, 5 => 5 ); if (h.has(5)) 1 else 0 fi");
+t!(hashで無いものは無い, "var h : i64 i64 hash := ( 1 => 1 ); if (h.has(9)) 1 else 0 fi");
+t!(hashから抜く, "var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h.remove(1) + h.len()");
+t!(hashの無い鍵を抜くと虚無, "var h : i64 i64 hash := ( 1 => 10 ); (h.remove(9) ?? 5) + h.len()");
+t!(hashは抜いた後引けない, "var h : i64 i64 hash := ( 1 => 1, 2 => 2 ); h.remove(2) ?? 0; h[2] ?? 7");
+t!(hashを空にする, "var h : i64 i64 hash := ( 1 => 1, 2 => 2 ); h.clear(); h.len()");
+t!(hashも深く複製する,
+   "var a : i64 i64 hash := ( 1 => 10 ); var b := a; b[1] := 99; a[1] * 100 + b[1]");
+t!(hashにたくさん入れる,
+   "var h := new i64 i64 hash ( ); var i := 0;
+    while (i < 200) { h[i * 37] := i; i += 1; }; h.len() + h[37 * 99]");
+t!(hashは抜いても引ける,
+   "var h := new i64 i64 hash ( ); var i := 0;
+    while (i < 50) { h[i] := i; i += 1; };
+    var j := 0;
+    while (j < 25) { h.remove(j * 2) ?? 0; j += 1; };
+    h.len() * 100 + (h[7] ?? 0)");
+t!(文字列を鍵にするhash,
+   "var h : str i64 hash := ( \"alpha\" => 1, \"beta\" => 2 ); h[\"beta\"] * 10 + h.len()");
+t!(hashの値が集合体,
+   "var h := new i64 i64 array hash ( ); h[3] := new i64 array(2, 8); h[3][1] ?? 0");
