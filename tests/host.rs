@@ -136,6 +136,26 @@ fn s4_vm_でも配列を書き換えられる() {
     }
 }
 
+#[test]
+fn c2_実行時エラーまでの書き換えは巻き戻さない() {
+    for use_vm in [false, true] {
+        let mut h = Host::new();
+        h.use_vm = use_vm;
+        h.expose_value("n", Value::I64(1));
+
+        let out = h.run(
+            "n := 42;
+             fn f (a : i64) { a } -> i64;
+             f(1 / 0);",
+        );
+        assert!(matches!(out, Outcome::Runtime { .. }), "use_vm={use_vm}: {out:?}");
+        match h.get("n").map(|b| b.read()) {
+            Some(Value::I64(v)) => assert_eq!(v, 42, "use_vm={use_vm}"),
+            other => panic!("use_vm={use_vm}: {other:?}"),
+        }
+    }
+}
+
 // ===== C-96：ホストの名前は関数の中からは見えない =====
 
 fn regs96(v: &[i32]) -> Value {

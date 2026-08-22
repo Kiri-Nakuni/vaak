@@ -404,7 +404,12 @@ impl<'a> Lexer<'a> {
                                 let Some(d) = (c as char).to_digit(16) else {
                                     return self.err("16進数ではない", start);
                                 };
-                                v = v * 16 + d;
+                                let Some(next) =
+                                    v.checked_mul(16).and_then(|v| v.checked_add(d))
+                                else {
+                                    return self.err("符号位置ではない", start);
+                                };
+                                v = next;
                                 n += 1;
                                 self.pos += 1;
                             }

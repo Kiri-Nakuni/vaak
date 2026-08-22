@@ -34,7 +34,7 @@ export function activate(context: ExtensionContext) {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "vaak" }],
     synchronize: {
-      fileEvents: workspace.createFileSystemWatcher("**/*.vaak"),
+      fileEvents: workspace.createFileSystemWatcher("**/*.{vaak,vk}"),
     },
   };
 
@@ -43,7 +43,7 @@ export function activate(context: ExtensionContext) {
     // **色分けは生きている。** 言語サーバが無くても編集はできる
     window.showWarningMessage(
       `Vaak: \`${command}\` を起動できません（${e}）。\n` +
-        "`cargo install --path .` するか、`vaak.server.path` に道を書いてください。" +
+        "`vaak-lsp` を PATH に入れるか、`vaak.server.path` に道を書いてください。" +
         "色分けは言語サーバが無くても効きます。",
     );
   });

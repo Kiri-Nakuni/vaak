@@ -17,13 +17,14 @@ authors = ["Arimura Akihiro"]
 # **鍵語の一覧だけは `src/lexer.rs` と一致していなければならない。**
 # `tests/grammar.rs` がそれを確かめている。
 #
-# Zed は文法をローカルの道からは読めず、必ず git から取る。
-# だから `editors/tree-sitter-vaak` 自体が git の版方になっている。
-# 文法を直したら `scripts/sync-grammar.sh` を走らせて下の rev を新しくすること。
+# 文法はこの版方の `editors/tree-sitter-vaak` にある。Zed は git のコミットから
+# 取得するので、文法を含むコミットの次に `node scripts/sync-grammar.mjs --pin` を走らせ、
+# repository・rev・path を更新したコミットを作ること。
 
 [grammars.vaak]
-repository = "file:///home/suima/Documents/mydsl/editors/tree-sitter-vaak"
-rev = "ffbf0132f05c9cd506a6e93044dc2c6520d32140"
+repository = "ssh://git@git.trap.jp:2200/Suima/vaak.git"
+rev = "2244e19a0ab3470b26ba6c671a7241692ccd930b"
+path = "editors/tree-sitter-vaak"
 
 [language_servers.vaak-lsp]
 name = "Vaak"

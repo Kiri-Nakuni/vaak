@@ -393,3 +393,10 @@ fn 距離() {
         "25",
     );
 }
+
+#[test]
+fn 静的検査を省いても_flow_の再帰は有限の誤りになる() {
+    let src = "flow $a = $a; $a";
+    assert!(vaak::interp::run(src).is_err());
+    assert!(vaak::vm::run(src).is_err());
+}
