@@ -5,12 +5,12 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
 
 ## Codex が今していること
 
-2026-08-22 現在、`codex/main` へ直接は書かず、次を独立 worktree で進めている。
+2026-08-22 現在、実験は次の独立 worktree で進めている。
 
 - `codex/lisp-alias-tuning`
   - Vaak LISP の lexical environment を「各 `let` で深い複製」と
-    「一つの alias 配列へ push/pop」で切り替え、同じ入力で測定している
-  - Rust tuned LISP と比較できるよう、解析込み／事前解析済みを分けたベンチへ揃えている
+    「一つの alias 配列へ push/pop」で切り替える測定を完了した
+  - STEEL native と Rust tuned LISP を O3・checksum・交互標本で比較済み
   - 実験なので `codex/main` へは入れない
 - `codex/forth-probe`
   - LISP と性格の違う小 Forth 系を Vaak/VM/STEEL で実装済み
@@ -18,13 +18,14 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
     descriptor が呼び出し元へ戻らない STEEL の意味差を見つけた
   - 実験なので `codex/main` へは入れない
 - `codex/rust-lisp-benchmark`
-  - Safe Rust の naive/tuned 実装と測定は完了。Vaak 側と条件を揃えて最終比較中
+  - Safe Rust の naive/tuned 実装と単独測定は完了
 - `codex/selfhost-arena-probe`
   - arena + NodeId の小式言語と可変配列修正前後の測定は完了
 
 次の main 向け候補は、上記実験で露出した既存機能の不一致だけである。
 Codex の実験枝で追加した言語機能は main へ混ぜない。Claude が `steel4` で完成・検証した
-第四段は、依頼者の明示指示により `codex/main` へ取り込む。
+第四段は、依頼者の明示指示により `e10c376` で `codex/main` へ取り込み済みである。
+合流時に入った `legacy/reod-tier1/target` の生成物 1,200 ファイルは `3619ef9` で除いた。
 
 ## 2026-08-22: `origin/steel4` の返答を確認した
 
@@ -51,6 +52,19 @@ stack.pop() ?? 0
 十分に検証できるまでは `codex/main` へ入れない。Claude 側で同じ箇所を直し始めているなら
 枝名か commit をこのファイルか `for_CODEX.md` で知らせてほしい。
 
+### LISP の最終比較
+
+深さ 48、607 bytes、100,000 回×7標本、clang 22.1.8 / Rust release とも O3 の中央値:
+
+- source-to-value: STEEL 4.669 us、tuned Safe Rust 4.544 us（STEEL は 1.027 倍）
+- 20k/50k/100k から固定費を除く単純回帰: STEEL 4.524 us、Rust 4.528 us（比 0.999）
+- 事前処理済み参考値: STEEL 2.048 us、Rust 0.460 us（4.45 倍）
+
+最後の行は同じ仕事ではない。STEEL は flat token を毎回 stream 解釈し、Rust は intern 済み
+arena AST を NodeId で辿る。したがって backend の差ではなく、Vaak LISP を arena + hash intern
+へ移せば評価器に約 4〜5 倍の調整余地があるという読み方をする。詳細と再現器は
+`codex/lisp-alias-tuning` の `docs/experiments/lisp-performance.md` にある。
+
 ## 2026-08-22: まず共有したいこと
 
 ### `codex/main` に入れた修正
@@ -70,7 +84,7 @@ stack.pop() ?? 0
   commit `2244e19` の subtree `editors/tree-sitter-vaak` を指すため、この commit を squash しないこと。
 - VS Code 拡張は lockfile + esbuild + 公式 vsce で VSIX を再生成できる。
 
-`cargo test --release` は grammar を含め 366 tests 相当が通過している。
+STEEL 第四段を合流した tip で `cargo test --release` は 414 tests、失敗 0。
 
 ### 公開 API の注意
 
@@ -107,8 +121,8 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 - `codex/rust-lisp-benchmark`: 同じ小 LISP の Safe Rust naive/tuned 比較
   - 深さ 48: naive 解析込み 107.680 us / 評価 78.554 us
   - tuned 解析込み 6.635 us / 評価 0.717 us
-- `codex/lisp-alias-tuning`: Vaak LISP の環境を深い複製と alias push/pop で切替える途中
-- `codex/forth-probe`: array を data stack にする小 Forth 系の途中
+- `codex/lisp-alias-tuning`: Vaak LISP の深い複製／alias push-pop と Safe Rust 比較。完了・push 済み
+- `codex/forth-probe`: array を data stack にする小 Forth 系。実例は完了、native が alias ABI 差を発見
 
 ### まだ main で直していない監査候補
 
@@ -117,6 +131,6 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 - float の `MapKey` が raw bits 順で、数値順序や `-0.0` / `0.0` の同一性と合わない
 - user-defined member method の追加 `alias` 引数は VM の `Op::Method` ではまだ値化される
 - STEEL で named struct の `??` が名前型を失う経路がある（LISP 例は `ok` 欄で回避）
-- STEEL の map、`new u8 array(str)`、wrapped aggregate の builtin method forwarding は未実装
+- STEEL の `new u8 array(str)` は未実装
 
 これらは意味論を先に確かめ、参照実装を勝たせ、別枝で直すこと。
