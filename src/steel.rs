@@ -1847,6 +1847,11 @@ impl Steel {
             E::Switch { subject, arms } => self.switch(subject, arms, e.span).map(Some),
 
             E::Escape(x) => {
+                // **段数が実行時に決まるなら、値を持ちうる**——
+                // 零段なら脱出せず、被演算子がそのまま値になる（C-75 の 5）
+                if let Some(v) = self.dynamic_escape(x)? {
+                    return Ok(Some(v));
+                }
                 self.escape(x)?;
                 // **脱出の値は paradox**（C-43）。ここから先へは進まない
                 Ok(Some(self.paradox(&ValueType::I64)))
@@ -4257,5 +4262,125 @@ impl Steel {
             _ => return err(format!("`{name}` は整数に使えない"), span),
         };
         Ok(Val { ok, v: raw, ty: b.ty })
+    }
+}
+
+// ================= 動く段数の脱出 =================
+//
+// **囲んでいる段の数は組み立て時に分かる。** 実行時に決まるのは
+// 「そのうち何段抜けるか」だけである。だから `switch` で振り分けられる。
+//
+// この形なら、**動く段数を書かない台本は一命令も余分に持たない。**
+// 段ごとに中継を置く形にすると、書いていない台本まで遅くなる。
+
+impl Steel {
+    /// `$repeat(作用素, 回数)` の回数が実行時に決まる場合を組む。
+    ///
+    /// 静的に決まるなら `None` を返す——呼び手が今までどおり組む。
+    fn dynamic_escape(&mut self, x: &Escape) -> R<Option<Val>> {
+        let EscapeKind::Flow { name, args } = &x.kind else {
+            return Ok(None);
+        };
+        if name != "$repeat" {
+            return Ok(None);
+        }
+        let [FlowArg::Escape(op), FlowArg::Value(n)] = &args[..] else {
+            return err("`$repeat` は作用素と回数を取る", x.span);
+        };
+        // 組み立て時に決まるなら、今までどおり畳む
+        if self.const_int(n).is_some() {
+            return Ok(None);
+        }
+        // 作用素は組み立て時に決まらねばならない。**回数だけが動く**
+        let (unit, is_continue, _) = self.plan(op)?;
+        if unit == 0 && !is_continue {
+            return err("`$repeat` の作用素が段を数えない", x.span);
+        }
+
+        let count = self.expr(n)?;
+        let Some(count) = count else { return err("`$repeat` の回数に値が無い", n.span) };
+        let times = self.widen64(&count);
+
+        // 積み荷は**一度だけ**評価する（C-79）
+        let payload = match &x.operand {
+            Some(Operand::Value(v)) => self.expr(v)?,
+            Some(Operand::Escape(_)) => {
+                return err("`$repeat` の被演算子に作用素式は STEEL がまだ扱えない", x.span)
+            }
+            None => None,
+        };
+
+        let here = self.stages.len();
+        let vty = payload.as_ref().map(|v| v.ty.clone()).unwrap_or(ValueType::I64);
+        // 零段のときの値を置く枡
+        let slot = self.alloca("i128");
+        let ok_slot = self.alloca("i1");
+        self.emit(&format!("store i128 0, ptr {slot}"));
+        self.emit(&format!("store i1 false, ptr {ok_slot}"));
+        if let Some(p) = &payload {
+            let w = self.to_slot(p);
+            self.emit(&format!("store i128 {w}, ptr {slot}"));
+            self.emit(&format!("store i1 {}, ptr {ok_slot}", p.ok));
+        }
+
+        let zero = self.label("rep.zero");
+        let over = self.label("rep.over");
+        let done = self.label("rep.done");
+        // **段数は作用素の段数の倍数である。** `$repeat(break break, 3)` は 6 段
+        let mut arms = Vec::new();
+        let mut labels = Vec::new();
+        for k in 1..=here {
+            if unit != 0 && k % unit != 0 {
+                continue;
+            }
+            // **`continue` はループの段にしか掛からない。**
+            // 掛からない段数は枝を作らず、走れば落とす側へ回す
+            if is_continue && self.stages[here - k.max(1)].cont.is_none() {
+                continue;
+            }
+            let l = self.label("rep.k");
+            arms.push(format!("i64 {}, label %{l}", (k / unit.max(1)) as i64));
+            labels.push((k, l));
+        }
+        // **零以下は一段も抜けない**（C-75 の 5）
+        let le0 = self.tmp();
+        self.emit(&format!("{le0} = icmp sle i64 {times}, 0"));
+        let pick = self.label("rep.pick");
+        self.cbr(&le0, &zero, &pick);
+        self.place(&pick);
+        self.emit(&format!(
+            "switch i64 {times}, label %{over} [ {} ]",
+            arms.join(" ")
+        ));
+        self.done = true;
+
+        for (k, l) in labels {
+            self.place(&l);
+            if is_continue {
+                let idx = here - k.max(1);
+                let Some(cont) = self.stages[idx].cont.clone() else {
+                    return err("`continue` の抜けた先がループではない", x.span);
+                };
+                self.br(&cont);
+            } else {
+                self.leave(k, payload.clone())?;
+            }
+        }
+
+        // **段が足りない。** 黙って止まるより落とす（C-34）
+        self.place(&over);
+        self.emit("call void @vaak.fail()");
+        self.emit("unreachable");
+        self.done = true;
+
+        self.place(&zero);
+        self.br(&done);
+        self.place(&done);
+        let ok = self.tmp();
+        self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
+        let raw = self.tmp();
+        self.emit(&format!("{raw} = load i128, ptr {slot}"));
+        let v = self.from_slot(&raw, &vty.clone());
+        Ok(Some(Val { ok, v, ty: vty }))
     }
 }
