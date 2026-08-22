@@ -1785,9 +1785,30 @@ impl Steel {
         let cmp = if matches!(kty, ValueType::Str) {
             "  %c = call i32 @vaak.strcmp(ptr %kv, ptr %k)\n".to_string()
         } else if is_float(kty) {
-            // **浮動小数の鍵は断る。** 参照実装はビット列で並べており、
-            // 幅ごとに違う並びになる。合わせ切れないものを黙って違えない
-            return err("STEEL は浮動小数を写像の鍵にできない", Span::default());
+            if matches!(kty, ValueType::F80) {
+                // **`f80` は鍵にできない。** 参照実装が持たない型なので、
+                // 突き合わせる相手がいない（S-20）
+                return err("STEEL は f80 を写像の鍵にできない", Span::default());
+            }
+            // **単調な写しにしてから比べる**（C-99）
+            let widen = if matches!(kty, ValueType::F32) {
+                "  %kvd = fpext float %kv to double
+  %kd = fpext float %k to double
+"
+            } else {
+                "  %kvd = fadd double %kv, 0.0
+  %kd = fadd double %k, 0.0
+"
+            };
+            format!(
+                "{widen}  %ka = call i64 @vaak.fkey(double %kvd)
+                   %kb = call i64 @vaak.fkey(double %kd)
+                   %lt = icmp ult i64 %ka, %kb
+                   %gt = icmp ugt i64 %ka, %kb
+                   %a = select i1 %lt, i32 -1, i32 0
+                   %c = select i1 %gt, i32 1, i32 %a
+"
+            )
         } else {
             let (lt, gt) = if signed(kty) { ("slt", "sgt") } else { ("ult", "ugt") };
             format!(
@@ -1890,8 +1911,27 @@ impl Steel {
                     .to_string(),
             )
         } else if is_float(&kt) {
-            // **浮動小数は鍵にしない**（`map` と同じ理由）
-            return err("STEEL は浮動小数を hash の鍵にできない", Span::default());
+            if matches!(kt, ValueType::F80) {
+                return err("STEEL は f80 を hash の鍵にできない", Span::default());
+            }
+            // **同じ単調な写しを使う**（C-99）。`map` と鍵の同一性が揃う
+            let ext = if matches!(kt, ValueType::F32) {
+                ("fpext float %k to double", "fpext float %ek to double")
+            } else {
+                ("fadd double %k, 0.0", "fadd double %ek, 0.0")
+            };
+            (
+                format!("  %kd = {}
+  %kw = call i64 @vaak.fkey(double %kd)
+                           %hv = call i64 @vaak.hash.i64(i64 %kw)
+", ext.0),
+                format!("  %ekd = {}
+  %eka = call i64 @vaak.fkey(double %ekd)
+                           %kd2 = {}
+  %ekb = call i64 @vaak.fkey(double %kd2)
+                           %same = icmp eq i64 %eka, %ekb
+", ext.1, ext.0.replace("%k,", "%k,")),
+            )
         } else {
             let w = width(&kt).unwrap_or(64);
             let widen = if w >= 64 {
@@ -3542,6 +3582,24 @@ entry:
   %e = getelementptr i8, ptr %p, i64 40
   store i64 0, ptr %e
   ret ptr %p
+}
+
+; 浮動小数を**単調な i64 へ写す。**
+;
+; 生のビット列は数の順と一致しない（負ほど大きくなる）ので並べ替える。
+; **順序と等しさを同時に直す**ので、`map` も `hash` も同じ写しを使える。
+;
+; `-0.0` は `0.0` へ潰す。**`-0.0 == 0.0` が真である以上、鍵も同じでなければならない。**
+define internal i64 @vaak.fkey(double %x) {
+entry:
+  %z = fcmp oeq double %x, 0.0
+  %v = select i1 %z, double 0.0, double %x
+  %b = bitcast double %v to i64
+  %neg = icmp slt i64 %b, 0
+  %inv = xor i64 %b, -1
+  %pos = or i64 %b, -9223372036854775808
+  %k = select i1 %neg, i64 %inv, i64 %pos
+  ret i64 %k
 }
 
 ; 整数の混ぜ方（splitmix64 の仕上げ）。**下位だけ見ても散る**ようにする
