@@ -140,6 +140,18 @@ t!(aliasで受ければ写さない,
 t!(aliasで書き換えると元も変わる,
    "fn bump (var a : i64 array alias) { a[0] := 9; } -> i64;
     var xs := [1,2]; bump(xs); xs[0]");
+t!(alias引数の数値代入が呼び出し元へ届く,
+   "fn set (var x : i64 alias) { x := 42; };
+    var x := 0; set(x); x");
+t!(alias引数から伸ばした配列の根が共有される,
+   "fn push_one (var xs : i64 array alias) { xs.push(42); };
+    var xs : i64 array := new i64 array(0, 0); push_one(xs);
+    if (xs.len() == 1) (xs[0] ?? 0) else 0 fi");
+t!(alias引数へ逃げた確保は関数解放を越えて生きる,
+   "fn push_one (var xs : i64 array alias) { xs.push(42); };
+    var xs : i64 array := new i64 array(0, 0); push_one(xs);
+    let trash := new i64 array(4, 7);
+    (xs[0] ?? 0) + trash[0] - 7");
 t!(値で受ければ元は変わらない,
    "fn bump (var a : i64 array) { a[0] := 9; } -> i64;
     var xs := [1,2]; bump(xs); xs[0]");
