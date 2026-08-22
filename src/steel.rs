@@ -3116,19 +3116,29 @@ impl Steel {
         };
         let mut vals = Vec::new();
         for (p, a) in f.params.iter().zip(args) {
-            let v = self.expr(a)?;
-            let Some(v) = v else { return err("引数に値が無い", a.span) };
             let ty = self.resolve(&p.ty.value);
             if width(&ty).is_none() && !is_float(&ty) && !is_heap(&ty) {
                 return err("STEEL はまだ数と集合体しか扱えない", a.span);
             }
-            // **複製か別名かは型が決める**（C-20）。`alias` なら写さない
+
+            // **`alias` は値ではなく、呼び出し元と同じセルを渡す**（C-20、S-21）。
+            // 名前が既に別名なら `addr` が一段辿るので、常に値そのものの枠へ届く。
+            if p.ty.is_alias {
+                let ExprKind::Name(n) = &a.kind else {
+                    return err("`alias` 引数に渡せるのは名前だけ", a.span);
+                };
+                let Some((cell, _)) = self.addr(n) else {
+                    return err(format!("知らない名前 `{n}`"), a.span);
+                };
+                vals.push(("ptr".to_string(), cell, "true".to_string()));
+                continue;
+            }
+
+            let v = self.expr(a)?;
+            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            // **値引数は深く複製する**（C-20）。
             let c = if is_heap(&ty) {
-                if p.ty.is_alias {
-                    v.v.clone()
-                } else {
-                    self.deep_copy(&v.v.clone(), &ty)
-                }
+                self.deep_copy(&v.v.clone(), &ty)
             } else {
                 self.conv(&v.v.clone(), &v.ty.clone(), &ty)
             };
@@ -3174,19 +3184,36 @@ impl Steel {
                 return err("STEEL はまだ数と集合体の引数しか扱えない", p.span);
             }
             let pt = self.resolve(&p.ty.value);
-            params.push(format!("{} %p{i}, i1 %pok{i}", ity(&pt)));
+            let abi = if p.ty.is_alias { "ptr".to_string() } else { ity(&pt) };
+            params.push(format!("{abi} %p{i}, i1 %pok{i}"));
         }
 
-        // **場の印を取る。** 関数を出るときに戻す（C-90）
-        let mark = self.tmp();
-        self.emit(&format!("{mark} = call i64 @vaak.mark()"));
+        // 可変な集合体の別名からは、grow や欄への代入で確保が呼び出し元へ逃げる。
+        // その関数だけは場を戻さない（S-21）。読み取り専用の別名と数の別名は戻せる。
+        let keeps_arena = f.params.iter().any(|p| {
+            p.ty.is_alias
+                && p.kind == BindKind::Var
+                && is_heap(&self.resolve(&p.ty.value))
+        });
+        let mark = if keeps_arena {
+            None
+        } else {
+            let mark = self.tmp();
+            self.emit(&format!("{mark} = call i64 @vaak.mark()"));
+            Some(mark)
+        };
 
         // **フレームは段でもある**（C-23）——`break` の上限
         self.open_stage(None, false);
         for (i, p) in f.params.iter().enumerate() {
             let pt = self.resolve(&p.ty.value);
-            let ptr = self.declare(&p.name, pt.clone());
-            self.emit(&format!("store {} %p{i}, ptr {ptr}", ity(&pt)));
+            if p.ty.is_alias {
+                // 局所の別名枠を一つ持つので、`&=` で指し直しても caller の名前は動かない。
+                self.declare_alias(&p.name, &format!("%p{i}"), pt);
+            } else {
+                let ptr = self.declare(&p.name, pt.clone());
+                self.emit(&format!("store {} %p{i}, ptr {ptr}", ity(&pt)));
+            }
         }
         let ExprKind::Block(items) = &f.body.kind else {
             return err("関数の本体はブロックでなければならない", f.span);
@@ -3199,7 +3226,11 @@ impl Steel {
         let out = self.close_stage();
         // **返り値は呼び出し側の領域へ移る**（C-90 の表）。
         // 印の下へ写してから、印を戻す——**領域は高々一つの値**（C-14）なので一つだけ
-        let conv = if is_heap(&ret) && is_heap(&out.ty) {
+        let conv = if keeps_arena && is_heap(&ret) && is_heap(&out.ty) {
+            // 場を保つ場合も、返り値は別の自己完結した値である（C-20）。
+            // 解放を挟まないので、一度の深い複製で足りる。
+            self.deep_copy(&out.v.clone(), &ret)
+        } else if is_heap(&ret) && is_heap(&out.ty) {
             // **二段で写す**（C-90 の表：「返り値は呼び出し側の領域へ移る」）。
             //
             // 1. 印より上へ深く写す（**逃がす**）
@@ -3215,13 +3246,18 @@ impl Steel {
             let f = self.copy_fn(&ret);
             let up = self.tmp();
             self.emit(&format!("{up} = call ptr {f}(ptr {})", out.v));
-            self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            self.emit(&format!(
+                "call void @vaak.release(i64 {})",
+                mark.as_ref().expect("場を戻せる関数")
+            ));
             let down = self.tmp();
             self.emit(&format!("{down} = call ptr {f}(ptr {up})"));
             down
         } else {
             let c = self.conv(&out.v.clone(), &out.ty.clone(), &ret);
-            self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            if let Some(mark) = &mark {
+                self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            }
             c
         };
         let a = self.tmp();
@@ -3254,12 +3290,13 @@ impl Steel {
 /// | 再帰的データ構造は作れない（C-63） | **循環しない** |
 /// | 返り値は複製。実装は移動してよい | **呼び出し側の領域へ移る** |
 ///
-/// > スコープを越えて生き残るものが無い。だから、抜けた時点での解放は正確である。
+/// ただし**可変な集合体の `alias` 引数は呼び出し元のセルそのもの**なので、
+/// grow 等で作った値が関数を越える（S-21）。その関数は印を戻さない。
 ///
 /// # 領域を抜けるときに何をするか
 ///
 /// **印を戻すだけ。** ただし外へ出る値を先に印の下へ写す——
-/// **領域は高々一つの値しか持たない**（C-14）ので、写すのは一つだけである。
+/// **領域は高々一つの値しか持たない**（C-14）ので、通常は写すのは一つだけである。
 ///
 /// これは C-33（`:=` は深い複製）が既に言っていることを、そのまま実装したものである。
 ///
