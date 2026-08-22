@@ -1136,27 +1136,61 @@ impl Steel {
         }
     }
 
-    /// 枡（`i64`）へ入れる形にする。**集合体は場所を数として入れる。**
+    /// 合流枡（`i128`）へ、値の**ビットを変えずに**入れる。
     ///
     /// 段と分岐の合流点は一つの枡を使う（領域は高々一つの値、C-14）ので、
-    /// **型ごとに枡を分けない。**
+    /// **型ごとに枡を分けない。** 最大の基底型 `f80` まで可逆に収まる幅を使う。
+    /// 浮動小数を `fptosi` すると小数部を失い、範囲外では LLVM の poison に
+    /// なるので、整数表現へ `bitcast` してから零拡張する。
     fn to_slot(&mut self, v: &Val) -> String {
         if is_heap(&v.ty) {
             let t = self.tmp();
-            self.emit(&format!("{t} = ptrtoint ptr {} to i64", v.v));
+            self.emit(&format!("{t} = ptrtoint ptr {} to i128", v.v));
             return t;
         }
-        self.conv(&v.v.clone(), &v.ty.clone(), &ValueType::I64)
+        if is_float(&v.ty) {
+            let w = match v.ty {
+                ValueType::F32 => 32,
+                ValueType::F64 => 64,
+                ValueType::F80 => 80,
+                _ => unreachable!(),
+            };
+            let bits = self.tmp();
+            self.emit(&format!("{bits} = bitcast {} {} to i{w}", ity(&v.ty), v.v));
+            let out = self.tmp();
+            self.emit(&format!("{out} = zext i{w} {bits} to i128"));
+            return out;
+        }
+        let w = width(&v.ty).unwrap_or(64);
+        let out = self.tmp();
+        self.emit(&format!("{out} = zext i{w} {} to i128", v.v));
+        out
     }
 
-    /// 枡から取り出す。
+    /// 合流枡から元のビット列を取り出す。
     fn from_slot(&mut self, raw: &str, ty: &ValueType) -> String {
         if is_heap(ty) {
             let t = self.tmp();
-            self.emit(&format!("{t} = inttoptr i64 {raw} to ptr"));
+            self.emit(&format!("{t} = inttoptr i128 {raw} to ptr"));
             return t;
         }
-        self.conv(raw, &ValueType::I64, ty)
+        if is_float(ty) {
+            let w = match ty {
+                ValueType::F32 => 32,
+                ValueType::F64 => 64,
+                ValueType::F80 => 80,
+                _ => unreachable!(),
+            };
+            let bits = self.tmp();
+            self.emit(&format!("{bits} = trunc i128 {raw} to i{w}"));
+            let out = self.tmp();
+            self.emit(&format!("{out} = bitcast i{w} {bits} to {}", ity(ty)));
+            return out;
+        }
+        let w = width(ty).unwrap_or(64);
+        let out = self.tmp();
+        self.emit(&format!("{out} = trunc i128 {raw} to i{w}"));
+        out
     }
 
     fn widen64(&mut self, x: &Val) -> String {
@@ -1207,11 +1241,11 @@ impl Steel {
     /// 段を開き、本体を組み、段を閉じる。**戻り値は段の外界面。**
     fn open_stage(&mut self, cont: Option<String>, count: bool) -> usize {
         let exit = self.label("stage.exit");
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let count_slot = if count { Some(self.alloca("i64")) } else { None };
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
-        self.emit(&format!("store i64 0, ptr {slot}"));
+        self.emit(&format!("store i128 0, ptr {slot}"));
         if let Some(c) = &count_slot {
             self.emit(&format!("store i64 0, ptr {c}"));
         }
@@ -1233,7 +1267,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {}", st.ok_slot));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {}", st.slot));
+        self.emit(&format!("{raw} = load i128, ptr {}", st.slot));
         let v = self.from_slot(&raw, &st.ty.clone());
         Val { ok, v, ty: st.ty }
     }
@@ -1252,7 +1286,7 @@ impl Steel {
             Some(p) => {
                 let w = self.to_slot(&p);
                 self.stages[idx].ty = p.ty.clone();
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", p.ok));
             }
             None => {
@@ -2327,13 +2361,13 @@ impl Steel {
     fn coalesce(&mut self, lhs: &Expr, rhs: &Expr, span: Span) -> R<Val> {
         let l = self.expr(lhs)?;
         let Some(l) = l else { return err("`??` の左に領域が無い", span) };
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let use_r = self.label("qq.right");
         let done = self.label("qq.done");
 
         let w = self.to_slot(&l);
-        self.emit(&format!("store i64 {w}, ptr {slot}"));
+        self.emit(&format!("store i128 {w}, ptr {slot}"));
         self.emit(&format!("store i1 {}, ptr {ok_slot}", l.ok));
         self.cbr(&l.ok.clone(), &done, &use_r);
 
@@ -2342,7 +2376,7 @@ impl Steel {
         let ty = match r {
             Some(r) => {
                 let w = self.to_slot(&r);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", r.ok));
                 r.ty
             }
@@ -2357,7 +2391,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {slot}"));
+        self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
@@ -2368,11 +2402,11 @@ impl Steel {
 impl Steel {
     /// `if` — **分岐は被演算子位置なので領域だが、スコープでも脱出段でもない**（C-20）。
     fn if_expr(&mut self, i: &If, _span: Span) -> R<Val> {
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let done = self.label("if.done");
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
-        self.emit(&format!("store i64 0, ptr {slot}"));
+        self.emit(&format!("store i128 0, ptr {slot}"));
         let mut ty = ValueType::I64;
 
         for (cond, body) in &i.arms {
@@ -2386,7 +2420,7 @@ impl Steel {
             if let Some(v) = self.expr(body)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
             self.br(&done);
@@ -2398,7 +2432,7 @@ impl Steel {
             if let Some(v) = self.expr(els)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
         }
@@ -2408,7 +2442,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {slot}"));
+        self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
@@ -2534,10 +2568,10 @@ impl Steel {
     fn switch(&mut self, subject: &Expr, arms: &[Arm], span: Span) -> R<Val> {
         let s = self.expr(subject)?;
         let Some(s) = s else { return err("`switch` の主題に値が無い", span) };
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
-        self.emit(&format!("store i64 0, ptr {slot}"));
+        self.emit(&format!("store i128 0, ptr {slot}"));
         let done = self.label("sw.done");
         let mut ty = ValueType::I64;
 
@@ -2552,7 +2586,7 @@ impl Steel {
             if let Some(v) = self.expr(&a.value)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
             self.br(&done);
@@ -2564,7 +2598,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {slot}"));
+        self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
