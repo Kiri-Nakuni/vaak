@@ -234,18 +234,18 @@ impl Host {
                 .map(|(_, b, _)| b.read())
                 .collect();
             let mut answer = Answer { fns: self.fns.clone() };
-            match crate::vm::run_program_with_fns(&p, values, &mut answer) {
-                Ok((ev, after)) => {
-                    let mut it = after.into_iter();
-                    for (_, b, live) in self.bindings.iter_mut() {
-                        if *live {
-                            if let Some(v) = it.next() {
-                                b.write(&v);
-                            }
-                        }
+            let (result, after) =
+                crate::vm::run_program_with_fns_writeback(&p, values, &mut answer);
+            let mut it = after.into_iter();
+            for (_, b, live) in self.bindings.iter_mut() {
+                if *live {
+                    if let Some(v) = it.next() {
+                        b.write(&v);
                     }
-                    Ok(ev)
                 }
+            }
+            match result {
+                Ok(ev) => Ok(ev),
                 Err(e) => Err(crate::interp::RuntimeError { msg: e.msg, span: e.span }),
             }
         } else {
