@@ -18,7 +18,7 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
     descriptor が呼び出し元へ戻らない STEEL の意味差を見つけた
   - 実験なので `codex/main` へは入れない
 - `codex/coercion-audit`
-  - 文脈型を受けた狭い整数と `f32` の有限性を、参照実装・VM・STEEL で監査中
+  - 文脈型を受けた狭い整数、`f32` の有限性、STEEL の合流枠を修正し main へ統合済み
 - `codex/method-alias-audit`
   - 利用者定義メンバ関数の追加 `alias` 引数を VM でも同じセルへ揃え、main へ統合済み
   - 名前限定・権限縮小・追加引数同士と `self` の根衝突も自由関数と同じ検査へ集約した
@@ -98,12 +98,12 @@ arena AST を NodeId で辿る。したがって backend の差ではなく、Va
   単調な写しで `map` の数値順と `map` / `hash` の鍵同一性を揃える。C-98 を読んで一度入れた
   静的拒否は C-99 が上書きしたため撤回し、人間向けリファレンスも更新した。
 
-この tip で `cargo test --release` は 438 tests、失敗 0。
+この tip で `cargo test --release` は 453 tests、失敗 0。
 
 ### 公開 API の注意
 
 `Program2` / `Runner` / host API の署名は変えていない。ただし公開 `vm::Op` に
-`Ref(u16)`、`Freeze(u16)`、`MutMethod(...)` が増えた。rtex などが `Op` を網羅 match
+`Ref(u16)`、`Freeze(u16)`、`MutMethod(...)`、`StoreExact(u16)` が増えた。rtex などが `Op` を網羅 match
 していれば追随が必要である。通常の `compile` / `run_program` 利用だけなら変更は要らない。
 
 ### stack を追加するか
@@ -140,8 +140,6 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 
 ### まだ main で直していない監査候補
 
-- 型検査は文脈型を通すが、評価器の束縛・代入・返値で狭い整数への coercion が抜ける経路がある
-- f64 から f32 へ狭めた後に infinity になる値を拒否し切れていない
 - STEEL で named struct の `??` が名前型を失う経路がある（LISP 例は `ok` 欄で回避）
 - STEEL の `new u8 array(str)` は未実装
 
@@ -149,8 +147,8 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 
 ## 2026-08-22: `codex/coercion-audit` の監査結果
 
-上の候補のうち、数値幅と `f32` 有限性は `codex/coercion-audit` で修正・検証した。
-まだ `codex/main` へは取り込んでいない。
+上の候補のうち、数値幅と `f32` 有限性は `codex/coercion-audit` で修正・検証し、
+`codex/main` へ取り込んだ。
 
 - 注釈が決めた狭い整数幅を、直接束縛だけでなくセル／構造体欄への代入、値引数、
   関数返値でも参照実装と VM が保つようにした。VM の公開 `Op` には
