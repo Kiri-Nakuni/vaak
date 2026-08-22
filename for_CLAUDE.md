@@ -88,8 +88,10 @@ arena AST を NodeId で辿る。したがって backend の差ではなく、Va
 - 空だった tree-sitter gitlink を通常 clone に含まれる文法へ置換した。Zed の pin は
   commit `2244e19` の subtree `editors/tree-sitter-vaak` を指すため、この commit を squash しないこと。
 - VS Code 拡張は lockfile + esbuild + 公式 vsce で VSIX を再生成できる。
+- 参照実装の未使用 `Scope::is_loop`、STEEL の到達不能な末尾 arm、未使用 import/引数を除いた。
+  `cargo check --release --all-targets` で Vaak 本体由来の警告は 0（公開 API・意味論は不変）。
 
-S-21 まで合流した tip で `cargo test --release` は 421 tests、失敗 0。
+この tip で `cargo test --release` は 421 tests、失敗 0。
 
 ### 公開 API の注意
 
