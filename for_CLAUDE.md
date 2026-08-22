@@ -18,7 +18,7 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
     descriptor が呼び出し元へ戻らない STEEL の意味差を見つけた
   - 実験なので `codex/main` へは入れない
 - `codex/coercion-audit`
-  - 文脈型を受けた狭い整数と `f32` の有限性を、参照実装・VM・STEEL で監査中
+  - 文脈型を受けた狭い整数、`f32` の有限性、STEEL の合流枠を修正し main へ統合済み
 - `codex/method-alias-audit`
   - 利用者定義メンバ関数の追加 `alias` 引数を VM でも同じセルへ揃え、main へ統合済み
   - 名前限定・権限縮小・追加引数同士と `self` の根衝突も自由関数と同じ検査へ集約した
@@ -98,12 +98,12 @@ arena AST を NodeId で辿る。したがって backend の差ではなく、Va
   単調な写しで `map` の数値順と `map` / `hash` の鍵同一性を揃える。C-98 を読んで一度入れた
   静的拒否は C-99 が上書きしたため撤回し、人間向けリファレンスも更新した。
 
-この tip で `cargo test --release` は 438 tests、失敗 0。
+この tip で `cargo test --release` は 453 tests、失敗 0。
 
 ### 公開 API の注意
 
 `Program2` / `Runner` / host API の署名は変えていない。ただし公開 `vm::Op` に
-`Ref(u16)`、`Freeze(u16)`、`MutMethod(...)` が増えた。rtex などが `Op` を網羅 match
+`Ref(u16)`、`Freeze(u16)`、`MutMethod(...)`、`StoreExact(u16)` が増えた。rtex などが `Op` を網羅 match
 していれば追随が必要である。通常の `compile` / `run_program` 利用だけなら変更は要らない。
 
 ### stack を追加するか
@@ -140,9 +140,36 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 
 ### まだ main で直していない監査候補
 
-- 型検査は文脈型を通すが、評価器の束縛・代入・返値で狭い整数への coercion が抜ける経路がある
-- f64 から f32 へ狭めた後に infinity になる値を拒否し切れていない
 - STEEL で named struct の `??` が名前型を失う経路がある（LISP 例は `ok` 欄で回避）
 - STEEL の `new u8 array(str)` は未実装
 
 これらは意味論を先に確かめ、参照実装を勝たせ、別枝で直すこと。
+
+## 2026-08-22: `codex/coercion-audit` の監査結果
+
+上の候補のうち、数値幅と `f32` 有限性は `codex/coercion-audit` で修正・検証し、
+`codex/main` へ取り込んだ。
+
+- 注釈が決めた狭い整数幅を、直接束縛だけでなくセル／構造体欄への代入、値引数、
+  関数返値でも参照実装と VM が保つようにした。VM の公開 `Op` には
+  `StoreExact(u16)` が増えたので、rtex 側で網羅 match していれば追随が要る。
+- `f64` から `f32` へ丸めた結果と `f32` 演算結果を、丸めた**後**にも有限性検査する。
+  infinity は値にせず paradox とし、参照実装・VM・STEEL を揃えた。
+- 追加監査で、STEEL の block／`if`／`??`／`switch`／関数返値の合流枠が
+  浮動小数を `i64` へ数値変換していたことを確認した。小数部を失うだけでなく、
+  `i64` 範囲外は LLVM poison になった。合流枠を `i128` にし、整数・ptr・f32・f64・f80 を
+  ビット列として可逆保存するように直した。
+- 最新 `origin/codex/main` `059a910` を重ね、LLVM 22.1.8 を使った
+  `cargo test --release` は **453/453** 通過した。
+
+判断を保留したものが一つある。
+
+```vaak
+var x : u8 := 0;
+x := 256 / 2;
+x
+```
+
+現在は三実装とも、`i64` で `256 / 2` を求めて最後に `u8` へ狭めるため 128 になる。
+注釈の文脈を各リテラル・各演算へ届かせ、`256` を先に `u8` の 0 として 0 にするかは、
+C-25 / C-30 だけから一意と断定しなかった。ここは新しい意味判断なしに変えないこと。

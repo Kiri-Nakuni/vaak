@@ -505,6 +505,24 @@ impl Steel {
         t
     }
 
+    /// 値を変換し、`f32` へ狭めた後の有限性を外界面へ反映する。
+    ///
+    /// `f64` の途中値だけを確かめると、`3.5e38` は有限のまま通り、
+    /// `fptrunc` の後で infinity が言語へ入り込む（C-84）。
+    fn conv_value(&mut self, x: Val, to: &ValueType) -> Val {
+        let from = x.ty.clone();
+        let v = self.conv(&x.v, &from, to);
+        let narrows_float = matches!(to, ValueType::F32)
+            && matches!(from, ValueType::F64 | ValueType::F80);
+        let ok = if narrows_float {
+            let finite = self.finite(&v, to);
+            self.both_ok(&x.ok, &finite)
+        } else {
+            x.ok
+        };
+        Val { ok, v, ty: to.clone() }
+    }
+
     /// 二つ組を一つに畳む。**片方でも paradox なら paradox**（C-22：伝播する）。
     fn both_ok(&mut self, a: &str, b: &str) -> String {
         if a == "true" {
@@ -1118,27 +1136,61 @@ impl Steel {
         }
     }
 
-    /// 枡（`i64`）へ入れる形にする。**集合体は場所を数として入れる。**
+    /// 合流枡（`i128`）へ、値の**ビットを変えずに**入れる。
     ///
     /// 段と分岐の合流点は一つの枡を使う（領域は高々一つの値、C-14）ので、
-    /// **型ごとに枡を分けない。**
+    /// **型ごとに枡を分けない。** 最大の基底型 `f80` まで可逆に収まる幅を使う。
+    /// 浮動小数を `fptosi` すると小数部を失い、範囲外では LLVM の poison に
+    /// なるので、整数表現へ `bitcast` してから零拡張する。
     fn to_slot(&mut self, v: &Val) -> String {
         if is_heap(&v.ty) {
             let t = self.tmp();
-            self.emit(&format!("{t} = ptrtoint ptr {} to i64", v.v));
+            self.emit(&format!("{t} = ptrtoint ptr {} to i128", v.v));
             return t;
         }
-        self.conv(&v.v.clone(), &v.ty.clone(), &ValueType::I64)
+        if is_float(&v.ty) {
+            let w = match v.ty {
+                ValueType::F32 => 32,
+                ValueType::F64 => 64,
+                ValueType::F80 => 80,
+                _ => unreachable!(),
+            };
+            let bits = self.tmp();
+            self.emit(&format!("{bits} = bitcast {} {} to i{w}", ity(&v.ty), v.v));
+            let out = self.tmp();
+            self.emit(&format!("{out} = zext i{w} {bits} to i128"));
+            return out;
+        }
+        let w = width(&v.ty).unwrap_or(64);
+        let out = self.tmp();
+        self.emit(&format!("{out} = zext i{w} {} to i128", v.v));
+        out
     }
 
-    /// 枡から取り出す。
+    /// 合流枡から元のビット列を取り出す。
     fn from_slot(&mut self, raw: &str, ty: &ValueType) -> String {
         if is_heap(ty) {
             let t = self.tmp();
-            self.emit(&format!("{t} = inttoptr i64 {raw} to ptr"));
+            self.emit(&format!("{t} = inttoptr i128 {raw} to ptr"));
             return t;
         }
-        self.conv(raw, &ValueType::I64, ty)
+        if is_float(ty) {
+            let w = match ty {
+                ValueType::F32 => 32,
+                ValueType::F64 => 64,
+                ValueType::F80 => 80,
+                _ => unreachable!(),
+            };
+            let bits = self.tmp();
+            self.emit(&format!("{bits} = trunc i128 {raw} to i{w}"));
+            let out = self.tmp();
+            self.emit(&format!("{out} = bitcast i{w} {bits} to {}", ity(ty)));
+            return out;
+        }
+        let w = width(ty).unwrap_or(64);
+        let out = self.tmp();
+        self.emit(&format!("{out} = trunc i128 {raw} to i{w}"));
+        out
     }
 
     fn widen64(&mut self, x: &Val) -> String {
@@ -1189,11 +1241,11 @@ impl Steel {
     /// 段を開き、本体を組み、段を閉じる。**戻り値は段の外界面。**
     fn open_stage(&mut self, cont: Option<String>, count: bool) -> usize {
         let exit = self.label("stage.exit");
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let count_slot = if count { Some(self.alloca("i64")) } else { None };
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
-        self.emit(&format!("store i64 0, ptr {slot}"));
+        self.emit(&format!("store i128 0, ptr {slot}"));
         if let Some(c) = &count_slot {
             self.emit(&format!("store i64 0, ptr {c}"));
         }
@@ -1215,7 +1267,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {}", st.ok_slot));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {}", st.slot));
+        self.emit(&format!("{raw} = load i128, ptr {}", st.slot));
         let v = self.from_slot(&raw, &st.ty.clone());
         Val { ok, v, ty: st.ty }
     }
@@ -1234,7 +1286,7 @@ impl Steel {
             Some(p) => {
                 let w = self.to_slot(&p);
                 self.stages[idx].ty = p.ty.clone();
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", p.ok));
             }
             None => {
@@ -1748,12 +1800,12 @@ impl Steel {
                     return err("STEEL はまだ数と集合体しか扱えない", e.span);
                 }
                 // **包みを剥がしても置き場は変わらない**（S-2）。数だけ幅を合わせる
-                let c = if is_heap(&t) {
-                    v.v.clone()
+                let out = if is_heap(&t) {
+                    Val { ok: v.ok, v: v.v, ty: t }
                 } else {
-                    self.conv(&v.v.clone(), &v.ty.clone(), &t)
+                    self.conv_value(v, &t)
                 };
-                Ok(Some(Val { ok: v.ok, v: c, ty: t }))
+                Ok(Some(out))
             }
 
             E::Call { callee, args } => self.call(callee, args, e.span),
@@ -2312,13 +2364,13 @@ impl Steel {
         // `E ?? D : T` の T は左辺の型である（C-29）。脱出も式としては
         // 仮の i64 paradox を返すので、右辺から型を取ると集合体の名前型を失う。
         let ty = l.ty.clone();
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let use_r = self.label("qq.right");
         let done = self.label("qq.done");
 
         let w = self.to_slot(&l);
-        self.emit(&format!("store i64 {w}, ptr {slot}"));
+        self.emit(&format!("store i128 {w}, ptr {slot}"));
         self.emit(&format!("store i1 {}, ptr {ok_slot}", l.ok));
         self.cbr(&l.ok.clone(), &done, &use_r);
 
@@ -2327,7 +2379,7 @@ impl Steel {
         match r {
             Some(r) => {
                 let w = self.to_slot(&r);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", r.ok));
             }
             None => {
@@ -2340,7 +2392,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {slot}"));
+        self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &ty);
         Ok(Val { ok, v, ty })
     }
@@ -2351,11 +2403,11 @@ impl Steel {
 impl Steel {
     /// `if` — **分岐は被演算子位置なので領域だが、スコープでも脱出段でもない**（C-20）。
     fn if_expr(&mut self, i: &If, _span: Span) -> R<Val> {
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let done = self.label("if.done");
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
-        self.emit(&format!("store i64 0, ptr {slot}"));
+        self.emit(&format!("store i128 0, ptr {slot}"));
         let mut ty = ValueType::I64;
 
         for (cond, body) in &i.arms {
@@ -2369,7 +2421,7 @@ impl Steel {
             if let Some(v) = self.expr(body)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
             self.br(&done);
@@ -2381,7 +2433,7 @@ impl Steel {
             if let Some(v) = self.expr(els)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
         }
@@ -2391,7 +2443,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {slot}"));
+        self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
@@ -2517,10 +2569,10 @@ impl Steel {
     fn switch(&mut self, subject: &Expr, arms: &[Arm], span: Span) -> R<Val> {
         let s = self.expr(subject)?;
         let Some(s) = s else { return err("`switch` の主題に値が無い", span) };
-        let slot = self.alloca("i64");
+        let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
-        self.emit(&format!("store i64 0, ptr {slot}"));
+        self.emit(&format!("store i128 0, ptr {slot}"));
         let done = self.label("sw.done");
         let mut ty = ValueType::I64;
 
@@ -2535,7 +2587,7 @@ impl Steel {
             if let Some(v) = self.expr(&a.value)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
-                self.emit(&format!("store i64 {w}, ptr {slot}"));
+                self.emit(&format!("store i128 {w}, ptr {slot}"));
                 self.emit(&format!("store i1 {}, ptr {ok_slot}", v.ok));
             }
             self.br(&done);
@@ -2547,7 +2599,7 @@ impl Steel {
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
         let raw = self.tmp();
-        self.emit(&format!("{raw} = load i64, ptr {slot}"));
+        self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &ty.clone());
         Ok(Val { ok, v, ty })
     }
@@ -3265,6 +3317,7 @@ impl Steel {
         let out = self.close_stage();
         // **返り値は呼び出し側の領域へ移る**（C-90 の表）。
         // 印の下へ写してから、印を戻す——**領域は高々一つの値**（C-14）なので一つだけ
+        let mut out_ok = out.ok.clone();
         let conv = if keeps_arena && is_heap(&ret) && is_heap(&out.ty) {
             // 場を保つ場合も、返り値は別の自己完結した値である（C-20）。
             // 解放を挟まないので、一度の深い複製で足りる。
@@ -3293,14 +3346,15 @@ impl Steel {
             self.emit(&format!("{down} = call ptr {f}(ptr {up})"));
             down
         } else {
-            let c = self.conv(&out.v.clone(), &out.ty.clone(), &ret);
+            let converted = self.conv_value(out.clone(), &ret);
+            out_ok = converted.ok;
             if let Some(mark) = &mark {
                 self.emit(&format!("call void @vaak.release(i64 {mark})"));
             }
-            c
+            converted.v
         };
         let a = self.tmp();
-        self.emit(&format!("{a} = insertvalue {{ i1, {} }} undef, i1 {}, 0", ity(&ret), out.ok));
+        self.emit(&format!("{a} = insertvalue {{ i1, {} }} undef, i1 {out_ok}, 0", ity(&ret)));
         let b = self.tmp();
         self.emit(&format!("{b} = insertvalue {{ i1, {} }} {a}, {} {conv}, 1", ity(&ret), ity(&ret)));
         self.emit(&format!("ret {{ i1, {} }} {b}", ity(&ret)));
