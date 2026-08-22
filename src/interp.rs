@@ -1135,6 +1135,26 @@ fn coerce(v: Value, ty: Option<&Type>) -> Value {
     }
     // 配列と写像は中へ降りる
     match (&t.value, v) {
+        // `str` は `u8 array` を包んだ型（C-77）。包みを行き来するのは
+        // `new` だけだが、VM の `Coerce` もこの一つの変換を共有する。
+        (ValueType::Array(el), Value::Str(bytes)) if **el == ValueType::U8 => {
+            return Value::array(
+                ValueType::U8,
+                bytes.into_iter().map(Value::U8).collect(),
+            );
+        }
+        (ValueType::Str, Value::Array(array)) if array.elem == ValueType::U8 => {
+            return Value::str(
+                array
+                    .items
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        Value::U8(byte) => Some(byte),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
         (ValueType::Array(el), Value::Array(ar)) => {
             let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
             return Value::array((**el).clone(), ar.items.into_iter().map(|x| coerce(x, Some(&et))).collect());
@@ -1649,6 +1669,29 @@ impl Interp {
                     out.push((f.name.clone(), coerce(v, Some(&f.ty))));
                 }
                 Ok(Eval::Value(Value::strukt(name.clone(), out)))
+            }
+            // `new u8 array(str)` は C-78 の「剥がす」構築。
+            // 一引数の通常構築 `new u8 array(n)` とは値の型で見分ける。
+            (ValueType::Array(elem), CtorArgs::Positional(a))
+                if **elem == ValueType::U8 && a.len() == 1 =>
+            {
+                let first = match self.need_value(&a[0])? {
+                    Ok(v) => v,
+                    Err(x) => return Ok(Eval::Escape(x)),
+                };
+                match first {
+                    Value::Str(bytes) => Ok(Eval::Value(Value::array(
+                        ValueType::U8,
+                        bytes.into_iter().map(Value::U8).collect(),
+                    ))),
+                    n => {
+                        let n = n.as_int().unwrap_or(0).max(0) as usize;
+                        Ok(Eval::Value(Value::array(
+                            ValueType::U8,
+                            vec![Value::U8(0); n],
+                        )))
+                    }
+                }
             }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
                 let (n, fill) = match a.len() {

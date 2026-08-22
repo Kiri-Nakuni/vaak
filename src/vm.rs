@@ -60,6 +60,9 @@ pub enum Op {
     MutMethod(u16, u32, u16, Span),
     /// 集合体。
     MakeArray(u16),
+    /// `new u8 array(x)`。`x` が `str` なら包みを剥がし、整数なら零で埋める。
+    /// C-78 の構築は引数の型で通常の配列構築と見分ける。
+    MakeU8ArrayOne,
     MakeMap(u16),
     MakeStruct(u32, u16),
     Index(Span),
@@ -925,6 +928,13 @@ impl Compiler {
                 let ni = self.name_idx(n);
                 self.emit(Op::MakeStruct(ni, 1));
             }
+            (ValueType::Array(elem), CtorArgs::Positional(a))
+                if **elem == ValueType::U8 && a.len() == 1 =>
+            {
+                self.expr(&a[0])?;
+                self.emit(Op::NeedValue(span));
+                self.emit(Op::MakeU8ArrayOne);
+            }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
                 if a.is_empty() {
                     let k = self.konst(Value::array((**elem).clone(), vec![]));
@@ -1788,6 +1798,20 @@ impl<'a> Vm<'a> {
                     let elem = items.first().map(|v| v.type_of()).unwrap_or(ValueType::I64);
                     self.stack.push(Slot::Value(Value::array(elem, items)));
                 }
+            }
+            Op::MakeU8ArrayOne => {
+                let source = self.pop().value(Span::NONE)?;
+                let array = match source {
+                    Value::Str(bytes) => Value::array(
+                        ValueType::U8,
+                        bytes.into_iter().map(Value::U8).collect(),
+                    ),
+                    count => {
+                        let count = count.as_int().unwrap_or(0).max(0) as usize;
+                        Value::array(ValueType::U8, vec![Value::U8(0); count])
+                    }
+                };
+                self.stack.push(Slot::Value(array));
             }
             Op::MakeMap(n) => {
                 let mut entries = BTreeMap::new();
