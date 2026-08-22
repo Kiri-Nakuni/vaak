@@ -1,0 +1,262 @@
+%{ 整数を値に持つ、小さな Forth 系インタープリター。
+
+   実装する形:
+     整数、+ - * /
+     dup、swap、drop
+     : name ... ; によるコロン定義
+
+   i64 array をデータスタックとして使う。定義の本体はコピーせず、
+   元のトークン列にある開始位置と終了位置で表す。 }%
+
+% STEEL は無名標準ライブラリをまだ注入しないので、同じ定義を明示する。
+flow $return = $repeat(break, getdepth());
+
+fn is_space (c : u8) {
+    c == 32 || c == 10 || c == 9 || c == 13
+} -> u1;
+
+fn is_colon (word : str alias) {
+    word.len() == 1 && word[0] == 58
+} -> u1;
+
+fn is_semicolon (word : str alias) {
+    word.len() == 1 && word[0] == 59
+} -> u1;
+
+fn is_number (word : str alias) {
+    if (word.len() == 0) $return false; fi;
+    var i := 0;
+    if (word[0] == 45) {
+        if (word.len() == 1) $return false; fi;
+        i := 1;
+    } fi;
+    while (i < word.len()) {
+        let c := word[i] ?? 0;
+        if (c < 48 || c > 57) $return false; fi;
+        i += 1;
+    };
+    true
+} -> u1;
+
+fn parse_number (word : str alias) {
+    if (! is_number(word)) $return; fi;
+    var i := 0;
+    var negative := false;
+    if (word[0] == 45) {
+        negative := true;
+        i := 1;
+    } fi;
+    var value := 0;
+    while (i < word.len()) {
+        value := value * 10 + (word[i] - 48) -> i64;
+        i += 1;
+    };
+    if (negative) 0 - value else value fi
+} -> i64;
+
+% 語を小さな番号へ畳む。0 は利用者定義の語として探索する。
+fn primitive_kind (word : str alias) {
+    if (word.len() == 1) {
+        let c := word[0] ?? 0;
+        if (c == 43) $return 1; fi;  % +
+        if (c == 45) $return 2; fi;  % -
+        if (c == 42) $return 3; fi;  % *
+        if (c == 47) $return 4; fi;  % /
+    } fi;
+    if (word.len() == 3) {
+        if (word[0] == 100 && word[1] == 117 && word[2] == 112) $return 5; fi; % dup
+    } fi;
+    if (word.len() == 4) {
+        if (word[0] == 115 && word[1] == 119 && word[2] == 97 && word[3] == 112) $return 6; fi; % swap
+        if (word[0] == 100 && word[1] == 114 && word[2] == 111 && word[3] == 112) $return 7; fi; % drop
+    } fi;
+    0
+} -> i64;
+
+fn tokenize (source : str alias) {
+    var tokens : str array := new str array(0, "");
+    var current : str := "";
+    nfor (i, 0, source.len()) {
+        let c := source[i] ?? 32;
+        if (is_space(c)) {
+            if (current.len() > 0) {
+                tokens.push(current);
+                current.clear();
+            } fi;
+        } else {
+            current.push(c);
+        } fi;
+    };
+    if (current.len() > 0) tokens.push(current); fi;
+    tokens
+} -> str array;
+
+% 全定義を先に集めるので、後ろで定義した語も本体から呼べる。
+fn collect_definitions (
+    tokens : str array alias,
+    var names : str array alias,
+    var starts : i64 array alias,
+    var ends : i64 array alias
+) {
+    var pos := 0;
+    while (pos < tokens.len()) {
+        let token := tokens[pos];
+        if (is_colon(token)) {
+            if (pos + 2 >= tokens.len()) $return false; fi;
+            let name := tokens[pos + 1];
+            if (is_colon(name) || is_semicolon(name) || is_number(name) || primitive_kind(name) != 0) {
+                $return false;
+            } fi;
+            var end := pos + 2;
+            while (end < tokens.len()) {
+                let candidate := tokens[end];
+                if (is_semicolon(candidate)) break; fi;
+                if (is_colon(candidate)) $return false; fi;
+                end += 1;
+            };
+            if (end >= tokens.len()) $return false; fi;
+            names.push(name);
+            starts.push(pos + 2);
+            ends.push(end);
+            pos := end + 1;
+        } elif (is_semicolon(token)) {
+            $return false;
+        } else {
+            pos += 1;
+        } fi;
+    };
+    true
+} -> u1;
+
+fn find_definition (names : str array alias, name : str alias) {
+    var i := names.len();
+    while (i > 0) {
+        i -= 1;
+        let candidate := names[i];
+        if (candidate.len() == name.len()) {
+            var same := true;
+            nfor (j, 0, name.len()) {
+                if (candidate[j] != name[j]) same := false; fi;
+            };
+            if (same) $return i; fi;
+        } fi;
+    };
+} -> i64;
+
+% i64 array がそのまま Forth のデータスタックになる。
+fn apply_primitive (kind : i64, var stack : i64 array alias) {
+    if (kind >= 1 && kind <= 4) {
+        let right := stack.pop() ?? $return false;
+        let left := stack.pop() ?? $return false;
+        if (kind == 1) stack.push(left + right);
+        elif (kind == 2) stack.push(left - right);
+        elif (kind == 3) stack.push(left * right);
+        else {
+            if (right == 0) $return false; fi;
+            stack.push(left / right);
+        } fi;
+        $return true;
+    } fi;
+    if (kind == 5) {
+        let value := stack.pop() ?? $return false;
+        stack.push(value);
+        stack.push(value);
+        $return true;
+    } fi;
+    if (kind == 6) {
+        let top := stack.pop() ?? $return false;
+        let below := stack.pop() ?? $return false;
+        stack.push(top);
+        stack.push(below);
+        $return true;
+    } fi;
+    if (kind == 7) {
+        stack.pop() ?? $return false;
+        $return true;
+    } fi;
+    false
+} -> u1;
+
+fn execute_range (
+    tokens : str array alias,
+    start : i64,
+    end : i64,
+    definition_names : str array alias,
+    definition_starts : i64 array alias,
+    definition_ends : i64 array alias,
+    var stack : i64 array alias
+) {
+    var pos := start;
+    while (pos < end) {
+        let token := tokens[pos];
+        if (is_number(token)) {
+            let value := parse_number(token) ?? $return false;
+            stack.push(value);
+        } else {
+            let kind := primitive_kind(token);
+            if (kind != 0) {
+                if (! apply_primitive(kind, stack)) $return false; fi;
+            } else {
+                let definition := find_definition(definition_names, token) ?? $return false;
+                let body_start := definition_starts[definition] ?? $return false;
+                let body_end := definition_ends[definition] ?? $return false;
+                if (! execute_range(
+                    tokens,
+                    body_start,
+                    body_end,
+                    definition_names,
+                    definition_starts,
+                    definition_ends,
+                    stack
+                )) $return false; fi;
+            } fi;
+        } fi;
+        pos += 1;
+    };
+    true
+} -> u1;
+
+fn run_forth (source : str alias) {
+    let tokens := tokenize(source);
+    var definition_names : str array := new str array(0, "");
+    var definition_starts : i64 array := new i64 array(0, 0);
+    var definition_ends : i64 array := new i64 array(0, 0);
+    if (! collect_definitions(tokens, definition_names, definition_starts, definition_ends)) $return; fi;
+
+    var stack : i64 array := new i64 array(0, 0);
+    var pos := 0;
+    while (pos < tokens.len()) {
+        let token := tokens[pos];
+        if (is_colon(token)) {
+            pos += 2;
+            while (pos < tokens.len()) {
+                let candidate := tokens[pos];
+                if (is_semicolon(candidate)) break; fi;
+                pos += 1;
+            };
+            pos += 1;
+        } else {
+            if (! execute_range(
+                tokens,
+                pos,
+                pos + 1,
+                definition_names,
+                definition_starts,
+                definition_ends,
+                stack
+            )) $return; fi;
+            pos += 1;
+        } fi;
+    };
+    if (stack.len() != 1) $return; fi;
+    stack.pop() ?? $return
+} -> i64;
+
+% コロン定義、全算術語、dup/swap/drop をまとめて通し、答えは 42 に保つ。
+let main_program := ": twice dup + ; 21 twice";
+let arithmetic_program := "20 5 / 3 * 2 +";
+let shuffle_program := "5 9 swap drop 7 * 3 -";
+let main_answer := run_forth(main_program) ?? 0;
+let arithmetic_answer := run_forth(arithmetic_program) ?? 0;
+let shuffle_answer := run_forth(shuffle_program) ?? 0;
+if (main_answer == 42 && arithmetic_answer == 14 && shuffle_answer == 60) 42 else 0 fi
