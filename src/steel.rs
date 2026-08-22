@@ -505,6 +505,24 @@ impl Steel {
         t
     }
 
+    /// 値を変換し、`f32` へ狭めた後の有限性を外界面へ反映する。
+    ///
+    /// `f64` の途中値だけを確かめると、`3.5e38` は有限のまま通り、
+    /// `fptrunc` の後で infinity が言語へ入り込む（C-84）。
+    fn conv_value(&mut self, x: Val, to: &ValueType) -> Val {
+        let from = x.ty.clone();
+        let v = self.conv(&x.v, &from, to);
+        let narrows_float = matches!(to, ValueType::F32)
+            && matches!(from, ValueType::F64 | ValueType::F80);
+        let ok = if narrows_float {
+            let finite = self.finite(&v, to);
+            self.both_ok(&x.ok, &finite)
+        } else {
+            x.ok
+        };
+        Val { ok, v, ty: to.clone() }
+    }
+
     /// 二つ組を一つに畳む。**片方でも paradox なら paradox**（C-22：伝播する）。
     fn both_ok(&mut self, a: &str, b: &str) -> String {
         if a == "true" {
@@ -1748,12 +1766,12 @@ impl Steel {
                     return err("STEEL はまだ数と集合体しか扱えない", e.span);
                 }
                 // **包みを剥がしても置き場は変わらない**（S-2）。数だけ幅を合わせる
-                let c = if is_heap(&t) {
-                    v.v.clone()
+                let out = if is_heap(&t) {
+                    Val { ok: v.ok, v: v.v, ty: t }
                 } else {
-                    self.conv(&v.v.clone(), &v.ty.clone(), &t)
+                    self.conv_value(v, &t)
                 };
-                Ok(Some(Val { ok: v.ok, v: c, ty: t }))
+                Ok(Some(out))
             }
 
             E::Call { callee, args } => self.call(callee, args, e.span),
@@ -3199,6 +3217,7 @@ impl Steel {
         let out = self.close_stage();
         // **返り値は呼び出し側の領域へ移る**（C-90 の表）。
         // 印の下へ写してから、印を戻す——**領域は高々一つの値**（C-14）なので一つだけ
+        let mut out_ok = out.ok.clone();
         let conv = if is_heap(&ret) && is_heap(&out.ty) {
             // **二段で写す**（C-90 の表：「返り値は呼び出し側の領域へ移る」）。
             //
@@ -3220,12 +3239,13 @@ impl Steel {
             self.emit(&format!("{down} = call ptr {f}(ptr {up})"));
             down
         } else {
-            let c = self.conv(&out.v.clone(), &out.ty.clone(), &ret);
+            let converted = self.conv_value(out.clone(), &ret);
+            out_ok = converted.ok;
             self.emit(&format!("call void @vaak.release(i64 {mark})"));
-            c
+            converted.v
         };
         let a = self.tmp();
-        self.emit(&format!("{a} = insertvalue {{ i1, {} }} undef, i1 {}, 0", ity(&ret), out.ok));
+        self.emit(&format!("{a} = insertvalue {{ i1, {} }} undef, i1 {out_ok}, 0", ity(&ret)));
         let b = self.tmp();
         self.emit(&format!("{b} = insertvalue {{ i1, {} }} {a}, {} {conv}, 1", ity(&ret), ity(&ret)));
         self.emit(&format!("ret {{ i1, {} }} {b}", ity(&ret)));

@@ -28,6 +28,16 @@ fn same(src: &str) {
     );
 }
 
+#[track_caller]
+fn same_value(src: &str, expect: &str) {
+    for (name, got) in [("木", vaak::interp::run(src)), ("VM", vaak::vm::run(src))] {
+        match got {
+            Ok(Eval::Value(v)) => assert_eq!(v.show(), expect, "{name}: {src}"),
+            other => panic!("{name}: {src} は値 {expect} のはずだが {other:?}"),
+        }
+    }
+}
+
 /// プローブの「この通りに動きます」を、両方の実装に掛ける。
 const CASES: &[&str] = &[
     // 領域
@@ -157,6 +167,28 @@ fn 木と_vm_が同じ結果になる() {
     for src in CASES {
         same(src);
     }
+}
+
+#[test]
+fn 文脈で決まった数値型まで同じになる() {
+    same_value("var x : u8 := 0; x := 300; x", "44");
+    same_value(
+        "struct P { var x : u8 := 0; };
+         var p := new P (); p.x := 300; p.x",
+        "44",
+    );
+    same_value("fn f (x : u8) { x } -> u8; f(300)", "44");
+    same_value("fn f () { 300 } -> u8; f()", "44");
+    same_value(
+        "var x : f32 := 3.0e38;
+         if (((x + x) ?? (7.0 -> f32)) == (7.0 -> f32)) 1 else 0 fi",
+        "1",
+    );
+    same_value(
+        "var x : f64 := 3.5e38;
+         if (((x -> f32) ?? (7.0 -> f32)) == (7.0 -> f32)) 1 else 0 fi",
+        "1",
+    );
 }
 
 #[test]
