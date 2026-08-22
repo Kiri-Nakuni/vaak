@@ -111,6 +111,11 @@ pub struct Interp {
     /// ラップ型（S-2）。名前 → 包んだ型。
     wraps: HashMap<String, ValueType>,
     flows: HashMap<String, FlowDecl>,
+    /// **文脈が求めている型**（C-100）。リテラルがこれを受け取る。
+    ///
+    /// `eval_inner` の先頭で必ず取り上げられるので、**一段しか届かない。**
+    /// 通したい枝が置き直す。
+    want: Option<ValueType>,
     /// 静的検査を通さず呼ばれても、誤った `flow` の展開で再帰し続けない。
     expanding_flows: HashSet<String>,
     /// 変数の探索はこの位置より外へ行かない。**関数は局所変数を見ない**（C-86）。
@@ -152,6 +157,7 @@ impl Interp {
             structs: HashMap::new(),
             wraps: HashMap::new(),
             flows: HashMap::new(),
+            want: None,
             expanding_flows: HashSet::new(),
             frame_base: 0,
             frozen: Vec::new(),
@@ -286,10 +292,22 @@ impl Interp {
     /// **一つの領域は値を一つしか持てない。**
     /// 内面に何も残っていなければ、外界面は paradox。
     fn region(&mut self, body: &[Expr], span: Span) -> R<Eval> {
+        self.region_wanting(body, None, span)
+    }
+
+    /// **領域の値は一つだけ**（C-14）。どれがそれかは走らせるまで分からないので、
+    /// 文脈の型は全部に置く。**受け取らない枝は先頭で捨てるだけである。**
+    fn region_wanting(
+        &mut self,
+        body: &[Expr],
+        want: Option<ValueType>,
+        span: Span,
+    ) -> R<Eval> {
         let mut slot: Option<(Value, Span)> = None;
         let mut inner_paradox: Option<Span> = None;
 
         for e in body {
+            self.want = want.clone();
             match self.eval(e)? {
                 Eval::Akasha => {}
                 Eval::Escape(x) => return Ok(Eval::Escape(x)),
@@ -348,21 +366,32 @@ impl Interp {
     }
 
     fn eval_inner(&mut self, e: &Expr) -> R<Eval> {
+        // **文脈の型は一段しか届かない。** 最初に取り上げ、通す枝だけが置き直す。
+        //
+        // こうしておくと、置き忘れは「今までどおり `i64`」に落ちるだけで、
+        // **違う型を黙って持ち込むことは起きない**（C-100）。
+        let want = self.want.take();
         match &e.kind {
-            ExprKind::Int(s) => Ok(Eval::Value(parse_int(s, e.span)?)),
-            ExprKind::Float(s) => Ok(Eval::Value(parse_float(s, e.span)?)),
+            // **リテラルは置かれた場所の型を受け取る**（C-21）。
+            // 演算の途中でも同じである（C-100）
+            ExprKind::Int(s) => Ok(Eval::Value(coerce_lit(parse_int(s, e.span)?, &want))),
+            ExprKind::Float(s) => Ok(Eval::Value(coerce_lit(parse_float(s, e.span)?, &want))),
             ExprKind::Str(s) => Ok(Eval::Value(Value::str(s.as_bytes().to_vec()))),
             ExprKind::Bool(b) => Ok(Eval::Value(Value::U1(*b))),
 
             // **注釈はその領域の値の型を決める**（C-30）。
             // インタプリタは型を解決する——検査はしない
-            ExprKind::Ascribe { expr, ty } => match self.need_value(expr)? {
+            ExprKind::Ascribe { expr, ty } => {
+                // **注釈は式の中まで届く**（C-100）
+                self.want = Some(ty.value.clone());
+                match self.need_value(expr)? {
                 Ok(v) => Ok(match try_coerce_to(v, &ty.value) {
                     Some(v) => Eval::Value(v),
                     None => Eval::Paradox(e.span),
                 }),
                 Err(x) => Ok(Eval::Escape(x)),
-            },
+                }
+            }
 
             ExprKind::Name(n) => {
                 let Some(b) = self.lookup(n).cloned() else {
@@ -375,13 +404,13 @@ impl Interp {
             }
 
             // `( )` は領域を作るが、スコープでも脱出段でもない
-            ExprKind::Paren(body) => self.region(body, e.span),
+            ExprKind::Paren(body) => self.region_wanting(body, want, e.span),
 
             // 裸のブロックは領域・スコープ・脱出段の三つを作る
             ExprKind::Block(body) => {
                 self.push_scope(true, false);
                 self.collect_decls(body);
-                let r = self.region(body, e.span);
+                let r = self.region_wanting(body, want, e.span);
                 self.pop_scope();
                 self.pass_stage(r?, false, e.span)
             }
@@ -405,7 +434,7 @@ impl Interp {
                 unary(*op, v, e.span).map(Eval::Value)
             }
 
-            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, e.span),
+            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, want, e.span),
 
             ExprKind::Escape(esc) => self.make_escape(esc),
 
@@ -418,7 +447,7 @@ impl Interp {
             | ExprKind::FlowDecl(_)
             | ExprKind::WrapDecl(_) => Ok(Eval::Paradox(e.span)),
 
-            ExprKind::If(i) => self.if_expr(i, e.span),
+            ExprKind::If(i) => self.if_expr(i, want, e.span),
             ExprKind::Loop(body) => self.loop_expr(body, None, e.span),
             ExprKind::While { cond, body } => self.while_expr(cond, body, e.span),
             ExprKind::NFor { name, start, count, body } => {
@@ -427,8 +456,15 @@ impl Interp {
             ExprKind::Switch { subject, arms } => self.switch(subject, arms, e.span),
 
             ExprKind::ArrayLit(items) => {
+                // **注釈が言う要素の型が、要素の式の中まで届く**（C-100）
+                let el = match &want {
+                    Some(ValueType::Array(e)) => Some((**e).clone()),
+                    Some(ValueType::Str) => Some(ValueType::U8),
+                    _ => None,
+                };
                 let mut out = Vec::new();
                 for it in items {
+                    self.want = el.clone();
                     match self.need_value(it)? {
                         Ok(v) => out.push(v),
                         Err(x) => return Ok(Eval::Escape(x)),
@@ -739,11 +775,23 @@ enum Step {
 impl Interp {
     // ---- 中置演算子 ----
 
-    fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> R<Eval> {
+    fn binary(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        want: Option<ValueType>,
+        span: Span,
+    ) -> R<Eval> {
         // `??` は paradox の**唯一の除去子**（C-22）。左を右で置き換えるだけで、右を検査しない
         if op == BinOp::Coalesce {
+            // **どちらも同じ場所に置かれる。** 文脈の型は両方へ届く
+            self.want = want.clone();
             return match self.face(lhs)? {
-                Eval::Paradox(_) => self.face(rhs),
+                Eval::Paradox(_) => {
+                    self.want = want;
+                    self.face(rhs)
+                }
                 other => Ok(other),
             };
         }
@@ -768,9 +816,24 @@ impl Interp {
             return self.feed(lhs, rhs, span);
         }
 
+        // **比較は結果が `u1` なので、外の型は左右へ届かない。**
+        // 左右は互いに揃う（型検査器と同じ扱い）
+        let pass = !matches!(
+            op,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+        );
+        if pass {
+            self.want = want;
+        }
         let a = match self.need_value(lhs)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
+        };
+        // **右は左に揃う**（C-21：暗黙変換は無い）。桁数だけは別の型でよい
+        self.want = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            Some(ValueType::I64)
+        } else {
+            Some(a.type_of())
         };
         let b = match self.need_value(rhs)? {
             Ok(v) => v,
@@ -795,6 +858,8 @@ impl Interp {
             match &b.init {
                 // `:=` は**深く複製する**（C-33）。値は自己完結しているので clone で足りる
                 BindInit::Value(e) => {
+                    // **注釈は式の中まで届く**（C-100）
+                    self.want = b.ty.as_ref().map(|t| t.value.clone());
                     let v = match self.need_value(e)? {
                         Ok(v) => v,
                         Err(x) => return Ok(Eval::Escape(x)),
@@ -863,6 +928,9 @@ impl Interp {
 
         // **左辺の場所を先に解決してから**右辺を評価する（C-79 (6)）
         let place = self.resolve_place(lhs)?;
+        // **場所の型が右辺の中まで届く**（C-100）。
+        // 場所を先に解けと決めてあるので、型もここで分かる
+        self.want = self.read_place(&place, span).ok().map(|v| v.type_of());
         let rv = match self.need_value(rhs)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
@@ -1546,8 +1614,9 @@ fn compare(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 
 impl Interp {
     /// `if` は演算子。**分岐は被演算子位置なので領域だが、スコープでも脱出段でもない。**
-    fn if_expr(&mut self, i: &If, span: Span) -> R<Eval> {
+    fn if_expr(&mut self, i: &If, want: Option<ValueType>, span: Span) -> R<Eval> {
         for (cond, body) in &i.arms {
+            // **条件は `u1` である**（C-21）。外の型は届かない
             let c = match self.need_value(cond)? {
                 Ok(v) => v,
                 Err(x) => return Ok(Eval::Escape(x)),
@@ -1556,11 +1625,16 @@ impl Interp {
                 return rt("`if` の条件は `u1` でなければならない", cond.span);
             };
             if b {
+                // **どの枝も同じ場所に置かれる。** 文脈の型はそこへ届く
+                self.want = want;
                 return self.face(body);
             }
         }
         match &i.els {
-            Some(e) => self.face(e),
+            Some(e) => {
+                self.want = want;
+                self.face(e)
+            }
             // `else` の無い `if` で条件が偽 → paradox
             None => Ok(Eval::Paradox(span)),
         }
@@ -1782,12 +1856,15 @@ impl Interp {
                 let mut out = Vec::new();
                 for f in &decl.fields {
                     let given = fields.iter().find(|(n, _)| n == &f.name);
+                    // **欄の型が式の中まで届く**（C-100）
                     let v = if let Some((_, e)) = given {
+                        self.want = Some(f.ty.value.clone());
                         match self.need_value(e)? {
                             Ok(v) => v,
                             Err(x) => return Ok(Eval::Escape(x)),
                         }
                     } else if let Some(d) = &f.default {
+                        self.want = Some(f.ty.value.clone());
                         match self.need_value(d)? {
                             Ok(v) => v,
                             Err(x) => return Ok(Eval::Escape(x)),
@@ -1889,6 +1966,8 @@ impl Interp {
                     let Some(d) = &f.default else {
                         return rt(format!("欄 `{}` に値が無い", f.name), span);
                     };
+                    // **欄の型が既定の式の中まで届く**（C-100）
+                    self.want = Some(f.ty.value.clone());
                     let v = match self.need_value(d)? {
                         Ok(v) => v,
                         Err(x) => return Ok(Eval::Escape(x)),
@@ -2036,6 +2115,8 @@ impl Interp {
                 }
                 bound.push((p.name.clone(), p.kind, b.cell, true));
             } else {
+                // **引数の型が式の中まで届く**（C-100）
+                self.want = Some(p.ty.value.clone());
                 let v = match self.need_value(a)? {
                     Ok(v) => v,
                     Err(x) => return Ok(Eval::Escape(x)),
@@ -2061,7 +2142,9 @@ impl Interp {
             return rt("関数の本体はブロックでなければならない", span);
         };
         self.collect_decls(items);
-        let r = self.region(items, f.decl.body.span);
+        // **返り値の型が本体の中まで届く**（C-100）
+        let want = f.decl.ret.as_ref().map(|t| t.value.clone());
+        let r = self.region_wanting(items, want, f.decl.body.span);
         self.frame_base = saved_base;
         self.pop_scope();
 
@@ -2502,4 +2585,33 @@ pub fn set_index(base: &mut Value, i: &Value, v: Value) -> bool {
         },
     };
     step_set(base, &[step], v)
+}
+
+pub fn coerce_lit_pub(v: Value, want: &Option<ValueType>) -> Value {
+    coerce_lit(v, want)
+}
+
+/// リテラルを文脈の型へ寄せる（C-21 / C-100）。
+///
+/// **数でないものは触らない。** 場所の型が数でなければ、そのままにする——
+/// 集合体や構造体の中は `coerce` が別に降りている（C-94）。
+fn coerce_lit(v: Value, want: &Option<ValueType>) -> Value {
+    match want {
+        Some(t) if is_num_type(t) => coerce_to(v, t),
+        _ => v,
+    }
+}
+
+fn is_num_type(t: &ValueType) -> bool {
+    matches!(
+        t,
+        ValueType::U1
+            | ValueType::U8
+            | ValueType::U16
+            | ValueType::U32
+            | ValueType::I32
+            | ValueType::I64
+            | ValueType::F32
+            | ValueType::F64
+    )
 }
