@@ -42,12 +42,14 @@ fn steel_run(name: &str, src: &str) -> Option<i32> {
     Some(Command::new(&exe).status().unwrap().code().unwrap())
 }
 
-/// **終了コードは 8 ビット。** 参照の値をそこへ落として比べる
+/// Unix の終了コードは 8 ビットだが、Windows は `i32` のまま返す。
+/// **どちらでも観測できる下位 8 ビット**へ揃えて比べる。
 fn agree(name: &str, src: &str) {
     let want = interp(src).expect("参照実装が答えを出せない");
     let Some(got) = steel_run(name, src) else { return };
     let expect = (want.rem_euclid(256)) as i32;
-    assert_eq!(got, expect, "{name}: 参照 {want} → {expect}、STEEL {got}\n{src}");
+    let got8 = got.rem_euclid(256);
+    assert_eq!(got8, expect, "{name}: 参照 {want} → {expect}、STEEL {got} → {got8}\n{src}");
 }
 
 macro_rules! t {
