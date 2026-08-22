@@ -586,13 +586,17 @@ impl Steel {
                     _ => "or",
                 };
                 // **`nsw` も `nuw` も付けない。** 溢れは折り返す（C-76）
+                if matches!(op, Shl) {
+                    let out = self.shift("shl", &l.v.clone(), &rv, w, &ty);
+                    return Ok(Val { ok, v: out, ty });
+                }
                 self.emit(&format!("{t} = {o} i{w} {}, {rv}", l.v));
                 Ok(Val { ok, v: t, ty })
             }
             Shr => {
                 let o = if signed(&ty) { "ashr" } else { "lshr" };
-                self.emit(&format!("{t} = {o} i{w} {}, {rv}", l.v));
-                Ok(Val { ok, v: t, ty })
+                let out = self.shift(o, &l.v.clone(), &rv, w, &ty);
+                Ok(Val { ok, v: out, ty })
             }
             Div | Mod => Ok(self.euclid(op == Div, &l.v, &rv, &ty, ok)),
             _ => err("この演算子は STEEL がまだ扱えない", span),
@@ -981,6 +985,8 @@ impl Steel {
                 // 与えられた値。**無ければ既定**（検査器が「値が無い」を捕らえている）
                 let v = match given.iter().find(|(g, _)| g == fname) {
                     Some((_, e)) => {
+                        // **欄の型が式の中まで届く**（C-100）
+                        self.want = Some(fty.clone());
                         let v = self.expr(e)?;
                         let Some(v) = v else { return err("欄に値が無い", e.span) };
                         if is_heap(fty) {
@@ -1107,6 +1113,7 @@ impl Steel {
             return Ok(None);
         };
         let Some(def) = f.default.clone() else { return Ok(None) };
+        self.want = Some(fty.clone());
         let v = self.expr(&def)?;
         let Some(v) = v else { return Ok(None) };
         Ok(Some(if is_heap(fty) {
@@ -1229,8 +1236,14 @@ impl Steel {
     /// 値を置くものが二つあれば検査器が捕らえているので、ここでは数えない——
     /// **最後に残ったものを領域の値とする。**
     fn region(&mut self, items: &[Expr]) -> R<Region> {
+        self.region_wanting(items, None)
+    }
+
+    /// **領域の値は一つだけ**（C-14）。どれがそれかは分からないので全部に置く（C-100）
+    fn region_wanting(&mut self, items: &[Expr], want: Option<ValueType>) -> R<Region> {
         let mut out: Region = None;
         for e in items {
+            self.want = want.clone();
             let r = self.expr(e)?;
             if r.is_some() {
                 out = r;
@@ -1305,13 +1318,22 @@ impl Steel {
 impl Steel {
     fn expr(&mut self, e: &Expr) -> R<Region> {
         use ExprKind as E;
+        // **文脈の型は一段しか届かない。** 先頭で取り上げ、通す枝が置き直す（C-100）
+        let want = self.want.take();
         match &e.kind {
+            // **リテラルは置かれた場所の型を受け取る**（C-21 / C-100）
             E::Int(t) => {
-                let v: i128 = t.parse().map_err(|_| SteelError {
-                    msg: "整数として読めない".into(),
-                    span: e.span,
-                })?;
-                Ok(Some(self.konst(&ValueType::I64, v)))
+                // **参照実装と同じ読み方をする**（S-5）。
+                // `0x` `0b` `0o` と `_` を自前で解くと、そこだけ違う言語になる
+                let v: i128 = match crate::interp::parse_int_pub(t, e.span) {
+                    Ok(v) => v.as_int().unwrap_or(0),
+                    Err(x) => return err(x.msg, e.span),
+                };
+                let ty = match &want {
+                    Some(w) if width(w).is_some() => w.clone(),
+                    _ => ValueType::I64,
+                };
+                Ok(Some(self.konst(&ty, v)))
             }
 
             // **`u1` で確定。** 文脈を見ない（C-97）
@@ -1322,21 +1344,40 @@ impl Steel {
             })),
 
             E::Float(t) => {
-                let v: f64 = t.parse().map_err(|_| SteelError {
-                    msg: "浮動小数として読めない".into(),
-                    span: e.span,
-                })?;
-                Ok(Some(Val {
+                let v: f64 = match crate::interp::parse_float_pub(t, e.span) {
+                    Ok(crate::value::Value::F64(v)) => v,
+                    Ok(crate::value::Value::F32(v)) => v as f64,
+                    Ok(_) | Err(_) => {
+                        return err("浮動小数として読めない", e.span);
+                    }
+                };
+                // **狭めるのは既存の道を通す。** 直に作ると有限性の検査を飛ばす（C-84）
+                let base = Val {
                     ok: "true".into(),
                     v: fbits(v, &ValueType::F64),
                     ty: ValueType::F64,
-                }))
+                };
+                match &want {
+                    Some(w) if is_float(w) && w != &ValueType::F64 => {
+                        let c = self.conv(&base.v.clone(), &ValueType::F64, w);
+                        let ok = self.finite(&c, w);
+                        Ok(Some(Val { ok, v: c, ty: w.clone() }))
+                    }
+                    _ => Ok(Some(base)),
+                }
             }
 
             // `[ a, b, c ]` — **場に置く**
             E::ArrayLit(items) => {
+                // **注釈が言う要素の型が届く**（C-100）
+                let el = match &want {
+                    Some(ValueType::Array(x)) => Some((**x).clone()),
+                    Some(ValueType::Str) => Some(ValueType::U8),
+                    _ => None,
+                };
                 let mut vals = Vec::new();
                 for it in items {
+                    self.want = el.clone();
                     let v = self.expr(it)?;
                     let Some(v) = v else { return err("配列の要素に値が無い", it.span) };
                     vals.push(v);
@@ -1474,13 +1515,13 @@ impl Steel {
                 Ok(None)
             }
 
-            E::Paren(items) => self.region(items),
+            E::Paren(items) => self.region_wanting(items, want),
 
             // **裸のブロックは領域・スコープ・脱出段の三つを作る**（C-20）
             E::Block(items) => {
                 self.push_scope();
                 self.open_stage(None, false);
-                let r = self.region(items)?;
+                let r = self.region_wanting(items, want)?;
                 // 中身が残っていれば、それが段の値
                 if let Some(v) = r {
                     self.leave(1, Some(v))?;
@@ -1493,6 +1534,8 @@ impl Steel {
             }
 
             E::Unary { op, rhs } => {
+                // **符号は型を変えない**（C-100）
+                self.want = want;
                 let r = self.expr(rhs)?;
                 let Some(r) = r else { return err("被演算子に値が無い", e.span) };
                 match op {
@@ -1525,7 +1568,8 @@ impl Steel {
             E::Binary { op, lhs, rhs } => {
                 // **`??` は右を評価しないことがある**——左が値なら右は走らない
                 if *op == BinOp::Coalesce {
-                    return self.coalesce(lhs, rhs, e.span).map(Some);
+                    // **どちらも同じ場所に置かれる**（C-100）
+                    return self.coalesce(lhs, rhs, want, e.span).map(Some);
                 }
                 // **`|>` は構文の水準の糖衣**（C-15）。`x |> f(a)` は `f(x, a)`
                 if *op == BinOp::Feed {
@@ -1536,7 +1580,21 @@ impl Steel {
                     all.extend(args.iter().cloned());
                     return self.call(callee, &all, e.span);
                 }
+                // **比較は結果が `u1`。** 外の型は左右へ届かない
+                let cmp = matches!(
+                    op,
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+                );
+                if !cmp {
+                    self.want = want;
+                }
                 let l = self.expr(lhs)?;
+                // **右は左に揃う**（C-21：暗黙変換は無い）。桁数だけは別でよい
+                self.want = match (&l, op) {
+                    (_, BinOp::Shl | BinOp::Shr) => Some(ValueType::I64),
+                    (Some(v), _) => Some(v.ty.clone()),
+                    _ => None,
+                };
                 let r = self.expr(rhs)?;
                 let (Some(l), Some(r)) = (l, r) else {
                     return err("被演算子に値が無い", e.span);
@@ -1704,6 +1762,8 @@ impl Steel {
                 let Some((p, ty)) = self.addr(n) else {
                     return err(format!("知らない名前 `{n}`"), lhs.span);
                 };
+                // **置き場の型が右辺の中まで届く**（C-100）
+                self.want = Some(ty.clone());
                 let r = self.expr(rhs)?;
                 let Some(r) = r else { return err("代入する値が無い", e.span) };
                 let v = if *op == AssignOp::Set {
@@ -1728,7 +1788,7 @@ impl Steel {
 
             // `( 鍵 => 値, … )` — **文脈の型が要る**（C-94）
             E::MapLit(pairs) => {
-                let Some(t) = self.want.clone() else {
+                let Some(t) = want.clone() else {
                     return err("写像リテラルには型が要る", e.span);
                 };
                 let t = self.resolve(&t);
@@ -1778,7 +1838,7 @@ impl Steel {
                 Ok(Some(Val { ok: "true".into(), v: m, ty: t }))
             }
 
-            E::If(i) => self.if_expr(i, e.span).map(Some),
+            E::If(i) => self.if_expr(i, want, e.span).map(Some),
             E::Loop(body) => self.loop_expr(None, body, e.span).map(Some),
             E::While { cond, body } => self.loop_expr(Some(cond), body, e.span).map(Some),
             E::NFor { name, start, count, body } => {
@@ -1794,6 +1854,8 @@ impl Steel {
 
             // `E -> T` — **領域に型を付ける**（C-30）
             E::Ascribe { expr, ty } => {
+                // **注釈は式の中まで届く**（C-100）
+                self.want = Some(self.resolve(&ty.value));
                 let v = self.expr(expr)?;
                 let Some(v) = v else { return err("注釈する値が無い", e.span) };
                 let t = self.resolve(&ty.value);
@@ -1906,6 +1968,32 @@ impl Steel {
         );
         self.head_global(&body);
         Ok(name)
+    }
+
+    /// 桁送り。**幅以上ずらすと LLVM では未定義になる**ので、自分で決める。
+    ///
+    /// 参照実装は折り返すだけなので、**全部こぼれれば零**（符号つきの右送りは符号）。
+    fn shift(&mut self, o: &str, x: &str, n: &str, w: u32, ty: &ValueType) -> String {
+        let raw = self.tmp();
+        // 幅未満へ丸めてから送る。**未定義にはしない**
+        let safe = self.tmp();
+        self.emit(&format!("{safe} = urem i{w} {n}, {w}"));
+        self.emit(&format!("{raw} = {o} i{w} {x}, {safe}"));
+        // 幅以上なら、こぼれた後の値を選ぶ
+        let big = self.tmp();
+        self.emit(&format!("{big} = icmp uge i{w} {n}, {w}"));
+        let spill = if o == "ashr" {
+            // **符号つきの右送りは符号で埋まる**
+            let sign = self.tmp();
+            self.emit(&format!("{sign} = ashr i{w} {x}, {}", w - 1));
+            sign
+        } else {
+            "0".to_string()
+        };
+        let out = self.tmp();
+        self.emit(&format!("{out} = select i1 {big}, i{w} {spill}, i{w} {raw}"));
+        let _ = ty;
+        out
     }
 
     /// 零。**型ごとに書き方が違う**
@@ -2359,7 +2447,14 @@ impl Steel {
     }
 
     /// `??` — **左が値なら右は走らない。**
-    fn coalesce(&mut self, lhs: &Expr, rhs: &Expr, span: Span) -> R<Val> {
+    fn coalesce(
+        &mut self,
+        lhs: &Expr,
+        rhs: &Expr,
+        want: Option<ValueType>,
+        span: Span,
+    ) -> R<Val> {
+        self.want = want.clone();
         let l = self.expr(lhs)?;
         let Some(l) = l else { return err("`??` の左に領域が無い", span) };
         // `E ?? D : T` の T は左辺の型である（C-29）。脱出も式としては
@@ -2376,6 +2471,7 @@ impl Steel {
         self.cbr(&l.ok.clone(), &done, &use_r);
 
         self.place(&use_r);
+        self.want = want;
         let r = self.expr(rhs)?;
         match r {
             Some(r) => {
@@ -2403,7 +2499,7 @@ impl Steel {
 
 impl Steel {
     /// `if` — **分岐は被演算子位置なので領域だが、スコープでも脱出段でもない**（C-20）。
-    fn if_expr(&mut self, i: &If, _span: Span) -> R<Val> {
+    fn if_expr(&mut self, i: &If, want: Option<ValueType>, _span: Span) -> R<Val> {
         let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         let done = self.label("if.done");
@@ -2419,6 +2515,8 @@ impl Steel {
             let no = self.label("if.no");
             self.cbr(&b, &yes, &no);
             self.place(&yes);
+            // **どの枝も同じ場所に置かれる**（C-100）
+            self.want = want.clone();
             if let Some(v) = self.expr(body)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
@@ -2431,6 +2529,7 @@ impl Steel {
 
         // **`else` が無ければ paradox**（C-14 規則2）
         if let Some(els) = &i.els {
+            self.want = want;
             if let Some(v) = self.expr(els)? {
                 ty = v.ty.clone();
                 let w = self.to_slot(&v);
@@ -3018,6 +3117,10 @@ impl Steel {
         if let ExprKind::Field { base, name } = &callee.kind {
             let b = self.expr(base)?;
             let Some(b) = b else { return err("受け手に値が無い", base.span) };
+            // **数のメンバ関数**（S-23）。LLVM の命令へ落ちる
+            if crate::interp::is_num_method(name) {
+                return self.num_method(b, name, args, span).map(Some);
+            }
             if !is_heap(&b.ty) {
                 return err("STEEL はまだ集合体のメンバ関数しか扱えない", span);
             }
@@ -3226,6 +3329,8 @@ impl Steel {
                 continue;
             }
 
+            // **引数の型が式の中まで届く**（C-100）
+            self.want = Some(ty.clone());
             let v = self.expr(a)?;
             let Some(v) = v else { return err("引数に値が無い", a.span) };
             // **値引数は深く複製する**（C-20）。
@@ -3237,7 +3342,11 @@ impl Steel {
             // **paradox を引数に渡せる。** 型は paradox との直和である
             vals.push((ity(&ty), c, v.ok));
         }
-        let ret = f.ret.as_ref().map(|t| t.value.clone()).unwrap_or(ValueType::I64);
+        // **包みを剥がす**（S-2）。剥がさないと構造体と間違えて `ptr` になる
+        let ret = match f.ret.as_ref() {
+            Some(t) => self.resolve(&t.value),
+            None => ValueType::I64,
+        };
         let sig: Vec<String> =
             vals.iter().map(|(t, v, ok)| format!("{t} {v}, i1 {ok}")).collect();
         let t = self.tmp();
@@ -3310,7 +3419,8 @@ impl Steel {
         let ExprKind::Block(items) = &f.body.kind else {
             return err("関数の本体はブロックでなければならない", f.span);
         };
-        let r = self.region(items)?;
+        // **返り値の型が本体の中まで届く**（C-100）
+        let r = self.region_wanting(items, Some(ret.clone()))?;
         match r {
             Some(v) => self.leave(1, Some(v))?,
             None => self.leave(1, None)?,
@@ -3913,5 +4023,239 @@ fn type_tag(t: &ValueType) -> String {
         ValueType::Hash(k, v) => format!("h{}_{}", type_tag(k), type_tag(v)),
         ValueType::Named(n) => format!("n{n}"),
         other => ity(other).replace('*', "p"),
+    }
+}
+
+// ================= 数のメンバ関数（S-23） =================
+
+impl Steel {
+    /// 組み込みを一度だけ宣言する。**既存の道と同じ形で入れる**——
+    /// 別々に溜めると、同じ宣言が二度出て clang が断る
+    fn need(&mut self, decl: &str) {
+        self.head_global(decl);
+    }
+
+    /// LLVM の組み込みを呼ぶ。
+    fn intr(&mut self, name: &str, ret: &str, args: &[(String, String)]) -> String {
+        let sig: Vec<String> = args.iter().map(|(t, _)| t.clone()).collect();
+        self.need(&format!("declare {ret} {name}({})", sig.join(", ")));
+        let t = self.tmp();
+        let a: Vec<String> = args.iter().map(|(t, v)| format!("{t} {v}")).collect();
+        self.emit(&format!("{t} = call {ret} {name}({})", a.join(", ")));
+        t
+    }
+
+    fn num_method(&mut self, b: Val, name: &str, args: &[Expr], span: Span) -> R<Val> {
+        // 引数を先に評価する。**左から右**（C-79）
+        let mut av = Vec::new();
+        for a in args {
+            // **引数は受け手と同じ型**（C-21）。桁数だけは `i64`
+            self.want = Some(if matches!(name, "rotate_left" | "rotate_right") {
+                ValueType::I64
+            } else {
+                b.ty.clone()
+            });
+            let v = self.expr(a)?;
+            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            av.push(v);
+        }
+        let ty = b.ty.clone();
+        let mut ok = b.ok.clone();
+        for v in &av {
+            ok = self.both_ok(&ok.clone(), &v.ok);
+        }
+
+        if is_float(&ty) {
+            return self.float_method(b, &av, name, ok, span);
+        }
+        let Some(w) = width(&ty) else {
+            return err("数にしか使えない", span);
+        };
+        self.int_method(b, &av, name, w, ok, span)
+    }
+
+    fn float_method(&mut self, b: Val, av: &[Val], name: &str, ok: String, span: Span) -> R<Val> {
+        let t = ity(&b.ty);
+        let sfx = match b.ty {
+            ValueType::F32 => "f32",
+            ValueType::F80 => "f80",
+            _ => "f64",
+        };
+        let one = |n: &str| format!("@llvm.{n}.{sfx}");
+        let x = (t.clone(), b.v.clone());
+        let a0 = av.first().map(|v| (t.clone(), v.v.clone()));
+        let a1 = av.get(1).map(|v| (t.clone(), v.v.clone()));
+        let need2 = |a: &Option<(String, String)>| -> R<(String, String)> {
+            a.clone().ok_or(SteelError { msg: format!("`{name}` の引数が足りない"), span })
+        };
+
+        let raw = match name {
+            "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "round" | "exp" | "log2"
+            | "log10" | "sin" | "cos" | "tan" => {
+                let n = if name == "abs" { "fabs".to_string() } else { name.to_string() };
+                self.intr(&one(&n), &t, &[x])
+            }
+            // `ln` は LLVM では `log` である
+            "ln" => self.intr(&one("log"), &t, &[x]),
+            "min" => {
+                let y = need2(&a0)?;
+                self.intr(&one("minnum"), &t, &[x, y])
+            }
+            "max" => {
+                let y = need2(&a0)?;
+                self.intr(&one("maxnum"), &t, &[x, y])
+            }
+            "copysign" => {
+                let y = need2(&a0)?;
+                self.intr(&one("copysign"), &t, &[x, y])
+            }
+            "pow" => {
+                let y = need2(&a0)?;
+                self.intr(&one("pow"), &t, &[x, y])
+            }
+            // **一度しか丸めない**
+            "mul_add" => {
+                let y = need2(&a0)?;
+                let z = need2(&a1)?;
+                self.intr(&one("fma"), &t, &[x, y, z])
+            }
+            _ => return err(format!("`{name}` は浮動小数に使えない"), span),
+        };
+        // **非有限は値にしない**（C-84）
+        let fin = self.finite(&raw, &b.ty.clone());
+        let ok = self.both_ok(&ok, &fin);
+        Ok(Val { ok, v: raw, ty: b.ty })
+    }
+
+    fn int_method(
+        &mut self,
+        b: Val,
+        av: &[Val],
+        name: &str,
+        w: u32,
+        ok: String,
+        span: Span,
+    ) -> R<Val> {
+        let t = format!("i{w}");
+        let sg = signed(&b.ty);
+        let x = (t.clone(), b.v.clone());
+        let y = || -> R<(String, String)> {
+            av.first()
+                .map(|v| (t.clone(), v.v.clone()))
+                .ok_or(SteelError { msg: format!("`{name}` は値を一つ取る"), span })
+        };
+        // 数える系は `i64` を返す
+        let count = |me: &mut Self, v: String| -> Val {
+            let out = if w == 64 {
+                v
+            } else {
+                let z = me.tmp();
+                me.emit(&format!("{z} = zext i{w} {v} to i64"));
+                z
+            };
+            Val { ok: ok.clone(), v: out, ty: ValueType::I64 }
+        };
+
+        let raw = match name {
+            // **`i1 false` は「最小値でも poison にしない」。** 折り返す（C-21）
+            "abs" if sg => self.intr(
+                &format!("@llvm.abs.i{w}"),
+                &t,
+                &[x, ("i1".into(), "false".into())],
+            ),
+            "abs" => b.v.clone(),
+            "min" => {
+                let n = if sg { "smin" } else { "umin" };
+                self.intr(&format!("@llvm.{n}.i{w}"), &t, &[x, y()?])
+            }
+            "max" => {
+                let n = if sg { "smax" } else { "umax" };
+                self.intr(&format!("@llvm.{n}.i{w}"), &t, &[x, y()?])
+            }
+            "count_ones" => {
+                let v = self.intr(&format!("@llvm.ctpop.i{w}"), &t, &[x]);
+                return Ok(count(self, v));
+            }
+            "leading_zeros" => {
+                let v = self.intr(
+                    &format!("@llvm.ctlz.i{w}"),
+                    &t,
+                    &[x, ("i1".into(), "false".into())],
+                );
+                return Ok(count(self, v));
+            }
+            "trailing_zeros" => {
+                let v = self.intr(
+                    &format!("@llvm.cttz.i{w}"),
+                    &t,
+                    &[x, ("i1".into(), "false".into())],
+                );
+                return Ok(count(self, v));
+            }
+            "reverse_bits" => self.intr(&format!("@llvm.bitreverse.i{w}"), &t, &[x]),
+            "swap_bytes" => {
+                if w % 8 != 0 {
+                    return err("`swap_bytes` は 8 の倍数の幅にしか使えない", span);
+                }
+                // **一バイトなら何も起きない。** LLVM の `bswap` は 16 ビット以上しか取らない
+                if w == 8 {
+                    b.v.clone()
+                } else {
+                    self.intr(&format!("@llvm.bswap.i{w}"), &t, &[x])
+                }
+            }
+            // **`fshl` / `fshr` は幅で割った余りだけ回す。** 自分で丸めなくてよい
+            "rotate_left" | "rotate_right" => {
+                let n = av
+                    .first()
+                    .ok_or(SteelError { msg: format!("`{name}` は桁数を一つ取る"), span })?;
+                let nn = self.conv(&n.v.clone(), &n.ty.clone(), &b.ty.clone());
+                let f = if name == "rotate_left" { "fshl" } else { "fshr" };
+                self.intr(
+                    &format!("@llvm.{f}.i{w}"),
+                    &t,
+                    &[x.clone(), x, (t.clone(), nn)],
+                )
+            }
+            "saturating_add" | "saturating_sub" => {
+                let op = if name == "saturating_add" { "add" } else { "sub" };
+                let n = if sg { "s" } else { "u" };
+                self.intr(&format!("@llvm.{n}{op}.sat.i{w}"), &t, &[x, y()?])
+            }
+            // **掛け算の飽和は組み込みが無い。** 倍の幅で掛けてから挟む
+            "saturating_mul" => {
+                let d = w * 2;
+                let dt = format!("i{d}");
+                let ext = if sg { "sext" } else { "zext" };
+                let (_, yv) = y()?;
+                let xa = self.tmp();
+                self.emit(&format!("{xa} = {ext} i{w} {} to {dt}", b.v));
+                let ya = self.tmp();
+                self.emit(&format!("{ya} = {ext} i{w} {yv} to {dt}"));
+                let m = self.tmp();
+                self.emit(&format!("{m} = mul {dt} {xa}, {ya}"));
+                let (lo, hi) = if sg {
+                    (
+                        format!("-{}", 1i128 << (w - 1)),
+                        format!("{}", (1i128 << (w - 1)) - 1),
+                    )
+                } else {
+                    ("0".to_string(), format!("{}", (1i128 << w) - 1))
+                };
+                let cmin = if sg { "smax" } else { "umax" };
+                let cmax = if sg { "smin" } else { "umin" };
+                self.need(&format!("declare {dt} @llvm.{cmin}.{dt}({dt}, {dt})"));
+                self.need(&format!("declare {dt} @llvm.{cmax}.{dt}({dt}, {dt})"));
+                let c1 = self.tmp();
+                self.emit(&format!("{c1} = call {dt} @llvm.{cmin}.{dt}({dt} {m}, {dt} {lo})"));
+                let c2 = self.tmp();
+                self.emit(&format!("{c2} = call {dt} @llvm.{cmax}.{dt}({dt} {c1}, {dt} {hi})"));
+                let out = self.tmp();
+                self.emit(&format!("{out} = trunc {dt} {c2} to i{w}"));
+                out
+            }
+            _ => return err(format!("`{name}` は整数に使えない"), span),
+        };
+        Ok(Val { ok, v: raw, ty: b.ty })
     }
 }

@@ -308,10 +308,29 @@ arena の深い複製時に identity と外部 handle をどう対応させる�
 - 生 pointer / host borrow を Vaak 値へ入れる: lifetime と失効通知を核へ持ち込むため採らない。
   rtex node は引き続き epoch 付き opaque handle と native NodeOps で仲介する。
 
-arena だけでは tagged `kind` と `switch` の boilerplate は残る。再帰 AST の書き味を完成させる第二候補は、
-payload に `Ast handle` を持てる有限 sum と exhaustive match である。arena/handle を先に入れれば、
-sum 自体は再帰値を持たず、現在の深い複製・DAG 規則を保ったまま追加できる。
+### 2026-08-22 訂正：sum / match は候補にしない
 
-実装順を付けるなら、(1) append-only typed arena/handle、(2) 参照実装と VM の差分試験、
-(3) STEEL lowering、(4) arena+root を使う selfhost AST の実例、(5) sum/match の判断、である。
+依頼者から、sum 型と match 構文は**意図的に言語仕様から排している**との訂正があった。
+上で第二候補として挙げたのは Codex の誤りであり、撤回する。arena の判断と sum / match を結び付けない。
+
+arena だけでは tagged `kind` と `switch` の boilerplate は残るが、これは新構文ではなく、既存の
+`struct`・整数 tag・`switch`・関数で擬似的に再現し、木を辿る参照実装で費用を測る。必要なら
+標準ライブラリ側の命名規約や生成道具を検討するに留め、言語仕様へ sum / match を追加しない。
+
+arena の実装順を付けるなら、(1) append-only typed arena/handle、(2) 参照実装と VM の差分試験、
+(3) STEEL lowering、(4) arena+root と既存の tag / `switch` を使う selfhost AST の実例、である。
 `remove`・再利用・instance identity は、実際に必要性と費用が測れてから決める。
+
+## 2026-08-22: モジュール機構の検討を開始（未決定・Claude 側と並行）
+
+依頼者から、STEEL と埋め込みで重視点の違うモジュール機構を並行検討する依頼があった。
+Claude 側でも検討中とのことなので、Codex はまだ構文・意味論・core 実装を決めない。
+
+- STEEL: 依存グラフを検査し、SCC を潰した DAG を決定的にトポロジカル順へ並べ、検査・IR 生成・cache を行う案。
+- 埋め込み: 実行時に filesystem や parser を呼ばず、host resolver が事前に解決した source / AST / bytecode を
+  `PreparedProgram` として繰り返し走らせる案。
+- 両者で module identity、export 表、依存 interface hash を共通にし、loader / compiler policy だけを分ける案。
+- C-36 の相互再帰を壊さないため、関数だけの循環 import は SCC 単位で扱える。一方、初期化を持つ値は
+  順序を要するため、import 先を宣言だけに絞る案と、初期化 DAG を別に検査する案を比較する。
+
+詳細は別実験枝へ置く。Claude 側の案が届いたら、重複実装せず差分だけを返す。

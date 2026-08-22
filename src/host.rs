@@ -45,6 +45,37 @@ pub trait HostBinding {
 
     /// 走った後に書き戻す。**同じなら呼ばれない。**
     fn write(&mut self, v: &Value);
+
+    /// 要素だけを問う（S-15）。**答えられないなら `None`。**
+    ///
+    /// 集合体を見せるホストで、台本が**定数の添字しか使っていない**とき、
+    /// 丸ごと写さずに済む。rtex の `\count` なら 256 個ではなく触った分だけになる。
+    ///
+    /// 既定は「答えられない」。**答えないホストは何もしなくてよい**——
+    /// そのときは今までどおり丸ごと読む。
+    fn read_at(&self, _i: usize) -> Option<Value> {
+        None
+    }
+
+    /// 要素だけを書く（S-15）。**書けたなら `true`。**
+    ///
+    /// `read_at` と対で使う。片方しか答えられないなら、両方使われない。
+    fn write_at(&mut self, _i: usize, _v: &Value) -> bool {
+        false
+    }
+
+    /// 長さだけを問う（S-15）。**答えられないなら `None`。**
+    ///
+    /// 要素だけを渡すときも、**長さは合っていなければならない**——
+    /// 台本が `.len()` を見るかもしれないし、範囲の外は paradox でなければならない。
+    fn len(&self) -> Option<usize> {
+        None
+    }
+
+    /// 空か。`len` が答えないなら答えられない。
+    fn is_empty(&self) -> Option<bool> {
+        self.len().map(|n| n == 0)
+    }
 }
 
 /// ホストが**呼べる名前**として見せるもの（S-11）。
@@ -227,20 +258,67 @@ impl Host {
                 Ok(p) => p,
                 Err(e) => return Outcome::Static(vec![e.msg]),
             };
+            // **使わない名前は読まない。**
+            //
+            // rtex の `\count` のように束縛が何百もあるホストでは、
+            // 「全部読む」がそのまま起動費になる。組み立て済みの命令列を見れば、
+            // **どれが要るかは走らせる前に分かる**
+            let reads = p.host_reads();
+            let writes = p.host_writes();
+            // **触った添字だけを問える束縛はどれか**（S-15）。
+            // 定数の添字しか使っていなくて、ホストが要素で答えられるなら、
+            // 丸ごと写さない——rtex の `\count` なら 256 個ではなく触った分だけになる
+            let mut partial: Vec<Option<Vec<i128>>> = Vec::new();
             let values: Vec<Value> = self
                 .bindings
                 .iter()
                 .filter(|(_, _, live)| *live)
-                .map(|(_, b, _)| b.read())
+                .enumerate()
+                .map(|(i, (_, b, _))| {
+                    // **書き戻すかもしれないなら読む。** 比べる相手が要るからである。
+                    // 一度も触れていない名前だけを飛ばす
+                    let need = reads.get(i).copied().unwrap_or(true)
+                        || writes.get(i).copied().unwrap_or(true);
+                    if !need {
+                        partial.push(None);
+                        // 触れないなら、型に合う空の値を置く。**書き戻しもしない**
+                        return empty_of(&b.type_of());
+                    }
+                    if let Some(idx) = p.host_touched(i) {
+                        if let Some(v) = element_view(b.as_ref(), &idx) {
+                            partial.push(Some(idx));
+                            return v;
+                        }
+                    }
+                    partial.push(None);
+                    b.read()
+                })
                 .collect();
             let mut answer = Answer { fns: self.fns.clone() };
+            let before = values.clone();
             let (result, after) =
                 crate::vm::run_program_with_fns_writeback(&p, values, &mut answer);
             let mut it = after.into_iter();
+            let mut was = before.into_iter();
+            let mut k = 0usize;
             for (_, b, live) in self.bindings.iter_mut() {
                 if *live {
+                    let old = was.next();
+                    let touched = writes.get(k).copied().unwrap_or(true);
+                    k += 1;
+                    let part = partial.get(k - 1).cloned().flatten();
                     if let Some(v) = it.next() {
-                        b.write(&v);
+                        if !touched {
+                            // **触れていないなら比べもしない**
+                        } else if let Some(idx) = part {
+                            // **触った要素だけ書き戻す。** 丸ごと書けば、
+                            // 渡していない要素を零で潰してしまう
+                            write_elements(b.as_mut(), &idx, &v, old.as_ref());
+                        } else if old.as_ref() != Some(&v) {
+                            // **同じなら書かない**（`HostBinding::write` の契約）。
+                            // ホストによっては書き戻しが高い——rtex なら save stack が動く
+                            b.write(&v);
+                        }
                     }
                 }
             }
@@ -250,9 +328,14 @@ impl Host {
             }
         } else {
             let mut it = Interp::new();
+            let mut before: Vec<Option<Value>> = Vec::with_capacity(self.bindings.len());
             for (name, b, live) in &self.bindings {
                 if *live {
-                    it.expose(name, b.read());
+                    let v = b.read();
+                    before.push(Some(v.clone()));
+                    it.expose(name, v);
+                } else {
+                    before.push(None);
                 }
             }
             // **呼べる名前を登録する**（S-11）。番号は登録順
@@ -261,11 +344,13 @@ impl Host {
             }
             let answer = Box::new(Answer { fns: self.fns.clone() });
             let r = it.run_with(&prog, answer);
-            // 走り終わってから書き戻す
-            for (name, b, live) in self.bindings.iter_mut() {
+            // 走り終わってから書き戻す。**同じなら書かない**（契約）
+            for ((name, b, live), old) in self.bindings.iter_mut().zip(before) {
                 if *live {
                     if let Some(v) = it.host_value(name) {
-                        b.write(&v);
+                        if old.as_ref() != Some(&v) {
+                            b.write(&v);
+                        }
                     }
                 }
             }
@@ -295,4 +380,73 @@ impl Default for Host {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 読まない束縛の場所へ置く値。**型に合う空**であればよい。
+///
+/// 書き戻さないと決めた枠なので、中身は観測されない。
+fn empty_of(t: &ValueType) -> Value {
+    use ValueType::*;
+    match t {
+        U1 => Value::U1(false),
+        U8 => Value::U8(0),
+        U16 => Value::U16(0),
+        U32 => Value::U32(0),
+        I32 => Value::I32(0),
+        F32 => Value::F32(0.0),
+        F64 => Value::F64(0.0),
+        Str => Value::str(Vec::new()),
+        Array(e) => Value::array((**e).clone(), Vec::new()),
+        Map(k, v) => Value::map((**k).clone(), (**v).clone(), Default::default()),
+        Hash(k, v) => {
+            Value::Hash(Box::new(crate::value::HashVal::new((**k).clone(), (**v).clone())))
+        }
+        _ => Value::I64(0),
+    }
+}
+
+/// 触った添字だけを埋めた集合体を作る（S-15）。
+///
+/// **長さは本物でなければならない**——台本が `.len()` を見るかもしれないし、
+/// 枠の外は paradox でなければならない。
+///
+/// ホストが要素で答えられないなら `None`。**そのときは丸ごと読む。**
+fn element_view(b: &dyn HostBinding, idx: &[i128]) -> Option<Value> {
+    let ValueType::Array(el) = b.type_of() else { return None };
+    let n = b.len()?;
+    let mut items = vec![zero_of(&el); n];
+    for &i in idx {
+        // 枠の外の添字は paradox になるので、埋めなくてよい
+        let Ok(u) = usize::try_from(i) else { continue };
+        if u >= n {
+            continue;
+        }
+        items[u] = b.read_at(u)?;
+    }
+    Some(Value::array((*el).clone(), items))
+}
+
+/// 触った添字だけ書き戻す。
+fn write_elements(b: &mut dyn HostBinding, idx: &[i128], now: &Value, was: Option<&Value>) {
+    let Value::Array(a) = now else { return };
+    let old = match was {
+        Some(Value::Array(o)) => Some(o),
+        _ => None,
+    };
+    for &i in idx {
+        let Ok(u) = usize::try_from(i) else { continue };
+        let Some(v) = a.items.get(u) else { continue };
+        // **同じなら書かない**（契約）
+        if let Some(o) = old {
+            if o.items.get(u) == Some(v) {
+                continue;
+            }
+        }
+        b.write_at(u, v);
+    }
+}
+
+/// 型に合う零。**触らない要素の場所を埋める**ためだけに使う。
+fn zero_of(t: &ValueType) -> Value {
+    empty_of(t)
 }
