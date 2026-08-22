@@ -371,6 +371,15 @@ t!(構造体を返す,
    "struct P { let x : i64; let y : i64; };
     fn mk (a : i64) { new P ( x := a, y := a + 1 ) } -> P;
     let p := mk(4); p.x * 10 + p.y");
+t!(構造体の除去子は脱出側で型を失わない,
+   "flow $return = $repeat(break, getdepth());
+    struct P { let x : i64 := 42; };
+    fn maybe (yes : u1) { if (yes) new P ( ) fi } -> P;
+    fn use (yes : u1) {
+        let p := maybe(yes) ?? $return;
+        p.x
+    } -> i64;
+    use(true) ?? 0");
 t!(構造体が集合体を持つ,
    "struct Bag { var xs : i64 array; };
     var a := new Bag ( xs := [1,2,3] );
