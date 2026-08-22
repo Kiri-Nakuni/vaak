@@ -90,8 +90,10 @@ arena AST を NodeId で辿る。したがって backend の差ではなく、Va
 - VS Code 拡張は lockfile + esbuild + 公式 vsce で VSIX を再生成できる。
 - 参照実装の未使用 `Scope::is_loop`、STEEL の到達不能な末尾 arm、未使用 import/引数を除いた。
   `cargo check --release --all-targets` で Vaak 本体由来の警告は 0（公開 API・意味論は不変）。
+- C-98 で禁止済みの浮動小数鍵を型検査が通していた。`map` / `hash` の明示型、推論、
+  ラップ型、関数署名、構造体欄で実行前に拒否するよう揃えた。
 
-この tip で `cargo test --release` は 421 tests、失敗 0。
+この tip で `cargo test --release` は 422 tests、失敗 0。
 
 ### 公開 API の注意
 
@@ -135,7 +137,6 @@ arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 
 
 - 型検査は文脈型を通すが、評価器の束縛・代入・返値で狭い整数への coercion が抜ける経路がある
 - f64 から f32 へ狭めた後に infinity になる値を拒否し切れていない
-- float の `MapKey` が raw bits 順で、数値順序や `-0.0` / `0.0` の同一性と合わない
 - user-defined member method の追加 `alias` 引数は VM の `Op::Method` ではまだ値化される
 - STEEL で named struct の `??` が名前型を失う経路がある（LISP 例は `ok` 欄で回避）
 - STEEL の `new u8 array(str)` は未実装
