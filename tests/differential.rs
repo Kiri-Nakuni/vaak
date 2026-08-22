@@ -269,6 +269,21 @@ fn 利用者定義メソッドの値引数は後続引数より先に写す() {
     );
 }
 
+#[test]
+fn 利用者定義メソッドでも同じ実セルに_alias_引数を二つ渡せない() {
+    same(
+        "struct P { var value : i64 := 0; };
+         fn P.set2 (self, var a : i64 alias, var b : i64 alias) { a := 2; b := 3; };
+         var p := new P ( ); var x := 1; p.set2(x, x); x",
+    );
+    // 名前が違っても &= で同じセルを指していれば拒む。
+    same(
+        "struct P { var value : i64 := 0; };
+         fn P.set2 (self, var a : i64 alias, var b : i64 alias) { a := 2; b := 3; };
+         var p := new P ( ); var x := 1; var y : i64 alias &= x; p.set2(x, y); x",
+    );
+}
+
 // ===== S-16：分岐は領域である =====
 
 /// 木を辿る実装と VM が同じ答えを出すこと。

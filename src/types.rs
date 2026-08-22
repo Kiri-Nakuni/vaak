@@ -29,7 +29,7 @@ pub fn check_types_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec
     for (n, item) in host {
         match item {
             HostItem::Value(ty) => {
-                t.scopes[0].insert(n.clone(), ty.clone());
+                t.scopes[0].insert(n.clone(), (ty.clone(), BindKind::Var));
             }
             // **型はホストが宣言する。** だから検査器は無改造で働く（S-11）
             HostItem::Fn(sig) => {
@@ -44,7 +44,9 @@ pub fn check_types_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec
 
 struct TypeChecker {
     errs: Vec<StaticError>,
-    scopes: Vec<HashMap<String, ValueType>>,
+    /// 型と権限。メソッドはレシーバ型で宣言を選ぶため、選んだ後の
+    /// alias 権限検査もここで通常関数と同じ規則へ掛ける。
+    scopes: Vec<HashMap<String, (ValueType, BindKind)>>,
     frame_base: usize,
     fns: HashMap<String, FnDecl>,
     structs: HashMap<String, StructDecl>,
@@ -87,8 +89,17 @@ impl TypeChecker {
 
     fn lookup(&self, n: &str) -> T {
         for s in self.scopes[self.frame_base..].iter().rev() {
-            if let Some(t) = s.get(n) {
+            if let Some((t, _)) = s.get(n) {
                 return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn kind_of(&self, n: &str) -> Option<BindKind> {
+        for s in self.scopes[self.frame_base..].iter().rev() {
+            if let Some((_, kind)) = s.get(n) {
+                return Some(*kind);
             }
         }
         None
@@ -372,7 +383,10 @@ impl TypeChecker {
                 let it = st.unwrap_or(ValueType::I64);
                 let w = want.cloned();
                 self.scoped(|s| {
-                    s.scopes.last_mut().unwrap().insert(name.clone(), it);
+                    s.scopes
+                        .last_mut()
+                        .unwrap()
+                        .insert(name.clone(), (it, BindKind::Let));
                     s.loop_body(body, w.as_ref());
                 });
                 want.cloned().or(Some(ValueType::I64))
@@ -501,7 +515,7 @@ impl TypeChecker {
                 }
             };
             if let Some(t) = t {
-                self.scopes.last_mut().unwrap().insert(b.name.clone(), t);
+                self.scopes.last_mut().unwrap().insert(b.name.clone(), (t, d.kind));
             }
         }
     }
@@ -527,7 +541,10 @@ impl TypeChecker {
         self.scopes.push(HashMap::new());
         self.frame_base = self.scopes.len() - 1;
         for p in &f.params {
-            self.scopes.last_mut().unwrap().insert(p.name.clone(), p.ty.value.clone());
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .insert(p.name.clone(), (p.ty.value.clone(), p.kind));
         }
         // `->` は**外界面の型**（C-66）。本体の値がそれに合わねばならない
         let want = f.ret.as_ref().map(|t| t.value.clone());
@@ -556,6 +573,13 @@ impl TypeChecker {
             // 利用者定義のメンバ関数（S-1）を先に探す
             if let Some(ValueType::Named(t)) = &bt {
                 if let Some(f) = self.fns.get(&format!("{t}.{name}")).cloned() {
+                    let alias_errs = crate::check::alias_arg_errors(
+                        &f.params[1..],
+                        args,
+                        Some(base),
+                        |n| self.kind_of(n),
+                    );
+                    self.errs.extend(alias_errs);
                     for (p, a) in f.params[1..].iter().zip(args) {
                         self.expect(a, &p.ty.value);
                     }
