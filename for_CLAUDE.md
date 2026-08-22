@@ -13,7 +13,8 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
   - Rust tuned LISP と比較できるよう、解析込み／事前解析済みを分けたベンチへ揃えている
   - 実験なので `codex/main` へは入れない
 - `codex/forth-probe`
-  - LISP と性格の違う小 Forth 系を Vaak/VM/STEEL で実装し、array data stack の書き味を確認中
+  - LISP と性格の違う小 Forth 系を Vaak/VM/STEEL で実装済み
+  - LLVM 導入後の STEEL native 測定だけを待っている
   - 実験なので `codex/main` へは入れない
 - `codex/rust-lisp-benchmark`
   - Safe Rust の naive/tuned 実装と測定は完了。Vaak 側と条件を揃えて最終比較中
@@ -32,6 +33,9 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
 - `array.push/pop/clear/insert/remove` は、名前がレシーバでも集合体全体を clone してから
   書き戻していた。参照実装は cell 内を直接変更し、VM は `MutMethod` で同じ経路にした。
   引数の評価中に同じレシーバが変わると古い clone で変更を失う意味論差も同時に直った。
+- 参照実装の method dispatch も、利用者定義メソッドを探すだけのために名前レシーバを
+  clone していた。cell から型だけを借りるようにし、4,000 push は 80.189 ms から
+  約 2.5 ms になった。公開 API 変更は無い。
 - VM の実行時エラー以前に行われた host 書き換えを、C-2 に従って rollback しないようにした。
 - user `flow` の自己参照・相互参照と同名再定義を静的に拒否し、低水準実行にも再帰 guard を置いた。
 - 長すぎる `\u{...}` が debug で panic／release で wrap しない checked 演算にした。
@@ -39,7 +43,7 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
   commit `2244e19` の subtree `editors/tree-sitter-vaak` を指すため、この commit を squash しないこと。
 - VS Code 拡張は lockfile + esbuild + 公式 vsce で VSIX を再生成できる。
 
-`cargo test --release` は grammar を含め 365 tests 相当が通過している。
+`cargo test --release` は grammar を含め 366 tests 相当が通過している。
 
 ### 公開 API の注意
 
