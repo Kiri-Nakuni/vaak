@@ -663,3 +663,22 @@ t!(包み型を返して包み型で受ける,
 t!(包み型の配列を返す,
    "wrap Bytes = u8 array; fn mk () { new Bytes(new u8 array(2, 5)) } -> Bytes;
     var b := mk(); (b -> u8 array)[1] -> i64");
+
+// ── 動く段数の `$repeat` ─────────────────────────
+
+t!(動く段数で零段, "var n := 0; {{ $repeat(break, n) 5 }}");
+t!(動く段数で負, "var n := 0 - 3; {{ $repeat(break, n) 5 }}");
+t!(動く段数で一段, "var n := 1; {{ $repeat(break, n) 5 }}");
+t!(動く段数で二段, "var n := 2; {{ { $repeat(break, n) 7 } ; 3 }}");
+t!(動く段数で一段だけ抜ける, "var n := 1; {{ { $repeat(break, n) 7 } ; 3 }}");
+t!(動く段数で三段,
+   "var n := 3; {{ { { $repeat(break, n) 9 } ; 2 } ; 3 }}");
+t!(動く段数の作用素が二段,
+   "var n := 2; {{ { $repeat(break break, n) 7 } ; 3 }}");
+t!(動く段数で再開,
+   "var s := 0; var n := 1; loop { s += 1; if (s > 3) break fi; $repeat(continue, n) }; s");
+t!(動く段数は式から来てもよい,
+   "var a := 1; var b := 1; {{ { $repeat(break, a + b) 7 } ; 3 }}");
+t!(動く段数の被演算子は一度だけ走る,
+   "var c := 0; var n := 1; fn bump (var k : i64 alias) { k += 1; 5 } -> i64;
+    {{ $repeat(break, n) bump(c) }} + c");
