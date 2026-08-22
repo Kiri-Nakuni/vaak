@@ -47,6 +47,40 @@ fn result(program: &vaak::ast::Program, vm: bool) -> Result<Option<i128>, String
     })
 }
 
+fn steel_native(program: &vaak::ast::Program, name: &str) -> Option<i32> {
+    let ir = vaak::steel::compile(program)
+        .unwrap_or_else(|error| panic!("STEEL の LLVM IR へ翻訳できない: {}", error.msg));
+    if Command::new("clang").arg("--version").output().is_err() {
+        return None;
+    }
+    let directory = std::env::temp_dir().join(format!("vaak-forth-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("一時ディレクトリを作れる");
+    let llvm = directory.join("program.ll");
+    let executable = directory.join(if cfg!(windows) {
+        "program.exe"
+    } else {
+        "program"
+    });
+    std::fs::write(&llvm, ir).expect("LLVM IR を書ける");
+    let compiled = Command::new("clang")
+        .arg("-O2")
+        .arg("-o")
+        .arg(&executable)
+        .arg(&llvm)
+        .output()
+        .expect("clang を呼べる");
+    assert!(
+        compiled.status.success(),
+        "clang: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let status = Command::new(executable)
+        .status()
+        .expect("STEEL の生成物を実行できる");
+    std::fs::remove_dir_all(directory).expect("STEEL 試験の一時ディレクトリを片付けられる");
+    status.code()
+}
+
 #[test]
 fn forthが参照実装とvmで同じ値になる() {
     let program = program();
@@ -82,31 +116,21 @@ fn forthをsteelへ翻訳できる() {
     let ir = vaak::steel::compile(&program())
         .unwrap_or_else(|error| panic!("STEEL の LLVM IR へ翻訳できない: {}", error.msg));
     assert!(ir.contains("define i32 @main()"));
+}
 
-    // clang がある環境では、生成物まで動かして終了コードを照合する。
-    if Command::new("clang").arg("--version").output().is_err() {
-        return;
-    }
-    let directory = std::env::temp_dir().join(format!("vaak-forth-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).expect("一時ディレクトリを作れる");
-    let llvm = directory.join("forth.ll");
-    let executable = directory.join(if cfg!(windows) { "forth.exe" } else { "forth" });
-    std::fs::write(&llvm, ir).expect("LLVM IR を書ける");
-    let compiled = Command::new("clang")
-        .arg("-O2")
-        .arg("-o")
-        .arg(&executable)
-        .arg(&llvm)
-        .output()
-        .expect("clang を呼べる");
-    assert!(
-        compiled.status.success(),
-        "clang: {}",
-        String::from_utf8_lossy(&compiled.stderr)
+#[test]
+#[ignore = "STEEL は grow した alias 配列の記述子を呼び出し元へ共有していない"]
+fn steelのalias引数から伸ばした配列が呼び出し元に残る() {
+    let program = parse(
+        "fn push_one (var stack : i64 array alias) { stack.push(42); };
+         var stack : i64 array := new i64 array(0, 0);
+         push_one(stack);
+         stack.pop() ?? 0",
     );
-    let status = Command::new(executable)
-        .status()
-        .expect("STEEL の生成物を実行できる");
-    assert_eq!(status.code(), Some(42));
-    std::fs::remove_dir_all(directory).expect("Forth 試験の一時ディレクトリを片付けられる");
+    assert_eq!(result(&program, false).unwrap(), Some(42));
+    assert_eq!(result(&program, true).unwrap(), Some(42));
+    let Some(native) = steel_native(&program, "alias-grow") else {
+        return;
+    };
+    assert_eq!(native, 42);
 }

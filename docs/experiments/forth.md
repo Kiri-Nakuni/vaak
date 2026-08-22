@@ -102,6 +102,39 @@ Forth の主例全体を1,000回走らせた中央値は、参照実装 3,067.21
 （3,067.2 us/run）、VM 588.615 ms（588.6 us/run）でした。こちらは各回でForth入力の字句分割も
 やり直します。再現用は [examples/bench_forth.rs](../../examples/bench_forth.rs) です。
 
+### STEEL native で初めて見えた意味差
+
+LLVM 22.1.8 の `clang` を導入して主例をネイティブ実行すると、リンクには成功しましたが、
+終了コードは期待する42ではなく **0** でした。IR生成成功だけでは、意味の一致を確認したことには
+なりませんでした。
+
+次まで縮めても再現します。
+
+```vaak
+fn push_one (var stack : i64 array alias) { stack.push(42); };
+var stack : i64 array := new i64 array(0, 0);
+push_one(stack);
+stack.pop() ?? 0
+```
+
+| 実行経路 | 答え |
+|---|---:|
+| 木を辿る参照実装 | 42 |
+| VM | 42 |
+| STEEL native | **0** |
+
+STEEL は `alias` 引数にも集合体の記述子を値で渡していました。要素を上書きするだけなら、記述子が
+指すバッファは同じなので問題が隠れます。しかし `push` は長さ・容量・場合によってはバッファの
+アドレスを変えます。呼び出された関数の記述子だけが変わり、呼び出し元の空の記述子は変わりません。
+
+さらに、単に記述子の枠をポインタで渡すだけでは不十分です。関数内の `grow` が確保したバッファは
+関数入口のアリーナ印より上にあり、現在のSTEELは関数退出時にその印まで戻します。呼び出し元へ
+記述子を返すなら、伸びたバッファも印を越えて生存させなければなりません。
+
+この問題はstack型の不足ではなく、実装済みであるはずの `alias` 意味論とSTEELの食い違いです。
+誤った実行結果を速く測っても性能比較にはならないため、**STEEL native のForthベンチ値は記録しません。**
+最小再現は `tests/forth.rs` の ignored 試験に残しました。
+
 ## 書いて分かったこと
 
 ### 書きやすかったところ
@@ -154,10 +187,16 @@ cargo run --release --bin vaak -- examples/vaak/07-Forth.vaak
 
 cargo test --release --test forth
 # 参照実装 = 42、VM = 42、誤りはparadox、STEELのLLVM IR生成成功
+
+# clang が使える環境で、既知のSTEEL native差を再現する。修正前は 0 != 42 で失敗する
+cargo test --release --test forth -- --ignored --nocapture
 ```
 
-今回のWindows環境には `clang` が無かったため、STEELはLLVM IR生成までを確認しました。
-`clang` がある環境では、回帰試験が生成物を実行し、終了コード42まで照合します。
+Windows環境で一度は `clang` 22.1.8 によるリンクと実行まで確認できました。その後の新しいshellでは
+MSVCの `libcmt.lib` と `oldnames.lib` が探索できず、同じリンクを再現できませんでした。成功した際に
+明示した環境設定はLLVMの `bin` を `PATH` の先頭へ加えただけで、`LIB` と `INCLUDE` は設定して
+いません。このため、上の終了コード0は実測として残しつつ、Windows上の再現にはVisual C++の
+Developer環境も必要です。
 
 未実装の言語機能を足さずに、小さな連結型言語とコロン定義まで書けました。専用stack型よりも、
 既存の配列操作が隠れた複製をしないことの方が、処理系を書く上では決定的でした。
