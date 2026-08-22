@@ -1,0 +1,24 @@
+%{ i64 配列の半開区間をその場で反転する。
+
+   破壊対象は var alias。成功時は true、不正範囲は paradox を返す。
+   空区間と一要素区間は成功である。 }%
+
+flow $array_i64_reverse_return = $repeat(break, getdepth());
+
+fn array_i64_reverse_range (var xs : i64 array alias, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_reverse_return; fi;
+    var left := first;
+    var right := last;
+    while (left + 1 < right) {
+        right -= 1;
+        let saved := xs[left] ?? $array_i64_reverse_return;
+        xs[left] := xs[right] ?? $array_i64_reverse_return;
+        xs[right] := saved;
+        left += 1;
+    };
+    true
+} -> u1;
+
+fn array_i64_reverse (var xs : i64 array alias) {
+    array_i64_reverse_range(xs, 0, xs.len())
+} -> u1;

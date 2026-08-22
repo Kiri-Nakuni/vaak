@@ -1,0 +1,23 @@
+%{ i64 配列の累積和。
+
+   構築結果は長さ n + 1 で、先頭は 0。和は i64 の規則どおり
+   折り返す。公開関数は array_i64_ で始まる。 }%
+
+flow $array_i64_prefix_return = $repeat(break, getdepth());
+
+fn array_i64_prefix_sum (xs : i64 array alias) {
+    var prefix : i64 array := new i64 array(xs.len() + 1, 0);
+    nfor (i, 0, xs.len()) {
+        prefix[i + 1] := (prefix[i] ?? $array_i64_prefix_return) + (xs[i] ?? $array_i64_prefix_return);
+    };
+    prefix
+} -> i64 array;
+
+% prefix が上の形式なら、元配列の [first, last) の和を返す。%
+% 有効な空区間は 0。空の prefix または不正範囲は paradox。%
+fn array_i64_prefix_range_sum (prefix : i64 array alias, first : i64, last : i64) {
+    if (prefix.len() == 0) $array_i64_prefix_return; fi;
+    let source_len := prefix.len() - 1;
+    if (first < 0 || first > last || last > source_len) $array_i64_prefix_return; fi;
+    (prefix[last] ?? $array_i64_prefix_return) - (prefix[first] ?? $array_i64_prefix_return)
+} -> i64;

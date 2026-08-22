@@ -1,0 +1,65 @@
+%{ 昇順の i64 配列に対する二分探索。
+
+   範囲は [first, last)。整列済みであることは呼び手の前提であり、
+   実行時には全要素を検査しない。公開関数は array_i64_ で始まる。 }%
+
+flow $array_i64_binary_return = $repeat(break, getdepth());
+
+% value 以上である最初の位置。空区間では first。不正範囲は paradox。%
+fn array_i64_lower_bound_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_binary_return; fi;
+    var lo := first;
+    var hi := last;
+    while (lo < hi) {
+        let mid := lo + (hi - lo) / 2;
+        if ((xs[mid] ?? $array_i64_binary_return) < value) lo := mid + 1;
+        else hi := mid;
+        fi;
+    };
+    lo
+} -> i64;
+
+fn array_i64_lower_bound (xs : i64 array alias, value : i64) {
+    array_i64_lower_bound_range(xs, value, 0, xs.len())
+} -> i64;
+
+% value より大きい最初の位置。空区間では first。不正範囲は paradox。%
+fn array_i64_upper_bound_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_binary_return; fi;
+    var lo := first;
+    var hi := last;
+    while (lo < hi) {
+        let mid := lo + (hi - lo) / 2;
+        if ((xs[mid] ?? $array_i64_binary_return) <= value) lo := mid + 1;
+        else hi := mid;
+        fi;
+    };
+    lo
+} -> i64;
+
+fn array_i64_upper_bound (xs : i64 array alias, value : i64) {
+    array_i64_upper_bound_range(xs, value, 0, xs.len())
+} -> i64;
+
+% 見つかれば最初の添字。不正範囲または見つからなければ paradox。%
+fn array_i64_binary_find_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    let at := array_i64_lower_bound_range(xs, value, first, last) ?? $array_i64_binary_return;
+    if (at == last) $array_i64_binary_return; fi;
+    if ((xs[at] ?? $array_i64_binary_return) != value) $array_i64_binary_return; fi;
+    at
+} -> i64;
+
+fn array_i64_binary_find (xs : i64 array alias, value : i64) {
+    array_i64_binary_find_range(xs, value, 0, xs.len())
+} -> i64;
+
+% 有効な空区間は false。不正範囲は paradox。%
+fn array_i64_binary_contains_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_binary_return; fi;
+    let found := array_i64_binary_find_range(xs, value, first, last) ?? 0 - 1;
+    found >= 0
+} -> u1;
+
+fn array_i64_binary_contains (xs : i64 array alias, value : i64) {
+    array_i64_binary_contains_range(xs, value, 0, xs.len())
+} -> u1;

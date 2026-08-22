@@ -1,0 +1,20 @@
+%{ 半開区間 [first, last) の検査だけを扱う。
+
+   配列を受け取らないため、他の array module から独立して使える。
+   公開関数は range_ で始まる。 }%
+
+flow $range_return = $repeat(break, getdepth());
+
+fn range_is_valid (len : i64, first : i64, last : i64) {
+    len >= 0 && first >= 0 && first <= last && last <= len
+} -> u1;
+
+fn range_is_index (len : i64, index : i64) {
+    len >= 0 && index >= 0 && index < len
+} -> u1;
+
+% 不正な範囲なら paradox。空の半開区間の長さは 0。%
+fn range_length (len : i64, first : i64, last : i64) {
+    if (! range_is_valid(len, first, last)) $range_return; fi;
+    last - first
+} -> i64;
