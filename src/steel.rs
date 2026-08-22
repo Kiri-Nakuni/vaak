@@ -79,6 +79,15 @@ struct Stage {
     cont: Option<String>,
     /// ループの反復回数の置き場（C-3：ループは回数を産む）
     count_slot: Option<String>,
+    /// **遅延した被演算子の番号を入れる枠**（C-73）。
+    ///
+    /// `continue break i` は `break i` を**再開した本体の先頭**へ送る。
+    /// 番号で送り、本体の先頭で配り直す。**使わないループは枠を持たない。**
+    pend: Option<String>,
+    /// 送られてくる脱出。順番が番号になる（1 から）
+    deferred: Vec<Escape>,
+    /// 配り台の名札。**本体を組む前に決めておく**——番号を送る側が先に走る
+    pend_label: Option<String>,
 }
 
 struct Scope {
@@ -311,6 +320,16 @@ impl Steel {
         self.n += 1;
         let name = format!("%a{}", self.n);
         let _ = writeln!(self.head, "  {name} = alloca {ty}");
+        name
+    }
+
+    /// 枠を作り、**入口で一度だけ**初期化する。
+    ///
+    /// 入口は関数につき一度しか通らないので、ループの中で作っても
+    /// 「毎周初期化される」ことにはならない。**後で必ず零へ戻す側の責任である。**
+    fn alloca_init(&mut self, ty: &str, init: &str) -> String {
+        let name = self.alloca(ty);
+        let _ = writeln!(self.head, "  store {ty} {init}, ptr {name}");
         name
     }
 
@@ -1270,6 +1289,9 @@ impl Steel {
             ty: ValueType::I64,
             cont,
             count_slot,
+            pend: None,
+            deferred: Vec::new(),
+            pend_label: None,
         });
         self.stages.len() - 1
     }
@@ -2587,9 +2609,23 @@ impl Steel {
         let ExprKind::Block(items) = &body.kind else {
             return err("ループの本体はブロックでなければならない", span);
         };
+        // **配り台を先に名づける。** 番号を送る側が先に走るので、名札だけ要る（C-73）
+        let check = self.label("pend.check");
+        let body_start = self.label("loop.body");
+        self.stages[idx].pend_label = Some(check.clone());
+        self.br(&check);
+        self.place(&body_start);
         let r = self.region(items)?;
         // **本体に値が残ってはいけない**（C-3）。検査器が捕らえているので、ここでは捨てる
         let _ = r;
+        self.br(&cont);
+        // **本体を組み終わってから配り台を置く。** LLVM は順序を問わない
+        self.emit_pending(idx, &body_start)?;
+        if self.stages[idx].pend.is_none() {
+            // 送るものが無いなら、飛び先だけ繋ぐ
+            self.place(&check);
+            self.br(&body_start);
+        }
         self.pop_scope();
 
         self.br(&cont);
@@ -2650,7 +2686,19 @@ impl Steel {
         let ExprKind::Block(items) = &body.kind else {
             return err("`nfor` の本体はブロックでなければならない", span);
         };
+        // **束縛の後に配る。** `continue break i` は**次の周回の `i`** を読む（C-73）
+        let check = self.label("pend.check");
+        let body_start = self.label("nfor.body");
+        self.stages[idx].pend_label = Some(check.clone());
+        self.br(&check);
+        self.place(&body_start);
         let _ = self.region(items)?;
+        self.br(&cont);
+        self.emit_pending(idx, &body_start)?;
+        if self.stages[idx].pend.is_none() {
+            self.place(&check);
+            self.br(&body_start);
+        }
         self.pop_scope();
 
         self.br(&cont);
@@ -2709,9 +2757,53 @@ impl Steel {
         Ok(Val { ok, v, ty })
     }
 
+    /// 遅延した被演算子を配る（C-73）。**本体の先頭で、番号を見て脱出を実行する。**
+    ///
+    /// LLVM は基本ブロックの順序を問わないので、**本体の後に置いてよい**——
+    /// 本体を組み終わるまで、何が送られてくるか分からないからである。
+    ///
+    /// 送るものが無いループは、この関数が何も出さない。**費用を持たない。**
+    fn emit_pending(&mut self, idx: usize, body_start: &str) -> R<()> {
+        let Some(slot) = self.stages[idx].pend.clone() else {
+            return Ok(());
+        };
+        let n = self.stages[idx].deferred.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let check = self.stages[idx].pend_label.clone().unwrap();
+        self.place(&check);
+        let p = self.tmp();
+        self.emit(&format!("{p} = load i32, ptr {slot}"));
+        // **読んだら零へ戻す。** 次の周回へ持ち越さない
+        self.emit(&format!("store i32 0, ptr {slot}"));
+        let mut arms = Vec::new();
+        let mut labels = Vec::new();
+        for k in 1..=n {
+            let l = self.label("pend.run");
+            arms.push(format!("i32 {k}, label %{l}"));
+            labels.push(l);
+        }
+        self.emit(&format!(
+            "switch i32 {p}, label %{body_start} [ {} ]",
+            arms.join(" ")
+        ));
+        self.done = true;
+        for (i, l) in labels.into_iter().enumerate() {
+            self.place(&l);
+            let d = self.stages[idx].deferred[i].clone();
+            self.escape(&d)?;
+            // **脱出は必ず飛ぶ。** 落ちてきたら本体へ入る
+            if !self.done {
+                self.br(body_start);
+            }
+        }
+        Ok(())
+    }
+
     /// 脱出。**段数が静的に分かっていれば `br` 一つになる。**
     fn escape(&mut self, x: &Escape) -> R<()> {
-        let (depth, is_continue, payload) = self.plan(x)?;
+        let (depth, is_continue, payload, deferred) = self.plan(x)?;
         if is_continue {
             // **段を再開させる。** `break` の連なりの分だけ外へ出てから
             let idx = self
@@ -2719,9 +2811,25 @@ impl Steel {
                 .len()
                 .checked_sub(depth.max(1))
                 .ok_or(SteelError { msg: "段が足りない".into(), span: x.span })?;
+            let _ = depth;
             let Some(cont) = self.stages[idx].cont.clone() else {
                 return err("`continue` の抜けた先がループではない", x.span);
             };
+            // **遅延した被演算子は番号で送る**（C-73）。
+            // 再開した本体の先頭で配り直される
+            if let Some(d) = deferred {
+                let slot = match self.stages[idx].pend.clone() {
+                    Some(p) => p,
+                    None => {
+                        let p = self.alloca_init("i32", "0");
+                        self.stages[idx].pend = Some(p.clone());
+                        p
+                    }
+                };
+                self.stages[idx].deferred.push(d);
+                let k = self.stages[idx].deferred.len();
+                self.emit(&format!("store i32 {k}, ptr {slot}"));
+            }
             self.br(&cont);
             return Ok(());
         }
@@ -2737,13 +2845,18 @@ impl Steel {
     /// `flow` の本体は**使用位置で読み直される**（C-15）ので、
     /// ここで展開する——`getdepth()` が使用位置の深さになるのはそのためである。
     ///
-    /// 返すのは（段数, 再開か, 積み荷）。
-    fn plan(&mut self, x: &Escape) -> R<(usize, bool, Option<Expr>)> {
-        let inner = |me: &mut Self, x: &Escape| -> R<(usize, bool, Option<Expr>)> {
+    /// 返すのは（段数, 再開か, 積み荷, **遅延した脱出**）。
+    ///
+    /// 遅延した脱出は `continue` の被演算子である（C-73）。
+    /// **段数には混ぜない**——それは「送るもの」であって「抜ける段」ではない。
+    fn plan(&mut self, x: &Escape) -> R<(usize, bool, Option<Expr>, Option<Escape>)> {
+        let inner = |me: &mut Self,
+                     x: &Escape|
+         -> R<(usize, bool, Option<Expr>, Option<Escape>)> {
             match &x.operand {
                 Some(Operand::Escape(i)) => me.plan(i),
-                Some(Operand::Value(v)) => Ok((0, false, Some(v.clone()))),
-                None => Ok((0, false, None)),
+                Some(Operand::Value(v)) => Ok((0, false, Some(v.clone()), None)),
+                None => Ok((0, false, None, None)),
             }
         };
         match &x.kind {
@@ -2751,17 +2864,22 @@ impl Steel {
                 if *outward {
                     return err("`outward` は STEEL がまだ扱えない", x.span);
                 }
-                let (d, c, p) = inner(self, x)?;
-                Ok((d + 1, c, p))
+                let (d, c, p, f) = inner(self, x)?;
+                Ok((d + 1, c, p, f))
             }
             EscapeKind::Continue => {
-                let (d, c, p) = inner(self, x)?;
-                if p.is_some() {
+                // **`continue` も一段を数える。** 再開する段そのものである——
+                // `break continue` は二段（裸のブロックを抜けてからループを再開する）
+                //
+                // **被演算子は遅延する**（C-73）。段数には混ぜない
+                match &x.operand {
+                    Some(Operand::Escape(i)) => Ok((1, true, None, Some((**i).clone()))),
                     // `continue` は作用素式か虚無しか取らない（C-71）
-                    return err("`continue` の被演算子は作用素式か虚無だけ", x.span);
+                    Some(Operand::Value(_)) => {
+                        err("`continue` の被演算子は作用素式か虚無だけ", x.span)
+                    }
+                    None => Ok((1, true, None, None)),
                 }
-                let _ = c;
-                Ok((d, true, None))
             }
             EscapeKind::Flow { name, args } => {
                 if name == "$repeat" {
@@ -2771,9 +2889,9 @@ impl Steel {
                     return err(format!("知らない作用素式 `{name}`"), x.span);
                 };
                 // **本体を使用位置で読み直す。** 積み荷は使用位置のもの
-                let (d, c, _) = self.plan(&body)?;
-                let (_, _, p) = inner(self, x)?;
-                Ok((d, c, p))
+                let (d, c, _, f) = self.plan(&body)?;
+                let (_, _, p, _) = inner(self, x)?;
+                Ok((d, c, p, f))
             }
         }
     }
@@ -2783,7 +2901,7 @@ impl Steel {
         &mut self,
         args: &[FlowArg],
         x: &Escape,
-    ) -> R<(usize, bool, Option<Expr>)> {
+    ) -> R<(usize, bool, Option<Expr>, Option<Escape>)> {
         let [FlowArg::Escape(op), FlowArg::Value(n)] = args else {
             return err("`$repeat` は作用素と回数を取る", x.span);
         };
@@ -2794,13 +2912,13 @@ impl Steel {
         if times < 0 {
             return err("`$repeat` の回数が負", n.span);
         }
-        let (d, c, _) = self.plan(op)?;
-        let (_, _, p) = match &x.operand {
+        let (d, c, _, f) = self.plan(op)?;
+        let (_, _, p, _) = match &x.operand {
             Some(Operand::Escape(i)) => self.plan(i)?,
-            Some(Operand::Value(v)) => (0, false, Some(v.clone())),
-            None => (0, false, None),
+            Some(Operand::Value(v)) => (0, false, Some(v.clone()), None),
+            None => (0, false, None, None),
         };
-        Ok((d * times as usize, c, p))
+        Ok((d * times as usize, c, p, f))
     }
 
     /// 式の指す**枠**（値そのものではない）。書き戻しに要る。
@@ -4292,7 +4410,7 @@ impl Steel {
             return Ok(None);
         }
         // 作用素は組み立て時に決まらねばならない。**回数だけが動く**
-        let (unit, is_continue, _) = self.plan(op)?;
+        let (unit, is_continue, _, _) = self.plan(op)?;
         if unit == 0 && !is_continue {
             return err("`$repeat` の作用素が段を数えない", x.span);
         }

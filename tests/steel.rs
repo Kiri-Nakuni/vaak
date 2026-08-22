@@ -682,3 +682,24 @@ t!(動く段数は式から来てもよい,
 t!(動く段数の被演算子は一度だけ走る,
    "var c := 0; var n := 1; fn bump (var k : i64 alias) { k += 1; 5 } -> i64;
     {{ $repeat(break, n) bump(c) }} + c");
+
+// ── 被演算子つきの `continue`（C-73） ─────────────────────────
+
+t!(遅延した脱出は次の周回で走る, "nfor (i, 0, 10) { continue break i; }");
+t!(条件つきで遅延する, "nfor (i, 0, 10) { if (i < 3) continue break i fi; }");
+t!(遅延した再開, "nfor (i, 0, 10) { continue continue; }");
+t!(ループでも遅延する,
+   "var s := 0; loop { s += 1; if (s > 2) break s fi; continue break s }");
+t!(whileでも遅延する,
+   "var s := 0; var i := 0; while (i < 9) { i += 1; if (i > 2) break i fi; continue break i }");
+t!(遅延しない周回は普通に回る,
+   "var s := 0; nfor (i, 0, 5) { if (i == 2) continue break i fi; s += 1; }");
+t!(裸のブロックを抜けてから再開する,
+   "nfor (i, 0, 10) { { break continue break i; }; }");
+t!(ブロックを抜けてから再開だけする,
+   "var s := 0; nfor (i, 0, 3) { { break continue; }; s += 1; }; s");
+t!(入れ子のループはそれぞれ持つ,
+   "var s := 0; nfor (i, 0, 3) { nfor (j, 0, 3) { continue break j; }; }; s");
+t!(遅延が二つあっても混ざらない,
+   "var s := 0; nfor (i, 0, 6) { if (i == 1) continue break 100 fi;
+    if (i == 3) continue break 200 fi; s += 1; }");

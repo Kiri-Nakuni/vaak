@@ -692,3 +692,20 @@ fn 再開はループを終わらせない() {
     // 二段外へ抜ける再開
     同じ("var s := 0; nfor (i, 0, 3) { nfor (j, 0, 3) { if (j == 1) break continue fi; s += 1 } }; s");
 }
+
+/// 被演算子つきの `continue`（C-73）。**再開した本体の先頭で処理される。**
+///
+/// 即時に読むと前の周回の値を次の周回へ持ち込む——周回の意味が壊れる。
+#[test]
+fn 遅延した被演算子() {
+    同じ("nfor (i, 0, 10) { continue break i; }");
+    同じ("nfor (i, 0, 10) { if (i < 3) continue break i fi; }");
+    同じ("nfor (i, 0, 10) { continue continue; }");
+    同じ("var s := 0; loop { s += 1; if (s > 2) break s fi; continue break s }");
+    同じ("var s := 0; var i := 0; while (i < 9) { i += 1; if (i > 2) break i fi; continue break i }");
+    同じ("var s := 0; nfor (i, 0, 5) { if (i == 2) continue break i fi; s += 1; }");
+    同じ("nfor (i, 0, 10) { { break continue break i; }; }");
+    同じ("var s := 0; nfor (i, 0, 3) { { break continue; }; s += 1; }; s");
+    同じ("var s := 0; nfor (i, 0, 3) { nfor (j, 0, 3) { continue break j; }; }; s");
+    同じ("var s := 0; nfor (i, 0, 6) { if (i == 1) continue break 100 fi; if (i == 3) continue break 200 fi; s += 1; }");
+}
