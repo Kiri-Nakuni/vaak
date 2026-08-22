@@ -814,6 +814,17 @@ impl Compiler {
             self.expr(base)?;
             self.emit(Op::NeedValue(base.span));
             for a in args {
+                // 利用者定義メソッドは、実行時にレシーバの型から選ばれる。
+                // そのためここでは追加引数が値か alias かをまだ決められない。
+                // 名前ならセルと、この時点の値の写しを両方積み、選んだ宣言に
+                // 従って Op::Method が片方を使う。写しを今取ることで、後続引数が
+                // 同じセルを書き換えても左から右の評価順を保つ（C-79）。
+                if let ExprKind::Name(v) = &a.kind {
+                    let Some(slot) = self.lookup(v) else {
+                        return self.err(format!("知らない名前 `{v}`"), a.span);
+                    };
+                    self.emit(Op::Ref(slot));
+                }
                 self.expr(a)?;
                 self.emit(Op::NeedValue(a.span));
             }
@@ -1903,9 +1914,19 @@ impl<'a> Vm<'a> {
             }
             Op::Method(ni, argc, sp) => {
                 let name = self.p.chunks[self.cur()].names[ni as usize].clone();
-                let mut args = Vec::with_capacity(argc as usize);
+                // 名前の引数は Compiler::call が [Cell, Value] の二つを積む。
+                // Value は左から右に評価した時点の写し、Cell は alias 束縛用である。
+                let mut args: Vec<(Value, Option<CellId>)> = Vec::with_capacity(argc as usize);
                 for _ in 0..argc {
-                    args.push(self.pop().value(sp)?);
+                    let value = self.pop().value(sp)?;
+                    let cell = match self.stack.last() {
+                        Some(Slot::Cell(_)) => match self.pop() {
+                            Slot::Cell(cell) => Some(cell),
+                            _ => unreachable!(),
+                        },
+                        _ => None,
+                    };
+                    args.push((value, cell));
                 }
                 args.reverse();
                 let recv = self.pop().value(sp)?;
@@ -1915,10 +1936,30 @@ impl<'a> Vm<'a> {
                     _ => String::new(),
                 };
                 if let Some(idx) = self.p.fn_index.get(&key).copied() {
+                    let params = self.p.chunks[idx as usize].params.clone();
+                    if params.len() != args.len() + 1 {
+                        return self.err(
+                            format!("`{name}` は引数を {} 個取る", params.len().saturating_sub(1)),
+                            sp,
+                        );
+                    }
                     let self_cell = self.arena.alloc(Some(recv));
                     let mut cells = vec![(self_cell, true)];
-                    for a in args {
-                        cells.push((self.arena.alloc(Some(a)), false));
+                    let mut aliases = Vec::new();
+                    for (i, (value, cell)) in args.into_iter().enumerate() {
+                        let is_alias = params[i + 1].1;
+                        if is_alias {
+                            let Some(cell) = cell else {
+                                return self.err("`alias` 引数に渡せるのは名前だけ", sp);
+                            };
+                            if aliases.contains(&cell) {
+                                return self.err("同じセルに別名が二つ届く", sp);
+                            }
+                            aliases.push(cell);
+                            cells.push((cell, true));
+                        } else {
+                            cells.push((self.arena.alloc(Some(value)), false));
+                        }
                     }
                     self.push_frame(idx, cells, 1);
                     // `var self` なら返るときに書き戻す（S-1）
@@ -1927,6 +1968,7 @@ impl<'a> Vm<'a> {
                     }
                     return Ok(None);
                 }
+                let args: Vec<Value> = args.into_iter().map(|(value, _)| value).collect();
                 if is_destructive(&name) {
                     let mut cur = recv;
                     let out = write_method_pub(&mut cur, &name, &args, sp)

@@ -242,6 +242,33 @@ fn 名前の可変メソッドはセル上の配列を直接育てる() {
     );
 }
 
+#[test]
+fn 利用者定義メソッドの追加_alias_引数は呼び出し元のセルを指す() {
+    let source =
+        "struct P { var value : i64 := 0; };
+         fn P.set (self, var target : i64 alias) { target := 9; };
+         var p := new P ( );
+         var target := 1;
+         p.set(target);
+         target";
+    let reference = vaak::interp::run(source);
+    let vm = vaak::vm::run(source);
+    assert_eq!(shape(&reference), "値 9", "参照実装: {reference:?}");
+    assert_eq!(shape(&vm), "値 9", "VM: {vm:?}");
+}
+
+#[test]
+fn 利用者定義メソッドの値引数は後続引数より先に写す() {
+    same(
+        "struct P { var value : i64 := 0; };
+         fn set (var target : i64 alias) { target := 9; 0 } -> i64;
+         fn P.first (self, first : i64, second : i64) { first } -> i64;
+         var p := new P ( );
+         var target := 1;
+         p.first(target, set(target)) * 10 + target",
+    );
+}
+
 // ===== S-16：分岐は領域である =====
 
 /// 木を辿る実装と VM が同じ答えを出すこと。
