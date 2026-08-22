@@ -13,13 +13,30 @@ VS Code は LSP の意味トークンを扱えるので、**Zed と違って文�
 
 ```bash
 cargo install --path ../..        # vaak-lsp を PATH に
-cd editors/vscode && npm install && npx tsc -p .
+cd editors/vscode
+npm ci
+npm run compile
 ```
 
 VS Code で `F5`（拡張開発ホスト）か、`code --extensionDevelopmentPath=$PWD`。
 
 `vaak-lsp` が PATH に無ければ `vaak.server.path` に道を書く。
 **見つからなくても色分けは効く**——警告を出して編集は続けられる。
+
+## VSIX にする
+
+ビルドには Node.js 20 以上を使う。
+
+```bash
+cd editors/vscode
+npm ci
+npm run package:vsix
+code --install-extension vaak.vsix
+```
+
+`package:vsix` は型検査とバンドルを行ってから `vaak.vsix` を作る。
+依存は `package-lock.json` で固定される。VSIX 自体は同じ手順で
+作り直せるビルド成果物なので Git には入れない。
 
 ## TextMate 文法は生成物である
 
