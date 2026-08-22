@@ -1838,11 +1838,14 @@ impl<'a> Vm<'a> {
             }
             Op::MakeU8ArrayOne => {
                 let source = self.pop().value(Span::NONE)?;
+                let target = ValueType::Array(Box::new(ValueType::U8));
+                let source = crate::interp::try_coerce_to(source, &target)
+                    .ok_or_else(|| RtErr {
+                        msg: "`str` を `u8 array` へ剥がせない".into(),
+                        span: Span::NONE,
+                    })?;
                 let array = match source {
-                    Value::Str(bytes) => Value::array(
-                        ValueType::U8,
-                        bytes.into_iter().map(Value::U8).collect(),
-                    ),
+                    value @ Value::Array(_) => value,
                     count => {
                         let count = count.as_int().unwrap_or(0).max(0) as usize;
                         Value::array(ValueType::U8, vec![Value::U8(0); count])

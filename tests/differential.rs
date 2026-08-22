@@ -165,6 +165,8 @@ const CASES: &[&str] = &[
        bytes[0] := 90; (text[0] -> i64) + (bytes[0] -> i64)"#,
     r#"var bytes : u8 array := [65, 66, 67]; var text := new str(bytes);
        text[0] := 90; (bytes[0] -> i64) + (text[0] -> i64)"#,
+    r#"var bytes := new u8 array(3, 97); var text := new str(bytes);
+       var roundtrip := new u8 array(text); roundtrip[1] -> i64"#,
 ];
 
 #[test]

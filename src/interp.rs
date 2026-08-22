@@ -1219,22 +1219,18 @@ fn try_coerce(v: Value, ty: Option<&Type>) -> Option<Value> {
         // `str` は `u8 array` を包んだ型（C-77）。包みを行き来するのは
         // `new` だけだが、VM の `Coerce` もこの一つの変換を共有する。
         (ValueType::Array(el), Value::Str(bytes)) if **el == ValueType::U8 => {
-            return Value::array(
+            return Some(Value::array(
                 ValueType::U8,
                 bytes.into_iter().map(Value::U8).collect(),
-            );
+            ));
         }
-        (ValueType::Str, Value::Array(array)) if array.elem == ValueType::U8 => {
-            return Value::str(
-                array
-                    .items
-                    .into_iter()
-                    .filter_map(|v| match v {
-                        Value::U8(byte) => Some(byte),
-                        _ => None,
-                    })
-                    .collect(),
-            );
+        (ValueType::Str, Value::Array(array)) => {
+            let bytes = array
+                .items
+                .into_iter()
+                .map(|v| v.as_int().map(|byte| byte as u8))
+                .collect::<Option<Vec<_>>>()?;
+            return Some(Value::str(bytes));
         }
         (ValueType::Array(el), Value::Array(ar)) => {
             let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
@@ -1793,18 +1789,16 @@ impl Interp {
                     Ok(v) => v,
                     Err(x) => return Ok(Eval::Escape(x)),
                 };
-                match first {
-                    Value::Str(bytes) => Ok(Eval::Value(Value::array(
-                        ValueType::U8,
-                        bytes.into_iter().map(Value::U8).collect(),
-                    ))),
-                    n => {
+                match try_coerce_to(first, &ty.value) {
+                    Some(Value::Array(array)) => Ok(Eval::Value(Value::Array(array))),
+                    Some(n) => {
                         let n = n.as_int().unwrap_or(0).max(0) as usize;
                         Ok(Eval::Value(Value::array(
                             ValueType::U8,
                             vec![Value::U8(0); n],
                         )))
                     }
+                    None => rt("`str` を `u8 array` へ剥がせない", span),
                 }
             }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
@@ -1857,13 +1851,10 @@ impl Interp {
             // ラップ型：包むのも剥がすのも `new`（C-78）
             (ValueType::Str, CtorArgs::Positional(a)) if a.len() == 1 => {
                 match self.need_value(&a[0])? {
-                    Ok(Value::Array(ar)) => {
-                        let b: Vec<u8> =
-                            ar.items.iter().filter_map(|v| v.as_int()).map(|i| i as u8).collect();
-                        Ok(Eval::Value(Value::str(b)))
-                    }
-                    Ok(Value::Str(b)) => Ok(Eval::Value(Value::Str(b))),
-                    Ok(_) => rt("`str` は `u8 array` から作る", span),
+                    Ok(v) => match try_coerce(v, Some(ty)) {
+                        Some(v @ Value::Str(_)) => Ok(Eval::Value(v)),
+                        _ => rt("`str` は `u8 array` から作る", span),
+                    },
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
