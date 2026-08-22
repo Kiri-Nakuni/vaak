@@ -10,6 +10,7 @@ editors/zed/target/
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/dist/
+editors/vscode/bin/
 editors/vscode/*.vsix
 
 # Zed が取ってくる文法の写し

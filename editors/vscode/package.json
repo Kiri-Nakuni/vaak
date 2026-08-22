@@ -34,8 +34,8 @@
       "properties": {
         "vaak.server.path": {
           "type": "string",
-          "default": "vaak-lsp",
-          "description": "言語サーバの道。PATH から見つかるなら既定のままでよい"
+          "default": "",
+          "description": "言語サーバの道。空なら同梱版を使い、無ければPATHからvaak-lspを探す"
         },
         "vaak.server.enable": {
           "type": "boolean",
@@ -50,7 +50,8 @@
     "compile": "npm run check && node esbuild.js",
     "watch": "node esbuild.js --watch",
     "package": "npm run check && node esbuild.js --production",
-    "package:vsix": "vsce package --out vaak.vsix",
+    "package:vsix": "node package-vsix.js",
+    "package:vsix:portable": "node package-vsix.js --portable",
     "vscode:prepublish": "npm run package"
   },
   "dependencies": { "vscode-languageclient": "^9.0.1" },
