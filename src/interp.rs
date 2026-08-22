@@ -2032,6 +2032,15 @@ impl Interp {
                     Err(x) => return Ok(Eval::Escape(x)),
                 }
             }
+            // 名前そのものがレシーバなら、セルの値をその場で変える。
+            // `read_place` を通すと集合体全体を深く複製してから同じセルへ
+            // 書き戻すため、`array.push` まで長さに比例してしまう。
+            if let Place::Cell(cell) = place {
+                let Some(cur) = self.arena.get_mut(cell) else {
+                    return rt("まだ束縛されていない", span);
+                };
+                return write_method(cur, name, &argv, span);
+            }
             let mut cur = self.read_place(&place, span)?;
             let out = write_method(&mut cur, name, &argv, span)?;
             self.write_place(&place, cur, span)?;
