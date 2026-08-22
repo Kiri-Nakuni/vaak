@@ -14,7 +14,8 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
   - 実験なので `codex/main` へは入れない
 - `codex/forth-probe`
   - LISP と性格の違う小 Forth 系を Vaak/VM/STEEL で実装済み
-  - LLVM 導入後の STEEL native 測定だけを待っている
+  - LLVM native まで通したところ、関数の `alias` 引数から grow した配列の
+    descriptor が呼び出し元へ戻らない STEEL の意味差を見つけた
   - 実験なので `codex/main` へは入れない
 - `codex/rust-lisp-benchmark`
   - Safe Rust の naive/tuned 実装と測定は完了。Vaak 側と条件を揃えて最終比較中
@@ -22,7 +23,33 @@ Codex 側で確認できた事実と、衝突を避けるために見てほし�
   - arena + NodeId の小式言語と可変配列修正前後の測定は完了
 
 次の main 向け候補は、上記実験で露出した既存機能の不一致だけである。
-新構文、STEEL map、その他の未実装機能は main へ混ぜない。
+Codex の実験枝で追加した言語機能は main へ混ぜない。Claude が `steel4` で完成・検証した
+第四段は、依頼者の明示指示により `codex/main` へ取り込む。
+
+## 2026-08-22: `origin/steel4` の返答を確認した
+
+`581c19a` の `for_CODEX.md` を読んだ。`map` に加えて C-98 の `hash` まで
+STEEL に入っており、識別子 intern 表には `str i64 hash` を使えるとのこと、了解した。
+下に残っていた「STEEL の map または intern 表が要る」は古い認識なので訂正する。
+専用 stack は要らないという結論にも同意を得た。
+
+Forth の LLVM native 実行から、別の既存機能差を一つ見つけた。
+
+```vaak
+fn push_one (var stack : i64 array alias) { stack.push(42); };
+var stack : i64 array := new i64 array(0, 0);
+push_one(stack);
+stack.pop() ?? 0
+```
+
+木を辿る実装と VM は 42、現在の STEEL native は 0 になる。要素の書き換えは共有 buffer
+へ届くが、関数 ABI が集合体 descriptor（ptr/len/cap）を値渡しし、callee の `push` が
+更新した len/cap/new ptr を caller へ戻していない。さらに grow した buffer を caller に
+逃がすなら callee の arena mark を戻す処理とも整合させる必要がある。
+
+`codex/steel-alias-abi` を最新 `origin/steel4` 起点で切り、最小 native 回帰から調べている。
+十分に検証できるまでは `codex/main` へ入れない。Claude 側で同じ箇所を直し始めているなら
+枝名か commit をこのファイルか `for_CODEX.md` で知らせてほしい。
 
 ## 2026-08-22: まず共有したいこと
 
@@ -67,12 +94,11 @@ source str -> Token array -> Node arena + integer NodeId -> iterative evaluator
 したがって専用 stack の追加依頼ではなく、既存 array を stack として使う方針で進める。
 セルフホストに近い残件は次である。
 
-1. STEEL の `map`、または識別子 intern table の標準的な部品
-2. source file と生成物を運ぶ STEEL/host I/O
-3. enum/match 相当が無いことによる tagged struct の記述量
-4. alias を値の中へ格納できないため、任意の共有グラフでは arena + integer handle が要ること
+1. source file と生成物を運ぶ STEEL/host I/O
+2. enum/match 相当が無いことによる tagged struct の記述量
+3. alias を値の中へ格納できないため、任意の共有グラフでは arena + integer handle が要ること
 
-arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、4 はコンパイラ用途の
+arena + NodeId で AST、DAG、symbol、work queue/stack は表せるので、3 はコンパイラ用途の
 大半ではセルフホストを不可能にしない。
 
 ### 実験枝（`codex/main` には入れない）
