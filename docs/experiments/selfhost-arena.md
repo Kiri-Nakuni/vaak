@@ -115,6 +115,8 @@ token/node/report の明示的な欄である。アルゴリズム自体は素�
 で測った。Rust 側で Vaak の解析・静的検査・VM 翻訳を一度だけ済ませ、各標本は
 **ゲスト内の字句解析 + arena 構築 + 反復評価**と実行器の初期化を含む。中央値である。
 
+### 可変メソッドを直す前
+
 | 左深さ | tokens | nodes | visits | 参照実装 | VM | VM / 参照 |
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 33 | 17 | 25 | 1.924 ms | 0.713 ms | 0.371 |
@@ -136,6 +138,23 @@ token/node/report の明示的な欄である。アルゴリズム自体は素�
 この結果から先に行うべき最適化は、専用 stack の追加ではなく、
 **名前または解決済み place にある配列を cell 内で直接 mutate する fast path**である。
 同じ改善が stack、token buffer、AST arena、一般の利用者配列へ一度に効く。
+
+### cell 内で直接変更した後
+
+上の原因を `codex/inplace-collection-methods` で直し、同じ測定を 11 標本で取り直した。
+
+| 左深さ | tokens | nodes | visits | 参照実装 | VM | VM / 参照 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 33 | 17 | 25 | 2.120 ms | 0.499 ms | 0.235 |
+| 32 | 129 | 65 | 97 | 12.963 ms | 1.496 ms | 0.115 |
+| 64 | 257 | 129 | 193 | 47.793 ms | 3.286 ms | 0.069 |
+| 128 | 513 | 257 | 385 | 168.044 ms | 6.277 ms | 0.037 |
+
+VM は深さ 128 で 73.143 ms から 6.277 ms、約 11.7 倍になった。32 から 128 へ
+仕事量が約 4 倍になると実行時間も約 4.2 倍であり、配列 work stack の主要経路は
+ほぼ線形になった。参照実装にはまだ超線形な費用が残るので別途 profiling が要るが、
+少なくとも専用 stack の追加で解ける問題ではない。既存 array の一度の修正が、
+token buffer、AST arena、operator stack、評価 stack のすべてへ効いた。
 
 ## alias が解いたこと、解かないこと
 
@@ -165,12 +184,10 @@ lexer と parser は出力配列を `var ... alias` で受ける。これによ�
 2. **任意入力と成果物を運ぶ host I/O**
    - 埋め込んだ文字列なら今もコンパイルできる
    - 自分の source file を読み、LLVM IR や bytecode を書くには STEEL 側の host interface が要る
-3. **破壊的配列操作の in-place fast path**
-   - 意味論上の欠落ではないが、現在の参照実装／VM では compiler workload を二次時間にする
-4. **tagged union と診断用のライブラリ表現**
+3. **tagged union と診断用のライブラリ表現**
    - arena + integer tag で書けるので必須の新機能ではない
    - enum/match 相当があれば、compiler source と node size は小さくなる
-5. **source slice / identifier intern の共通部品**
+4. **source slice / identifier intern の共通部品**
    - `str alias` + byte span で実装可能
    - shallow substring を値にしない設計では、span を標準的な handle として扱う方が合う
 
@@ -183,7 +200,7 @@ STEEL の map/intern と host I/O を進める方が、セルフホスト可能�
 ```bash
 cargo run --release --bin vaak -- examples/vaak/07-セルフホスト骨格.vaak
 cargo test --release --test selfhost
-cargo run --release --example bench_selfhost -- 64 9
+cargo run --release --example bench_selfhost -- 64 11
 cargo run --release --bin steel -- examples/vaak/07-セルフホスト骨格.vaak --emit-ir
 ```
 
