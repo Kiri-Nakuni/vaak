@@ -111,6 +111,21 @@ fn 配列と写像のリテラル() {
 }
 
 #[test]
+fn 浮動小数は連想型の鍵にできない() {
+    bad("var m : f64 i64 map := new f64 i64 map();", "浮動小数");
+    bad("var h : f32 i64 hash := new f32 i64 hash();", "浮動小数");
+    bad("var inferred := (1.5 => 1);", "浮動小数");
+    bad(
+        "wrap Real = f64; var m : Real i64 map := new Real i64 map();",
+        "浮動小数",
+    );
+    bad("fn use_map (m : f64 i64 map) { };", "浮動小数");
+    bad("struct Bad { var table : f64 i64 hash; };", "浮動小数");
+    ok("var by_number : i64 i64 map := (1 => 2);");
+    ok("var by_name : str i64 hash := (\"one\" => 1);");
+}
+
+#[test]
 fn 代入は型が合わねばならない() {
     ok("var a : i64 := 1; a := 2;");
     bad("var a : i64 := 1; a := 1.0;", "型が合わない");

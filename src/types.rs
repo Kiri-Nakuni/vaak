@@ -120,6 +120,37 @@ impl TypeChecker {
         }
     }
 
+    /// `map` と `hash` の鍵に浮動小数は置けない（S-12、C-98）。
+    /// ラップ型も実体まで辿るが、誤った循環型で検査器が再帰し続けないよう上限を持つ。
+    fn float_key(&self, ty: &ValueType) -> bool {
+        let mut ty = ty;
+        for _ in 0..=self.wraps.len() {
+            match ty {
+                ValueType::F32 | ValueType::F64 | ValueType::F80 => return true,
+                ValueType::Named(name) => {
+                    let Some(base) = self.wraps.get(name) else { return false };
+                    ty = base;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn validate_type(&mut self, ty: &ValueType, span: Span) {
+        match ty {
+            ValueType::Array(element) => self.validate_type(element, span),
+            ValueType::Map(key, value) | ValueType::Hash(key, value) => {
+                if self.float_key(key) {
+                    self.err("浮動小数は `map` と `hash` の鍵にできない", span);
+                }
+                self.validate_type(key, span);
+                self.validate_type(value, span);
+            }
+            _ => {}
+        }
+    }
+
     // ---- 式 ----
 
     fn expr(&mut self, e: &Expr, want: Option<&ValueType>) -> T {
@@ -140,6 +171,7 @@ impl TypeChecker {
 
             // **`->` が求める型になる。** リテラルはここで型が決まる（C-30 / C-25）
             ExprKind::Ascribe { expr, ty } => {
+                self.validate_type(&ty.value, ty.span);
                 self.expr(expr, Some(&ty.value));
                 Some(ty.value.clone())
             }
@@ -267,6 +299,8 @@ impl TypeChecker {
             ExprKind::MapLit(pairs) => {
                 // **`hash` にも同じリテラルが使える。** 文脈の型が決める（C-98）
                 let as_hash = matches!(want, Some(ValueType::Hash(..)));
+                let has_assoc_context =
+                    matches!(want, Some(ValueType::Map(..)) | Some(ValueType::Hash(..)));
                 let (mut kt, mut vt) = match want {
                     Some(ValueType::Map(k, v)) | Some(ValueType::Hash(k, v)) => {
                         (Some((**k).clone()), Some((**v).clone()))
@@ -291,6 +325,9 @@ impl TypeChecker {
                     Box::new(kt.unwrap_or(ValueType::I64)),
                     Box::new(vt.unwrap_or(ValueType::I64)),
                 );
+                if !has_assoc_context && self.float_key(&k) {
+                    self.err("浮動小数は `map` と `hash` の鍵にできない", e.span);
+                }
                 Some(if as_hash { ValueType::Hash(k, v) } else { ValueType::Map(k, v) })
             }
 
@@ -312,7 +349,17 @@ impl TypeChecker {
                 self.fn_decl(f);
                 None
             }
-            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) | ExprKind::WrapDecl(_) => None,
+            ExprKind::StructDecl(s) => {
+                for field in &s.fields {
+                    self.validate_type(&field.ty.value, field.ty.span);
+                }
+                None
+            }
+            ExprKind::WrapDecl(w) => {
+                self.validate_type(&w.base.value, w.base.span);
+                None
+            }
+            ExprKind::FlowDecl(_) => None,
 
             ExprKind::If(i) => {
                 let mut ty: T = want.cloned();
@@ -479,6 +526,9 @@ impl TypeChecker {
 
     fn decl(&mut self, d: &Decl) {
         for b in &d.bindings {
+            if let Some(ty) = &b.ty {
+                self.validate_type(&ty.value, ty.span);
+            }
             let want = b.ty.as_ref().map(|t| t.value.clone());
             let t = match &b.init {
                 BindInit::Value(e) => {
@@ -523,6 +573,12 @@ impl TypeChecker {
     }
 
     fn fn_decl(&mut self, f: &FnDecl) {
+        for p in &f.params {
+            self.validate_type(&p.ty.value, p.ty.span);
+        }
+        if let Some(ret) = &f.ret {
+            self.validate_type(&ret.value, ret.span);
+        }
         let saved = self.frame_base;
         self.scopes.push(HashMap::new());
         self.frame_base = self.scopes.len() - 1;
@@ -663,6 +719,7 @@ impl TypeChecker {
     }
 
     fn construct(&mut self, ty: &Type, args: &CtorArgs, span: Span) {
+        self.validate_type(&ty.value, ty.span);
         match (&ty.value, args) {
             (ValueType::Named(n), CtorArgs::Named(given)) => {
                 let Some(s) = self.structs.get(n).cloned() else { return };
