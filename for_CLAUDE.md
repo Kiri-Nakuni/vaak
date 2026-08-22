@@ -90,10 +90,11 @@ arena AST を NodeId で辿る。したがって backend の差ではなく、Va
 - VS Code 拡張は lockfile + esbuild + 公式 vsce で VSIX を再生成できる。
 - 参照実装の未使用 `Scope::is_loop`、STEEL の到達不能な末尾 arm、未使用 import/引数を除いた。
   `cargo check --release --all-targets` で Vaak 本体由来の警告は 0（公開 API・意味論は不変）。
-- C-98 で禁止済みの浮動小数鍵を型検査が通していた。`map` / `hash` の明示型、推論、
-  ラップ型、関数署名、構造体欄で実行前に拒否するよう揃えた。
+- `origin/steel4` の C-99 を確認・統合した。浮動小数鍵は拒否せず、`-0.0` を `0.0` へ潰す
+  単調な写しで `map` の数値順と `map` / `hash` の鍵同一性を揃える。C-98 を読んで一度入れた
+  静的拒否は C-99 が上書きしたため撤回し、人間向けリファレンスも更新した。
 
-この tip で `cargo test --release` は 422 tests、失敗 0。
+この tip で `cargo test --release` は 434 tests、失敗 0。
 
 ### 公開 API の注意
 

@@ -192,6 +192,35 @@ impl Value {
     }
 }
 
+/// 浮動小数を**単調な u64 へ写す。**
+///
+/// 生のビット列は数の順と一致しない——負の値ほど大きいビット列になり、
+/// 正より後ろへ回る。だから並べ替えてから持つ。
+///
+/// **この写しは順序と等しさを同時に直す。** `Ord` も `Hash` も導いたままでよく、
+/// `map`（並べる）と `hash`（混ぜる）が**同じ鍵を使える。**
+///
+/// `-0.0` は `0.0` へ潰す。**`-0.0 == 0.0` が真である以上、鍵も同じでなければならない**
+/// ——でなければ `a == b` なのに `m[a]` と `m[b]` が別になる（同値関係の破れ）。
+pub fn float_key(x: f64) -> u64 {
+    // `x == 0.0` は `-0.0` にも真である
+    let x = if x == 0.0 { 0.0 } else { x };
+    let b = x.to_bits();
+    if b >> 63 != 0 {
+        // 負：ビット列の大小が数の大小と逆なので、反転する
+        !b
+    } else {
+        // 非負：負より後ろへ回す
+        b | (1 << 63)
+    }
+}
+
+/// `float_key` の逆。
+pub fn float_from_key(k: u64) -> f64 {
+    let b = if k >> 63 != 0 { k & !(1u64 << 63) } else { !k };
+    f64::from_bits(b)
+}
+
 /// 写像の鍵。**NaN が存在しないので比較は全順序である**（C-75）。
 ///
 /// `Hash` も導く——`hash` は同じ鍵を使う（C-98）。
@@ -251,8 +280,8 @@ impl Value {
     pub fn as_key(&self) -> Option<MapKey> {
         Some(match self {
             Value::Str(b) => MapKey::Bytes((**b).clone()),
-            Value::F32(v) => MapKey::Float((*v as f64).to_bits()),
-            Value::F64(v) => MapKey::Float(v.to_bits()),
+            Value::F32(v) => MapKey::Float(float_key(*v as f64)),
+            Value::F64(v) => MapKey::Float(float_key(*v)),
             _ => MapKey::Int(self.as_int()?),
         })
     }
@@ -307,7 +336,7 @@ fn show_key(k: &MapKey) -> String {
     match k {
         MapKey::Int(v) => v.to_string(),
         MapKey::Bytes(b) => format!("{:?}", String::from_utf8_lossy(b)),
-        MapKey::Float(bits) => fmt_float(f64::from_bits(*bits)),
+        MapKey::Float(k) => fmt_float(float_from_key(*k)),
     }
 }
 
