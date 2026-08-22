@@ -1,0 +1,25 @@
+{
+  "name": "tree-sitter-vaak",
+  "version": "0.1.0",
+  "description": "Highlighting grammar for the Vaak embedded language",
+  "license": "MIT",
+  "files": [
+    "grammar.js",
+    "tree-sitter.json",
+    "queries",
+    "src"
+  ],
+  "keywords": [
+    "incremental",
+    "parsing",
+    "tree-sitter",
+    "vaak"
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter generate && tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "0.25.10"
+  }
+}

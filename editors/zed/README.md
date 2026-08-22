@@ -14,12 +14,28 @@
 ## 文法を直したら
 
 ```bash
-scripts/sync-grammar.sh
+node scripts/sync-grammar.mjs
 ```
 
-**Zed は文法をローカルの道から読めず、必ず git から取る。**
-だから `editors/tree-sitter-vaak` 自体が git の版方になっており、
-この手順が作り直して `extension.toml` の `rev` を新しくする。
+Unix では `scripts/sync-grammar.sh` も同じ処理を呼ぶ。
+
+文法ソースと生成済み `parser.c` は Vaak と同じ版方の
+`editors/tree-sitter-vaak` に収めている。通常の clone だけで試験できる。
+
+**Zed は文法を git のコミットから取る。** 同じコミット自身の SHA はその
+コミットには書けないので、文法の変更は二つのコミットに分ける。
+
+```bash
+# 1. 文法と生成物を収める
+git commit
+
+# 2. そのコミットを Zed に pin して収める
+node scripts/sync-grammar.mjs --pin
+git commit editors/zed/extension.toml
+```
+
+`--pin` は指定するコミットに `src/parser.c` があることを確認してから
+`repository`・`rev`・`path` を書く。
 
 ## 入れ方
 
