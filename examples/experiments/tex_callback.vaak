@@ -1,0 +1,24 @@
+%{ 同じ計算を同期 HostFn で即時に適用する比較例。
+   count/dimen/fail はホスト値なので、関数へ alias 引数で明示する。 }%
+
+fn apply_now (count_snapshot : i32 array alias,
+              dimen_snapshot : i64 array alias,
+              should_fail : u1 alias) {
+    let next_count := count_snapshot[0] + 1;
+    let next_dimen := dimen_snapshot[0] + ((next_count -> i64) * 65536);
+
+    tex_count_set(0, next_count -> i64);
+    tex_dimen_set(0, next_dimen);
+    tex_emit("callback ran");
+
+    %{ HostFn の三作用は既に起きている。C-2 により、この後の失敗でも
+       ホストの状態は巻き戻らない。 }%
+    if (should_fail) {
+        let impossible := 1 / 0;
+        impossible;
+    } fi;
+
+    next_count
+} -> i32;
+
+apply_now(count, dimen, fail)

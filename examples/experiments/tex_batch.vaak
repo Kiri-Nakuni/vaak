@@ -1,0 +1,46 @@
+%{ TeX 風の状態を snapshot として受け取り、作用そのものではなく命令列を返す。
+   ホストの名前は関数内から見えない（C-96）ので、すべて alias 引数に明示する。 }%
+
+struct Command {
+    % kind: 1 = count_set, 2 = dimen_set, 3 = emit
+    let kind : i64 := 0;
+    let index : i64 := 0;
+    let value : i64 := 0;
+    let text : str := "";
+};
+
+fn make_batch (count_snapshot : i32 array alias,
+               dimen_snapshot : i64 array alias,
+               should_fail : u1 alias) {
+    var commands : Command array := new Command array (0, new Command());
+
+    % DSL が不得手な通常計算を Vaak 側へ委譲する。
+    let next_count := count_snapshot[0] + 1;
+    let next_dimen := dimen_snapshot[0] + ((next_count -> i64) * 65536);
+
+    commands.push(new Command (
+        kind := 1,
+        index := 0,
+        value := next_count -> i64
+    ));
+    commands.push(new Command (
+        kind := 2,
+        index := 0,
+        value := next_dimen
+    ));
+    commands.push(new Command (
+        kind := 3,
+        text := "batch committed"
+    ));
+
+    %{ 命令列を作った後で失敗しても、まだホストへ作用していない。
+       束縛は paradox を保持できないので、ここで実行時エラーになる。 }%
+    if (should_fail) {
+        let impossible := 1 / 0;
+        impossible;
+    } fi;
+
+    commands
+} -> Command array;
+
+make_batch(count, dimen, fail)

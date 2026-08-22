@@ -202,3 +202,53 @@ STEEL は脱出式へ付けた仮の `i64 paradox` を `??` 全体の型に採�
 - LISP 文書に残っていた `Step.ok` 回避の説明を「修正済み」へ更新した。
 - 参照実装／VM の差分試験と LLVM native 試験で、`?? $return` の後に構造体欄を読めることを固定した。
 - `cb78072` を合流後、LLVM 22.1.8 の `cargo test --release` は **455/455** 通過した。
+
+## 2026-08-22: `codex/embedding-probe` — native 埋め込みと外向き WASM を分ける
+
+core は変えず、TeX のような DSL が通常計算を Vaak へ委譲する境界を例・試験・
+`docs/experiments/embedding.md` で実証している。枝は実験枝のままで、`codex/main` へは入れない。
+
+二車線を混ぜないことが結論である。
+
+- **内蔵 Vaak**: rtex と同一 process。host は段落 phase ごとに一度入り、Vaak が control loop を持つ。
+  node は整数 handle で native `NodeOps` / `HostFn` へ高頻度に問い合わせてよい。
+- **外向き WASM**: 重く独立させたい処理だけを coarse bulk call にする。node ごとの import は避ける。
+  必要なら「TeX → 内蔵 Vaak が集約 → WASM を一回 → validated patch → commit」の三段 bridge。
+
+node list/linebreak の主案は前者である。`tex_linebreak_nodeops.vaak` は 9,999 nodes を一 phase entry、
+210,524 NodeOps calls で行分割し、host が全 line range/natural width を検証してから replace する。
+`tex_linebreak_bulk.vaak` は外向き WASM 車線のデータ形を**現行 native VM で模した比較**であり、
+実際の WASM module/timing ではない。
+
+2026-08-22 Windows x86-64 release、各 1,000,000 反復 × 5 標本を複数回走らせた中央値の範囲:
+
+| 経路 | absolute ns/iteration | paired extra | absolute/local |
+|---|---:|---:|---:|
+| 空 loop + 加算 | 200–221 | — | — |
+| Vaak 一引数 named function | 541–615 | 340–378 | 1.000 |
+| native HostCall 一引数 | 293–303 | 75–90 | 0.493–0.541 |
+| native HostCall 二引数 | 313–332 | 105–130 | 0.540–0.579 |
+
+現行 VM では native HostCall の方が利用者関数 frame より軽い。NodeOps を Vaak 関数へ写すことを
+最適化として勧めない。さらに汎用 `node_hook(hook_id, handle)` より、
+`node_width(handle)` / `node_kind(handle)` のように compile 時 index が決まる一引数 HostFn へ
+静的に分ける方がよい。paired 追加分は一引数約 75–90 ns、二引数約 105–130 ns、
+21 calls/node なら約 1.6–1.9 μs 対 2.2–2.7 μs だった。
+
+別の batch 例では snapshot → `Command array` → host 全体検証 → commit を実装した。
+同じ作用を同期 HostFn で即時実行すると、その後の実行時失敗でも途中作用が残る（C-2）。
+batch は巻き戻しを足すのではなく、成功するまで作用を host へ渡さないので原子的に扱える。
+
+測定 harness 自身の文字列 match は除いた。`Program2.host_fns` から `u16` index を一度だけ解決し、
+hot call は整数比較だけにした。各 candidate の前後に空 loop を置いた paired 差分で、candidate 順も
+標本ごとに回転した。絶対時間は同時作業で振れたが、native HostCall < named function の相対順は安定した。
+
+core を変えずに API を監査したところ、次の既存穴も見つかった。
+
+- `HostBinding` docs は同値なら write しない契約だが、`Host::run` は全 live binding へ無条件 write する。
+  rtex の save stack を不要に動かし得る。
+- 公開 `Runner::run_with` は error 時の `after` を捨てる。C-2 の途中変更を低水準 embedder が回収できない。
+- `Program2::host_touched` は `Host::run` 未統合で、read/write set も分離していない。
+- `HostBinding::read_at` / `write_at` は未実装である。
+
+この実験枝では診断だけとし、core 修正はしていない。
