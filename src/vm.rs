@@ -84,9 +84,14 @@ pub enum Op {
     SetField(u32, Span),
     /// 脱出。段数・`outward` のビット列・積み荷の有無。
     Break { stages: u32, outward: u64, payload: bool, span: Span },
-    Continue { deferred: Option<u32>, span: Span },
+    /// 再開。**段数を持つ**——`break continue` は二段抜けてから再開する（C-70）
+    Continue { stages: u32, outward: u64, deferred: Option<u32>, span: Span },
     /// 段数が実行時に決まる脱出（`$repeat`）。上に回数がある。
-    BreakDyn { payload: bool, span: Span },
+    ///
+    /// **`resume` は作用素が `continue` か。** 見ないと再開が離脱になる
+    /// `span` は **`$repeat` 全体**（零段のときの paradox の位置）、
+    /// `op_span` は**作用素の位置**（実際に脱出したときの位置）である
+    BreakDyn { payload: bool, resume: bool, op_span: Span, span: Span },
     /// 型注釈に合わせる。paradox はそのまま通す。
     Coerce(u32),
     /// フレームの深さを積む。`getdepth()`。
@@ -1296,18 +1301,23 @@ impl Compiler {
                             }
                             None => None,
                         };
-                        self.emit(Op::Continue { deferred: d, span });
+                        self.emit(Op::Continue { stages, outward, deferred: d, span });
                     }
                 }
             }
-            Shape::Dynamic { count, payload } => {
+            Shape::Dynamic { count, payload, kind, span: span_of_op } => {
                 if let Some(p) = &payload {
                     self.expr(p)?;
                     self.emit(Op::NeedValue(p.span));
                 }
                 self.expr(&count)?;
                 self.emit(Op::NeedValue(count.span));
-                self.emit(Op::BreakDyn { payload: payload.is_some(), span });
+                self.emit(Op::BreakDyn {
+                    payload: payload.is_some(),
+                    resume: kind == EKind::Continue,
+                    op_span: span_of_op,
+                    span,
+                });
             }
         }
         Ok(())
@@ -1359,14 +1369,24 @@ impl Compiler {
             },
             EscapeKind::Flow { name, args } => {
                 if name == "$repeat" {
-                    let [FlowArg::Escape(_), FlowArg::Value(n)] = &args[..] else {
+                    let [FlowArg::Escape(op), FlowArg::Value(n)] = &args[..] else {
                         return self.err("`$repeat` は作用素と回数を取る", esc.span);
                     };
                     let payload = match &esc.operand {
                         Some(Operand::Value(v)) => Some(v.clone()),
                         _ => None,
                     };
-                    return Ok(Shape::Dynamic { count: n.clone(), payload });
+                    // **作用素を見る。** 見ないと `continue` が `break` になる
+                    let kind = match self.shape(op)? {
+                        Shape::Static { kind, .. } => kind,
+                        Shape::Dynamic { kind, .. } => kind,
+                    };
+                    return Ok(Shape::Dynamic {
+                        count: n.clone(),
+                        payload,
+                        kind,
+                        span: op.span,
+                    });
                 }
                 let Some(d) = self.flows.get(name).cloned() else {
                     return self.err(format!("知らない作用素式 `{name}`"), esc.span);
@@ -1403,7 +1423,11 @@ enum Shape {
         deferred: Option<Escape>,
     },
     /// 段数が実行時に決まる（`$repeat`）。
-    Dynamic { count: Expr, payload: Option<Expr> },
+    ///
+    /// **作用素も覚えておく。** `$repeat(continue, n)` を `break` にしてはいけない
+    /// `span` は**作用素の位置**である。`$repeat` 全体ではない——
+    /// 参照実装は内側の脱出の位置を持つので、診断もそこを指す
+    Dynamic { count: Expr, payload: Option<Expr>, kind: EKind, span: Span },
 }
 
 // ================= 仮想機械 =================
@@ -2346,7 +2370,7 @@ impl<'a> Vm<'a> {
                     span,
                 }));
             }
-            Op::BreakDyn { payload, span } => {
+            Op::BreakDyn { payload, resume, op_span, span } => {
                 let n = self.pop().value(span)?.as_int().unwrap_or(0);
                 let p = if payload { Some(self.pop().value(span)?) } else { None };
                 // `n` が 0 以下なら作用素を一つも重ねない（C-75 の 5）
@@ -2358,7 +2382,7 @@ impl<'a> Vm<'a> {
                     return Ok(None);
                 }
                 return Ok(Some(Esc {
-                    kind: EKind::Break,
+                    kind: if resume { EKind::Continue } else { EKind::Break },
                     stages: n as u32,
                     outward: 0,
                     payload: p,
@@ -2366,11 +2390,12 @@ impl<'a> Vm<'a> {
                     span,
                 }));
             }
-            Op::Continue { deferred, span } => {
+            Op::Continue { stages, outward, deferred, span } => {
                 return Ok(Some(Esc {
                     kind: EKind::Continue,
-                    stages: 1,
-                    outward: 0,
+                    // **段数を捨てない。** `break continue` は二段抜けてから再開する
+                    stages: stages.max(1),
+                    outward,
                     payload: None,
                     deferred,
                     span,
@@ -2631,8 +2656,20 @@ impl<'a> Vm<'a> {
                 self.stack.truncate(base);
                 self.frozen.truncate(frozen_base);
                 let f = self.frames.last_mut().unwrap();
-                let i = find_stage_end(&self.p.chunks[f.chunk as usize].ops, f.pc, kind);
-                // 本体の末尾（`LoopBody` / `NForNext`）へ飛ぶ。そこで周回が進む
+                let ops = &self.p.chunks[f.chunk as usize].ops;
+                // **本体の末尾へ飛ぶ。そこで周回が進む。**
+                //
+                // `break` は段の終わり（`LoopEnd`）へ行くが、`continue` は違う。
+                // `loop` / `while` では周回の末尾は `LoopBody` であり、
+                // **`LoopEnd` へ飛ぶとループそのものが終わってしまう。**
+                //
+                // `nfor` では `NForNext` が段の終わりでもあり周回の末尾でもあるので、
+                // そちらは今までどおりでよい
+                let i = if kind == StageKind::Loop {
+                    find_loop_body(ops, f.pc)
+                } else {
+                    find_stage_end(ops, f.pc, kind)
+                };
                 f.pc = i;
                 Ok(None)
             }
@@ -2705,4 +2742,27 @@ pub fn sizes() -> Vec<(&'static str, usize)> {
         ("Eval", size_of::<crate::interp::Eval>()),
         ("ValueType", size_of::<ValueType>()),
     ]
+}
+
+/// いまの位置から、そのループの**周回の末尾**（`LoopBody`）を探す。
+///
+/// `find_stage_end` が返すのは段の終わり（`LoopEnd`）である。
+/// **`continue` はそこへ行ってはいけない**——ループが終わってしまう。
+fn find_loop_body(ops: &[Op], from: usize) -> usize {
+    let mut depth = 0i32;
+    let mut i = from;
+    while i < ops.len() {
+        match &ops[i] {
+            Op::BlockBegin | Op::LoopBegin | Op::NForBegin(..) => depth += 1,
+            Op::LoopBody(..) if depth == 0 => return i,
+            Op::BlockEnd(_) | Op::LoopEnd(_) | Op::NForNext(..) => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    i
 }
