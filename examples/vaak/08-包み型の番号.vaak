@@ -1,0 +1,276 @@
+%{ Vaak で書く、小さなコンパイラ／実行器の骨格。
+
+   ASCII の整数四則式を次の順で処理する。
+
+     source str
+       -> Token array
+       -> Node array（子は整数 NodeId）
+       -> 明示的な作業積みによる反復評価
+
+   再帰する構造体も、組み込みの stack も使わない。
+   配列を alias 引数で受け、push/pop でその場に構築する。 }%
+
+% STEEL は無名標準ライブラリをまだ注入しないため、同じ定義を明示する。
+flow $return = $repeat(break, getdepth());
+
+struct Token {
+    let kind : i64 := 0;
+    let value : i64 := 0;
+    let start : i64 := 0;
+    let end : i64 := 0;
+};
+
+%{ 節を指す番号に名前を付ける。**取り違えを型で止めるため**。
+   包みは実装から見れば i64 のままである（S-2）。 }%
+wrap NodeId = i64;
+
+% kind == 0 は整数。演算子は ASCII 符号をそのまま tag に使う。
+struct Node {
+    let kind : i64 := 0;
+    let value : i64 := 0;
+    let left : NodeId := new NodeId(0 - 1);
+    let right : NodeId := new NodeId(0 - 1);
+    let start : i64 := 0;
+    let end : i64 := 0;
+};
+
+struct Evaluation {
+    let ok : u1 := false;
+    let value : i64 := 0;
+    let visited : i64 := 0;
+    let max_work : i64 := 0;
+};
+
+struct Report {
+    let ok : u1 := false;
+    let value : i64 := 0;
+    let tokens : i64 := 0;
+    let nodes : i64 := 0;
+    let visited : i64 := 0;
+    let max_work : i64 := 0;
+};
+
+fn is_space (c : u8) {
+    c == 32 || c == 9 || c == 10 || c == 13
+} -> u1;
+
+fn is_digit (c : u8) {
+    c >= 48 && c <= 57
+} -> u1;
+
+%{ source は借り、tokens は呼び出し側の配列を共有する。
+   トークン文字列を作らず、数値と source 上の byte span だけを置く。 }%
+fn lex (source : str alias, var tokens : Token array alias) {
+    tokens.clear();
+    var i := 0;
+    while (i < source.len()) {
+        let c := source[i] ?? $return false;
+        if (is_space(c)) {
+            i += 1;
+        } elif (is_digit(c)) {
+            let start := i;
+            var value := 0;
+            while (i < source.len() && is_digit(source[i] ?? 0)) {
+                let digit := source[i] ?? $return false;
+                value := value * 10 + (digit - 48) -> i64;
+                i += 1;
+            };
+            tokens.push(new Token (
+                kind := 0,
+                value := value,
+                start := start,
+                end := i
+            ));
+        } elif (c == 43 || c == 45 || c == 42 || c == 47 || c == 40 || c == 41) {
+            tokens.push(new Token (
+                kind := c -> i64,
+                start := i,
+                end := i + 1
+            ));
+            i += 1;
+        } else {
+            $return false;
+        } fi;
+    };
+    true
+} -> u1;
+
+fn precedence (kind : i64) {
+    if (kind == 42 || kind == 47) 2
+    elif (kind == 43 || kind == 45) 1
+    else 0
+    fi
+} -> i64;
+
+%{ 値積みの上二つを一つの節へ畳む。
+   arena 内の節は動かさず、以後は整数 NodeId だけを運ぶ。 }%
+fn append_operator (kind : i64,
+                    var values : NodeId array alias,
+                    var nodes : Node array alias) {
+    let right_id := values.pop() ?? $return false;
+    let left_id := values.pop() ?? $return false;
+    if ((left_id -> i64) < 0 || (left_id -> i64) >= nodes.len()) $return false; fi;
+    if ((right_id -> i64) < 0 || (right_id -> i64) >= nodes.len()) $return false; fi;
+    let left := nodes[left_id -> i64];
+    let right := nodes[right_id -> i64];
+    nodes.push(new Node (
+        kind := kind,
+        left := left_id,
+        right := right_id,
+        start := left.start,
+        end := right.end
+    ));
+    values.push(new NodeId(nodes.len() - 1));
+    true
+} -> u1;
+
+%{ Dijkstra の shunting-yard。operators と values が構文解析の作業積み、
+   nodes が arena である。返すのは根の NodeId 一個だけ。 }%
+fn parse (tokens : Token array alias, var nodes : Node array alias) {
+    nodes.clear();
+    var operators : i64 array := new i64 array(0, 0);
+    var values : NodeId array := new NodeId array(0, new NodeId(0));
+    var expect_value := true;
+
+    nfor (i, 0, tokens.len()) {
+        let token := tokens[i];
+        if (token.kind == 0) {
+            if (! expect_value) $return; fi;
+            nodes.push(new Node (
+                kind := 0,
+                value := token.value,
+                start := token.start,
+                end := token.end
+            ));
+            values.push(new NodeId(nodes.len() - 1));
+            expect_value := false;
+        } elif (token.kind == 40) {
+            if (! expect_value) $return; fi;
+            operators.push(token.kind);
+        } elif (token.kind == 41) {
+            if (expect_value) $return; fi;
+            var found_open := false;
+            while (operators.len() > 0 && ! found_open) {
+                let top := operators.pop() ?? $return;
+                if (top == 40) {
+                    found_open := true;
+                } else {
+                    if (! append_operator(top, values, nodes)) $return; fi;
+                } fi;
+            };
+            if (! found_open) $return; fi;
+            expect_value := false;
+        } elif (precedence(token.kind) > 0) {
+            if (expect_value) $return; fi;
+            var reducing := true;
+            while (operators.len() > 0 && reducing) {
+                let top := operators[operators.len() - 1] ?? $return;
+                if (top != 40 && precedence(top) >= precedence(token.kind)) {
+                    operators.pop();
+                    if (! append_operator(top, values, nodes)) $return; fi;
+                } else {
+                    reducing := false;
+                } fi;
+            };
+            operators.push(token.kind);
+            expect_value := true;
+        } else {
+            $return;
+        } fi;
+    };
+
+    if (expect_value) $return; fi;
+    while (operators.len() > 0) {
+        let top := operators.pop() ?? $return;
+        if (top == 40) $return; fi;
+        if (! append_operator(top, values, nodes)) $return; fi;
+    };
+    if (values.len() != 1) $return; fi;
+    values.pop()
+} -> NodeId;
+
+%{ 再帰評価をしない post-order walk。
+   work_nodes と expanded の二配列が、通常ならホストの call stack に
+   置かれる「節番号＋復帰位置」の frame である。 }%
+fn evaluate (nodes : Node array alias, root : NodeId) {
+    if ((root -> i64) < 0 || (root -> i64) >= nodes.len()) $return new Evaluation(); fi;
+    var work_nodes : NodeId array := [ root ];
+    var expanded : u1 array := [ false ];
+    var values : i64 array := new i64 array(0, 0);
+    var visited := 0;
+    var max_work := 1;
+
+    while (work_nodes.len() > 0) {
+        let id := work_nodes.pop() ?? $return new Evaluation();
+        let done := expanded.pop() ?? $return new Evaluation();
+        if ((id -> i64) < 0 || (id -> i64) >= nodes.len()) $return new Evaluation(); fi;
+        let node := nodes[id -> i64];
+        visited += 1;
+
+        if (node.kind == 0) {
+            values.push(node.value);
+        } elif (! done) {
+            if ((node.left -> i64) < 0 || (node.right -> i64) < 0) $return new Evaluation(); fi;
+            work_nodes.push(id);
+            expanded.push(true);
+            work_nodes.push(node.right);
+            expanded.push(false);
+            work_nodes.push(node.left);
+            expanded.push(false);
+            if (work_nodes.len() > max_work) max_work := work_nodes.len(); fi;
+        } else {
+            let right := values.pop() ?? $return new Evaluation();
+            let left := values.pop() ?? $return new Evaluation();
+            let value := if (node.kind == 43) left + right
+                elif (node.kind == 45) left - right
+                elif (node.kind == 42) left * right
+                elif (node.kind == 47) {
+                    if (right == 0) $return new Evaluation(); fi;
+                    left / right
+                }
+                else $return new Evaluation()
+                fi;
+            values.push(value);
+        } fi;
+    };
+
+    if (values.len() != 1) $return new Evaluation(); fi;
+    let value := values.pop() ?? $return new Evaluation();
+    new Evaluation (
+        ok := true,
+        value := value,
+        visited := visited,
+        max_work := max_work
+    )
+} -> Evaluation;
+
+fn compile_and_run (source : str alias) {
+    var tokens : Token array := new Token array(0, new Token());
+    if (! lex(source, tokens)) $return new Report(); fi;
+
+    var nodes : Node array := new Node array(0, new Node());
+    let root := parse(tokens, nodes) ?? $return new Report();
+    let result := evaluate(nodes, root);
+    if (! result.ok) $return new Report(); fi;
+
+    new Report (
+        ok := true,
+        value := result.value,
+        tokens := tokens.len(),
+        nodes := nodes.len(),
+        visited := result.visited,
+        max_work := result.max_work
+    )
+} -> Report;
+
+% --- 実行例 ---
+let source := "12 + 3 * (4 + 5) + 6 / 2";
+let report := compile_and_run(source);
+
+% 13 tokens、11 AST nodes。5 個の演算節は帰りにも訪れるので 16 visits。
+if (report.ok && report.value == 42 && report.tokens == 13
+    && report.nodes == 11 && report.visited == 16 && report.max_work > 0)
+    42
+else
+    0
+fi

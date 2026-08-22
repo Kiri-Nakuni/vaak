@@ -179,6 +179,8 @@ pub fn compile_with_host(
         expanding_flows: Default::default(),
         var_self: Default::default(),
         fn_aliases: Default::default(),
+        fn_param_types: Default::default(),
+        want: None,
         host_fns: HashMap::new(),
     };
     // **呼べる名前を先に登録する。** 関数と同じくスコープ全体で見える（C-36 / S-11）
@@ -206,7 +208,9 @@ pub fn compile_with_host(
     for (i, f) in fns.iter().enumerate() {
         let key = fn_key(f);
         c.out.fn_index.insert(key.clone(), i as u32 + 1);
-        c.fn_aliases.insert(key, f.params.iter().map(|p| p.ty.is_alias).collect());
+        c.fn_aliases.insert(key.clone(), f.params.iter().map(|p| p.ty.is_alias).collect());
+        c.fn_param_types
+            .insert(key, f.params.iter().map(|p| p.ty.value.clone()).collect());
         if f.owner.is_some()
             && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false)
         {
@@ -269,7 +273,8 @@ fn collect_fns(body: &[Expr]) -> Vec<FnDecl> {
 struct Compiler {
     out: Program2,
     chunk: Chunk,
-    scopes: Vec<HashMap<String, u16>>,
+    /// 名前 → （枠、**注釈が言う型**）。型は文脈をリテラルへ届けるために持つ（C-100）
+    scopes: Vec<HashMap<String, (u16, Option<ValueType>)>>,
     frame_base: usize,
     flows: HashMap<String, FlowDecl>,
     /// 検査を省いた低水準 API でも、不正な `flow` を有限の誤りにする。
@@ -278,6 +283,13 @@ struct Compiler {
     var_self: std::collections::HashSet<String>,
     /// 利用者定義関数の引数が `alias` か。前方呼び出しも含めて先に集める。
     fn_aliases: HashMap<String, Vec<bool>>,
+    /// 引数の型。**文脈をリテラルへ届けるために持つ**（C-100）
+    fn_param_types: HashMap<String, Vec<ValueType>>,
+    /// **文脈が求めている型**（C-100）。リテラルがこれを受け取る。
+    ///
+    /// `expr` の先頭で必ず取り上げられるので**一段しか届かない。**
+    /// 通したい枝が置き直す。置き忘れは「今までどおり `i64`」に落ちるだけである。
+    want: Option<ValueType>,
     /// ホストが見せている**呼べる名前** → 番号（S-11）
     host_fns: HashMap<String, u16>,
 }
@@ -352,14 +364,33 @@ impl Compiler {
         }
         let s = self.chunk.nslots;
         self.chunk.nslots += 1;
-        self.scopes.last_mut().unwrap().insert(n.to_string(), s);
+        self.scopes.last_mut().unwrap().insert(n.to_string(), (s, None));
         s
+    }
+
+    /// 名前に注釈の型を覚えさせる。**枠は既にある。**
+    fn note_type(&mut self, n: &str, ty: Option<ValueType>) {
+        for s in self.scopes[self.frame_base..].iter_mut().rev() {
+            if let Some(e) = s.get_mut(n) {
+                e.1 = ty;
+                return;
+            }
+        }
+    }
+
+    fn declared_type(&self, n: &str) -> Option<ValueType> {
+        for s in self.scopes[self.frame_base..].iter().rev() {
+            if let Some(e) = s.get(n) {
+                return e.1.clone();
+            }
+        }
+        None
     }
 
     fn lookup(&self, n: &str) -> Option<u16> {
         for s in self.scopes[self.frame_base..].iter().rev() {
             if let Some(i) = s.get(n) {
-                return Some(*i);
+                return Some(i.0);
             }
         }
         None
@@ -393,7 +424,9 @@ impl Compiler {
             && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false);
         if let ExprKind::Block(items) = &f.body.kind {
             self.collect(items);
-            self.region(items, f.body.span)?;
+            // **返り値の型が本体の中まで届く**（C-100）
+            let want = f.ret.as_ref().map(|t| t.value.clone());
+            self.region_wanting(items, want, f.body.span)?;
         }
         if let Some(ret) = &f.ret {
             let ti = self.type_idx(ret);
@@ -409,7 +442,19 @@ impl Compiler {
 
     /// 領域。**値を一つ残す。** 何も残らなければ paradox を積む。
     fn region(&mut self, body: &[Expr], span: Span) -> Result<(), CompileError> {
+        self.region_wanting(body, None, span)
+    }
+
+    /// **領域の値は一つだけ**（C-14）。どれがそれかは分からないので全部に置く。
+    /// 受け取らない枝は先頭で捨てる（C-100）
+    fn region_wanting(
+        &mut self,
+        body: &[Expr],
+        want: Option<ValueType>,
+        span: Span,
+    ) -> Result<(), CompileError> {
         for e in body {
+            self.want = want.clone();
             self.expr(e)?;
         }
         self.emit(Op::EndRegion(span));
@@ -419,16 +464,21 @@ impl Compiler {
 
 impl Compiler {
     fn expr(&mut self, e: &Expr) -> Result<(), CompileError> {
+        let want = self.want.take();
         match &e.kind {
+            // **リテラルは置かれた場所の型を受け取る**（C-21）。
+            // 演算の途中でも同じである（C-100）
             ExprKind::Int(s) => {
                 let v = crate::interp::parse_int_pub(s, e.span)
                     .map_err(|x| CompileError { msg: x.msg, span: x.span })?;
+                let v = crate::interp::coerce_lit_pub(v, &want);
                 let k = self.konst(v);
                 self.emit(Op::Const(k));
             }
             ExprKind::Float(s) => {
                 let v = crate::interp::parse_float_pub(s, e.span)
                     .map_err(|x| CompileError { msg: x.msg, span: x.span })?;
+                let v = crate::interp::coerce_lit_pub(v, &want);
                 let k = self.konst(v);
                 self.emit(Op::Const(k));
             }
@@ -441,6 +491,8 @@ impl Compiler {
                 self.emit(Op::Const(k));
             }
             ExprKind::Ascribe { expr, ty } => {
+                // **注釈は式の中まで届く**（C-100）
+                self.want = Some(ty.value.clone());
                 self.expr(expr)?;
                 self.emit(Op::NeedValue(e.span));
                 let k = self.type_idx(ty);
@@ -458,7 +510,7 @@ impl Compiler {
                 // **被演算子位置の領域は、自分の底を持たねばならない。**
                 // 段の底では足りない——左辺が既に積まれていることがある
                 self.emit(Op::RegionBegin);
-                self.region(b, e.span)?;
+                self.region_wanting(b, want, e.span)?;
             }
 
             // 裸のブロックは領域・スコープ・**脱出段**の三つ（C-64）
@@ -466,7 +518,7 @@ impl Compiler {
                 self.emit(Op::BlockBegin);
                 self.scopes.push(HashMap::new());
                 self.collect(b);
-                self.region(b, e.span)?;
+                self.region_wanting(b, want, e.span)?;
                 self.scopes.pop();
                 self.emit(Op::BlockEnd(e.span));
             }
@@ -488,7 +540,7 @@ impl Compiler {
                 self.emit(Op::Un(*op, e.span));
             }
 
-            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, e.span)?,
+            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, want, e.span)?,
 
             ExprKind::Field { base, name } => {
                 let n = self.name_idx(name);
@@ -523,7 +575,14 @@ impl Compiler {
             ExprKind::Call { callee, args } => self.call(callee, args, e.span)?,
 
             ExprKind::ArrayLit(items) => {
+                // **注釈が言う要素の型が届く**（C-100）
+                let el = match &want {
+                    Some(ValueType::Array(x)) => Some((**x).clone()),
+                    Some(ValueType::Str) => Some(ValueType::U8),
+                    _ => None,
+                };
                 for it in items {
+                    self.want = el.clone();
                     self.expr(it)?;
                     self.emit(Op::NeedValue(it.span));
                 }
@@ -551,7 +610,7 @@ impl Compiler {
                 self.emit(Op::Paradox(e.span));
             }
 
-            ExprKind::If(i) => self.if_expr(i, e.span)?,
+            ExprKind::If(i) => self.if_expr(i, want, e.span)?,
             ExprKind::Loop(b) => self.loop_expr(None, b, e.span)?,
             ExprKind::While { cond, body } => self.while_expr(cond, body, e.span)?,
             ExprKind::NFor { name, start, count, body } => {
@@ -564,12 +623,22 @@ impl Compiler {
         Ok(())
     }
 
-    fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Result<(), CompileError> {
+    fn binary(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        want: Option<ValueType>,
+        span: Span,
+    ) -> Result<(), CompileError> {
         // `??` は paradox の除去子。左が値ならそれ、paradox なら右
         if op == BinOp::Coalesce {
+            // **どちらも同じ場所に置かれる**（C-100）
+            self.want = want.clone();
             self.expr(lhs)?;
             let j = self.emit(Op::JumpIfValue(0));
             self.emit(Op::Pop);
+            self.want = want;
             self.expr(rhs)?;
             self.patch(j);
             return Ok(());
@@ -603,18 +672,45 @@ impl Compiler {
             all.extend(args.iter().cloned());
             return self.call(callee, &all, span);
         }
+        // **比較は結果が `u1`。** 外の型は左右へ届かない（型検査器と同じ扱い）
+        let cmp = matches!(
+            op,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+        );
+        // **右は左に揃う**（C-21：暗黙変換は無い）。
+        // 左が名前なら注釈の型が分かるので、それを使う
+        let left_ty = self.static_type(lhs);
+        let for_lhs = if cmp { left_ty.clone() } else { want.or(left_ty.clone()) };
+        self.want = for_lhs.clone();
         self.expr(lhs)?;
         self.emit(Op::NeedValue(lhs.span));
+        self.want = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            Some(ValueType::I64)
+        } else {
+            left_ty.or(for_lhs)
+        };
         self.expr(rhs)?;
         self.emit(Op::NeedValue(rhs.span));
         self.emit(Op::Bin(op, span));
         Ok(())
     }
 
+    /// 組み立て時に型が分かる式か。**名前と注釈だけ。**
+    fn static_type(&self, e: &Expr) -> Option<ValueType> {
+        match &e.kind {
+            ExprKind::Name(n) => self.declared_type(n),
+            ExprKind::Ascribe { ty, .. } => Some(ty.value.clone()),
+            ExprKind::Paren(v) if v.len() == 1 => self.static_type(&v[0]),
+            _ => None,
+        }
+    }
+
     fn decl(&mut self, d: &Decl, span: Span) -> Result<(), CompileError> {
         for b in &d.bindings {
             match &b.init {
                 BindInit::Value(e) => {
+                    // **注釈は式の中まで届く**（C-100）
+                    self.want = b.ty.as_ref().map(|t| t.value.clone());
                     self.expr(e)?;
                     self.emit(Op::NeedValue(e.span));
                     if let Some(t) = &b.ty {
@@ -622,6 +718,7 @@ impl Compiler {
                         self.emit(Op::Coerce(ti));
                     }
                     let s = self.slot(&b.name);
+                    self.note_type(&b.name, b.ty.as_ref().map(|t| t.value.clone()));
                     self.emit(Op::Declare(s));
                 }
                 BindInit::AliasOf(t) => {
@@ -679,13 +776,17 @@ impl Compiler {
                 let Some(s) = self.lookup(n) else {
                     return self.err(format!("知らない名前 `{n}`"), lhs.span);
                 };
+                // **置き場の型が右辺の中まで届く**（C-100）
+                let ty = self.declared_type(n);
                 if let Some(b) = bop {
                     self.emit(Op::Load(s));
                     self.emit(Op::NeedValue(lhs.span));
+                    self.want = ty;
                     self.expr(rhs)?;
                     self.emit(Op::NeedValue(rhs.span));
                     self.emit(Op::Bin(b, span));
                 } else {
+                    self.want = ty;
                     self.expr(rhs)?;
                     self.emit(Op::NeedValue(rhs.span));
                 }
@@ -874,7 +975,10 @@ impl Compiler {
             return self.err(format!("知らない関数 `{name}`"), callee.span);
         };
         let aliases = self.fn_aliases.get(name).cloned().unwrap_or_default();
+        let ptys = self.fn_param_types.get(name).cloned().unwrap_or_default();
         for (i, a) in args.iter().enumerate() {
+            // **引数の型が式の中まで届く**（C-100）
+            self.want = ptys.get(i).cloned();
             self.argument(a, aliases.get(i).copied().unwrap_or(false))?;
         }
         self.emit(Op::Call(idx, args.len() as u16, span));
@@ -883,6 +987,7 @@ impl Compiler {
 
     /// 別名引数は名前のセル、値引数はその場で複製した値を積む。
     fn argument(&mut self, arg: &Expr, is_alias: bool) -> Result<(), CompileError> {
+        let want = self.want.take();
         if is_alias {
             let ExprKind::Name(name) = &arg.kind else {
                 return self.err("`alias` 引数に渡せるのは名前だけ", arg.span);
@@ -892,6 +997,7 @@ impl Compiler {
             };
             self.emit(Op::Ref(slot));
         } else {
+            self.want = want;
             self.expr(arg)?;
             self.emit(Op::NeedValue(arg.span));
         }
@@ -905,10 +1011,18 @@ impl Compiler {
                     return self.err(format!("知らない型 `{n}`"), span);
                 };
                 for f in &s.fields {
+                    // **欄の型が式の中まで届く**（C-100）
+                    let fty = Some(f.ty.value.clone());
                     match given.iter().find(|(g, _)| g == &f.name) {
-                        Some((_, e)) => self.expr(e)?,
+                        Some((_, e)) => {
+                            self.want = fty;
+                            self.expr(e)?
+                        }
                         None => match &f.default {
-                            Some(d) => self.expr(d)?,
+                            Some(d) => {
+                                self.want = fty;
+                                self.expr(d)?
+                            }
                             None => return self.err(format!("欄 `{}` に値が無い", f.name), span),
                         },
                     }
@@ -924,6 +1038,8 @@ impl Compiler {
             {
                 let s = self.out.structs[n].clone();
                 for f in &s.fields {
+                    // **欄の型が既定の式の中まで届く**（C-100）
+                    self.want = Some(f.ty.value.clone());
                     let Some(d) = &f.default else {
                         return self.err(format!("欄 `{}` に値が無い", f.name), span);
                     };
@@ -993,9 +1109,15 @@ impl Compiler {
         Ok(())
     }
 
-    fn if_expr(&mut self, i: &If, span: Span) -> Result<(), CompileError> {
+    fn if_expr(
+        &mut self,
+        i: &If,
+        want: Option<ValueType>,
+        span: Span,
+    ) -> Result<(), CompileError> {
         let mut ends = Vec::new();
         for (c, b) in &i.arms {
+            // **条件は `u1`。** 外の型は届かない
             self.expr(c)?;
             self.emit(Op::NeedU1(c.span));
             let j = self.emit(Op::JumpIfFalse(0));
@@ -1007,6 +1129,7 @@ impl Compiler {
             // **分岐が何も積まない**——偽のときは paradox を積むのに。
             // 合流点で高さが揃わず、後の `;` が下の値を食う（S-16）
             self.emit(Op::RegionBegin);
+            self.want = want.clone();
             self.expr(b)?;
             self.emit(Op::EndRegion(b.span));
             ends.push(self.emit(Op::Jump(0)));
@@ -1015,6 +1138,7 @@ impl Compiler {
         match &i.els {
             Some(b) => {
                 self.emit(Op::RegionBegin);
+                self.want = want;
                 self.expr(b)?;
                 self.emit(Op::EndRegion(b.span));
             }
@@ -1458,6 +1582,11 @@ impl Runner {
         self.run_with(p, host, &mut none)
     }
 
+    /// **誤りのときは、そこまでの書き換えが落ちる。**
+    ///
+    /// C-2 は「実行時の誤りより前に行われたホストの書き換えを巻き戻さない」と決めている。
+    /// つまり**誤りのときの後の状態にも意味がある**——
+    /// 拾いたい埋め込み側は [`run_writeback`](Runner::run_writeback) を使うこと。
     pub fn run_with(
         &mut self,
         p: &Program2,
@@ -1468,7 +1597,21 @@ impl Runner {
         result.map(|eval| (eval, after))
     }
 
-    fn run_with_writeback(
+    /// **誤りでも後の状態を返す**（C-2）。
+    ///
+    /// `run` は誤りのときに書き換えを落とす。ホストが
+    /// 「途中まで変わった」を回収するにはこちらを使う。
+    pub fn run_writeback(
+        &mut self,
+        p: &Program2,
+        host: Vec<Value>,
+    ) -> (Result<crate::interp::Eval, RtErr>, Vec<Value>) {
+        let mut none = crate::value::NoHostFns;
+        self.run_with_writeback(p, host, &mut none)
+    }
+
+    /// 呼べる名前つき（S-11）で、**誤りでも後の状態を返す**（C-2）。
+    pub fn run_with_writeback(
         &mut self,
         p: &Program2,
         host: Vec<Value>,
@@ -1588,24 +1731,53 @@ impl Program2 {
     }
 
     pub fn host_used(&self) -> Vec<bool> {
+        let r = self.host_reads();
+        let w = self.host_writes();
+        r.iter().zip(w).map(|(a, b)| *a || b).collect()
+    }
+
+    /// この束縛を**読む必要があるか**。
+    ///
+    /// 使わない名前を読まなくてよくなる——rtex の `\count` のように
+    /// **束縛が何百もあるホスト**では、これが起動費そのものである。
+    ///
+    /// **迷ったら読む側に倒す。** 読み過ぎは遅いだけだが、読み落としは間違いである。
+    pub fn host_reads(&self) -> Vec<bool> {
+        self.host_slot_flags(|op, s| match op {
+            // 値そのものが要る
+            Op::Load(x) | Op::LoadIndex(x, _) | Op::LoadLen(x, _) => *x == s,
+            Op::LoadField(x, _, _) => *x == s,
+            // **枡へ書くには、まず集合体が要る**
+            Op::StoreIndex(x, _) => *x == s,
+            // 破壊的メソッドも、いまの中身の上で働く
+            Op::MutMethod(x, _, _, _) => *x == s,
+            // **別名は読みにも書きにもなりうる**（C-53）。倒す先は読む側
+            Op::Alias(a, b) => *a == s || *b == s,
+            Op::Ref(x) | Op::Freeze(x) | Op::Declare(x) => *x == s,
+            _ => false,
+        })
+    }
+
+    /// この束縛を**書き戻す必要があるか**。
+    ///
+    /// 契約は「同じなら書かない」だが、**そもそも触れていないなら比べる必要も無い。**
+    pub fn host_writes(&self) -> Vec<bool> {
+        self.host_slot_flags(|op, s| match op {
+            Op::Store(x) | Op::StoreExact(x) | Op::StoreIndex(x, _) => *x == s,
+            Op::MutMethod(x, _, _, _) => *x == s,
+            // 別名で受け直した先から書かれうる
+            Op::Alias(a, b) => *a == s || *b == s,
+            Op::Ref(x) | Op::Declare(x) => *x == s,
+            _ => false,
+        })
+    }
+
+    fn host_slot_flags(&self, f: impl Fn(&Op, u16) -> bool) -> Vec<bool> {
         let top = &self.chunks[self.top as usize];
         let mut used = vec![false; top.host_slots.len()];
         for (i, slot) in top.host_slots.iter().enumerate() {
             let s = *slot;
-            used[i] = self.chunks.iter().any(|c| {
-                c.ops.iter().any(|op| match op {
-                    Op::Load(x)
-                    | Op::Store(x)
-                    | Op::StoreExact(x)
-                    | Op::Declare(x)
-                    | Op::LoadIndex(x, _)
-                    | Op::StoreIndex(x, _)
-                    | Op::LoadLen(x, _) => *x == s,
-                    Op::LoadField(x, _, _) => *x == s,
-                    Op::Alias(a, b) => *a == s || *b == s,
-                    _ => false,
-                })
-            });
+            used[i] = self.chunks.iter().any(|c| c.ops.iter().any(|op| f(op, s)));
         }
         used
     }

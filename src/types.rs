@@ -620,6 +620,44 @@ impl TypeChecker {
                     }
                     Some(ValueType::U1)
                 }
+                // ---- 数のメンバ関数（S-23）----
+                //
+                // **返す型は受け手と同じ。** ただし「数える」ものは個数なので `i64`。
+                // 引数も受け手と同じ型でなければならない（C-21：暗黙変換は無い）
+                "count_ones" | "leading_zeros" | "trailing_zeros" => {
+                    for a in args {
+                        self.expr(a, None);
+                    }
+                    Some(ValueType::I64)
+                }
+                // **桁数は別の型でよい**（C-21）
+                "rotate_left" | "rotate_right" => {
+                    for a in args {
+                        self.expect(a, &ValueType::I64);
+                    }
+                    bt.clone()
+                }
+                "abs" | "reverse_bits" | "swap_bytes" | "sqrt" | "floor" | "ceil"
+                | "trunc" | "round" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos"
+                | "tan" => {
+                    for a in args {
+                        self.expr(a, None);
+                    }
+                    bt.clone()
+                }
+                "min" | "max" | "copysign" | "pow" | "mul_add" | "saturating_add"
+                | "saturating_sub" | "saturating_mul" => {
+                    if let Some(t) = &bt {
+                        for a in args {
+                            self.expect(a, &t.clone());
+                        }
+                    } else {
+                        for a in args {
+                            self.expr(a, None);
+                        }
+                    }
+                    bt.clone()
+                }
                 "utf8_len" => Some(ValueType::I64),
                 "utf8_at" => {
                     for a in args {
