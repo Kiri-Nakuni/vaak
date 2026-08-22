@@ -897,6 +897,17 @@ impl Parser {
                     };
                     stack.push(ValueType::Map(Box::new(key), Box::new(val)));
                 }
+                Tok::Hash => {
+                    self.bump();
+                    // 鍵、値の順に積まれている（`map` と同じ）
+                    let Some(val) = stack.pop() else {
+                        return Err(self.err("`hash` は 2 つ取るが、足りない"));
+                    };
+                    let Some(key) = stack.pop() else {
+                        return Err(self.err("`hash` は 2 つ取るが、足りない"));
+                    };
+                    stack.push(ValueType::Hash(Box::new(key), Box::new(val)));
+                }
                 _ => break,
             }
         }

@@ -434,3 +434,36 @@ t!(文字列の鍵,
 t!(文字列の鍵は短い順, "var m : str i64 map := ( \"bb\" => 2, \"a\" => 1 ); m.keys()[0].len()");
 t!(写像の値が集合体,
    "var m := new i64 i64 array map ( ); m[3] := new i64 array(2, 8); m[3][1] ?? 0");
+
+// ── hash：鍵の値で飛ぶ（C-98） ─────────────────────────
+
+t!(空のhash, "var h := new i64 i64 hash ( ); h.len()");
+t!(hashリテラル, "var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h.len()");
+t!(hashを引く, "var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h[2]");
+t!(hashの無い鍵は虚無, "var h : i64 i64 hash := ( 1 => 10 ); h[9] ?? 42");
+t!(hashへ足す, "var h := new i64 i64 hash ( ); h[5] := 7; h[5] * 10 + h.len()");
+t!(hashは上書きする, "var h := new i64 i64 hash ( ); h[5] := 7; h[5] := 9; h[5] * 10 + h.len()");
+t!(hashは入れた順,
+   "var h := new i64 i64 hash ( ); h[9] := 1; h[3] := 2; h[7] := 3;
+    var k := h.keys(); k[0] * 100 + k[1] * 10 + k[2]");
+t!(hashで在るか, "var h : i64 i64 hash := ( 1 => 1, 5 => 5 ); if (h.has(5)) 1 else 0 fi");
+t!(hashで無いものは無い, "var h : i64 i64 hash := ( 1 => 1 ); if (h.has(9)) 1 else 0 fi");
+t!(hashから抜く, "var h : i64 i64 hash := ( 1 => 10, 2 => 20 ); h.remove(1) + h.len()");
+t!(hashの無い鍵を抜くと虚無, "var h : i64 i64 hash := ( 1 => 10 ); (h.remove(9) ?? 5) + h.len()");
+t!(hashは抜いた後引けない, "var h : i64 i64 hash := ( 1 => 1, 2 => 2 ); h.remove(2) ?? 0; h[2] ?? 7");
+t!(hashを空にする, "var h : i64 i64 hash := ( 1 => 1, 2 => 2 ); h.clear(); h.len()");
+t!(hashも深く複製する,
+   "var a : i64 i64 hash := ( 1 => 10 ); var b := a; b[1] := 99; a[1] * 100 + b[1]");
+t!(hashにたくさん入れる,
+   "var h := new i64 i64 hash ( ); var i := 0;
+    while (i < 200) { h[i * 37] := i; i += 1; }; h.len() + h[37 * 99]");
+t!(hashは抜いても引ける,
+   "var h := new i64 i64 hash ( ); var i := 0;
+    while (i < 50) { h[i] := i; i += 1; };
+    var j := 0;
+    while (j < 25) { h.remove(j * 2) ?? 0; j += 1; };
+    h.len() * 100 + (h[7] ?? 0)");
+t!(文字列を鍵にするhash,
+   "var h : str i64 hash := ( \"alpha\" => 1, \"beta\" => 2 ); h[\"beta\"] * 10 + h.len()");
+t!(hashの値が集合体,
+   "var h := new i64 i64 array hash ( ); h[3] := new i64 array(2, 8); h[3][1] ?? 0");

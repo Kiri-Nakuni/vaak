@@ -435,6 +435,7 @@ fn show_vt(t: &crate::ast::ValueType) -> String {
         V::Str => "str".into(),
         V::Array(e) => format!("{} array", show_vt(e)),
         V::Map(k, v) => format!("{} {} map", show_vt(k), show_vt(v)),
+        V::Hash(k, v) => format!("{} {} hash", show_vt(k), show_vt(v)),
         V::Named(n) => n.clone(),
     }
 }

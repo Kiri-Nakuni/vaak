@@ -879,6 +879,13 @@ impl Compiler {
                 let c = self.konst(Value::map((**k).clone(), (**v).clone(), BTreeMap::new()));
                 self.emit(Op::Const(c));
             }
+            (ValueType::Hash(k, v), CtorArgs::Positional(_)) => {
+                let c = self.konst(Value::Hash(Box::new(crate::value::HashVal::new(
+                    (**k).clone(),
+                    (**v).clone(),
+                ))));
+                self.emit(Op::Const(c));
+            }
             // ラップを剥がす
             (_, CtorArgs::Positional(a)) if a.len() == 1 => {
                 self.expr(&a[0])?;
@@ -1738,6 +1745,7 @@ impl<'a> Vm<'a> {
                     Value::Array(ar) => ar.items.len(),
                     Value::Str(s) => s.len(),
                     Value::Map(mp) => mp.entries.len(),
+                    Value::Hash(h) => h.len(),
                     _ => return self.err("`len` は集合体にしか使えない", sp),
                 };
                 self.stack.push(Slot::Value(Value::I64(n as i64)));

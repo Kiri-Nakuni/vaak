@@ -73,7 +73,7 @@
         },
         {
           "name": "keyword.control.vaak",
-          "match": "\\b(continue|outward|struct|switch|alias|array|break|const|while|case|elif|else|flow|loop|nfor|wrap|let|map|mod|new|var|fi|fn|if)\\b"
+          "match": "\\b(continue|outward|struct|switch|alias|array|break|const|while|case|elif|else|flow|hash|loop|nfor|wrap|let|map|mod|new|var|fi|fn|if)\\b"
         }
       ]
     },

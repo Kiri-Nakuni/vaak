@@ -262,6 +262,8 @@ pub enum ValueType {
     Str,
     Array(Box<ValueType>),
     Map(Box<ValueType>, Box<ValueType>),
+    /// **鍵の値で飛ぶ連想の型**（C-98）。`map` と違い、`.keys()` は**入れた順**。
+    Hash(Box<ValueType>, Box<ValueType>),
     /// 構造体・ラップ型。名前で参照する。
     Named(String),
 }
