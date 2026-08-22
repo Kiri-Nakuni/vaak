@@ -1582,6 +1582,11 @@ impl Runner {
         self.run_with(p, host, &mut none)
     }
 
+    /// **誤りのときは、そこまでの書き換えが落ちる。**
+    ///
+    /// C-2 は「実行時の誤りより前に行われたホストの書き換えを巻き戻さない」と決めている。
+    /// つまり**誤りのときの後の状態にも意味がある**——
+    /// 拾いたい埋め込み側は [`run_writeback`](Runner::run_writeback) を使うこと。
     pub fn run_with(
         &mut self,
         p: &Program2,
@@ -1592,7 +1597,21 @@ impl Runner {
         result.map(|eval| (eval, after))
     }
 
-    fn run_with_writeback(
+    /// **誤りでも後の状態を返す**（C-2）。
+    ///
+    /// `run` は誤りのときに書き換えを落とす。ホストが
+    /// 「途中まで変わった」を回収するにはこちらを使う。
+    pub fn run_writeback(
+        &mut self,
+        p: &Program2,
+        host: Vec<Value>,
+    ) -> (Result<crate::interp::Eval, RtErr>, Vec<Value>) {
+        let mut none = crate::value::NoHostFns;
+        self.run_with_writeback(p, host, &mut none)
+    }
+
+    /// 呼べる名前つき（S-11）で、**誤りでも後の状態を返す**（C-2）。
+    pub fn run_with_writeback(
         &mut self,
         p: &Program2,
         host: Vec<Value>,
@@ -1712,24 +1731,53 @@ impl Program2 {
     }
 
     pub fn host_used(&self) -> Vec<bool> {
+        let r = self.host_reads();
+        let w = self.host_writes();
+        r.iter().zip(w).map(|(a, b)| *a || b).collect()
+    }
+
+    /// この束縛を**読む必要があるか**。
+    ///
+    /// 使わない名前を読まなくてよくなる——rtex の `\count` のように
+    /// **束縛が何百もあるホスト**では、これが起動費そのものである。
+    ///
+    /// **迷ったら読む側に倒す。** 読み過ぎは遅いだけだが、読み落としは間違いである。
+    pub fn host_reads(&self) -> Vec<bool> {
+        self.host_slot_flags(|op, s| match op {
+            // 値そのものが要る
+            Op::Load(x) | Op::LoadIndex(x, _) | Op::LoadLen(x, _) => *x == s,
+            Op::LoadField(x, _, _) => *x == s,
+            // **枡へ書くには、まず集合体が要る**
+            Op::StoreIndex(x, _) => *x == s,
+            // 破壊的メソッドも、いまの中身の上で働く
+            Op::MutMethod(x, _, _, _) => *x == s,
+            // **別名は読みにも書きにもなりうる**（C-53）。倒す先は読む側
+            Op::Alias(a, b) => *a == s || *b == s,
+            Op::Ref(x) | Op::Freeze(x) | Op::Declare(x) => *x == s,
+            _ => false,
+        })
+    }
+
+    /// この束縛を**書き戻す必要があるか**。
+    ///
+    /// 契約は「同じなら書かない」だが、**そもそも触れていないなら比べる必要も無い。**
+    pub fn host_writes(&self) -> Vec<bool> {
+        self.host_slot_flags(|op, s| match op {
+            Op::Store(x) | Op::StoreExact(x) | Op::StoreIndex(x, _) => *x == s,
+            Op::MutMethod(x, _, _, _) => *x == s,
+            // 別名で受け直した先から書かれうる
+            Op::Alias(a, b) => *a == s || *b == s,
+            Op::Ref(x) | Op::Declare(x) => *x == s,
+            _ => false,
+        })
+    }
+
+    fn host_slot_flags(&self, f: impl Fn(&Op, u16) -> bool) -> Vec<bool> {
         let top = &self.chunks[self.top as usize];
         let mut used = vec![false; top.host_slots.len()];
         for (i, slot) in top.host_slots.iter().enumerate() {
             let s = *slot;
-            used[i] = self.chunks.iter().any(|c| {
-                c.ops.iter().any(|op| match op {
-                    Op::Load(x)
-                    | Op::Store(x)
-                    | Op::StoreExact(x)
-                    | Op::Declare(x)
-                    | Op::LoadIndex(x, _)
-                    | Op::StoreIndex(x, _)
-                    | Op::LoadLen(x, _) => *x == s,
-                    Op::LoadField(x, _, _) => *x == s,
-                    Op::Alias(a, b) => *a == s || *b == s,
-                    _ => false,
-                })
-            });
+            used[i] = self.chunks.iter().any(|c| c.ops.iter().any(|op| f(op, s)));
         }
         used
     }
