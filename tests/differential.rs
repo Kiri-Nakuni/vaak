@@ -709,3 +709,18 @@ fn 遅延した被演算子() {
     同じ("var s := 0; nfor (i, 0, 3) { nfor (j, 0, 3) { continue break j; }; }; s");
     同じ("var s := 0; nfor (i, 0, 6) { if (i == 1) continue break 100 fi; if (i == 3) continue break 200 fi; s += 1; }");
 }
+
+/// `outward`（C-34 / C-70）。**フレームを越え、残りの段送りは呼び出し位置で起きる。**
+#[test]
+fn フレームを越える脱出() {
+    同じ("fn f () { break outward break 1; } -> i64; {{ f() }}");
+    同じ("fn f () { break outward break break 3; } -> i64; {{ { f() }; 9 }}");
+    同じ("fn f () { break outward break 5; } -> i64; {{ { f() }; 9 }}");
+    同じ("fn f () { { break break outward break 7; }; 0 } -> i64; {{ f() }}");
+    同じ("fn f (a : i64) { if (a > 2) break outward break a fi; a } -> i64; {{ f(1) + f(5) }}");
+    同じ("fn f (a : i64) { a * 2 } -> i64; f(21)");
+    同じ("fn f (a : i64) { if (a > 100) break outward break a fi; a * 2 } -> i64; {{ f(21) }}");
+    同じ("fn f () { break outward break 6; } -> i64; {{ f() }} * 7");
+    // 積み荷は**書かれた位置**で読まれる（C-70）
+    同じ("fn f (a : i64) { break outward break a * 3; } -> i64; {{ f(4) }}");
+}

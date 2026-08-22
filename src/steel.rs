@@ -118,6 +118,12 @@ pub struct Steel {
     copy_fns: Vec<String>,
     /// **文脈が求めている型**（C-94）。写像・配列のリテラルは自分では型を決められない
     want: Option<ValueType>,
+    /// **フレームを越える脱出を持つ関数**（C-34 の `outward`）。
+    ///
+    /// 持つ関数だけが「残りの段数」を返す。**書いていない関数は二つ組のままである**
+    outward_fns: std::collections::HashSet<String>,
+    /// いまの関数の「残りの段数」を入れる枠。持たない関数では `None`
+    esc_slot: Option<String>,
     /// 構造体の宣言。**欄の並びが位置を決める**
     structs: HashMap<String, StructDecl>,
     /// 包み型（S-2）。名前 → 包んだ型
@@ -267,6 +273,8 @@ impl Steel {
             decls: Vec::new(),
             copy_fns: Vec::new(),
             want: None,
+            outward_fns: Default::default(),
+            esc_slot: None,
             structs: HashMap::new(),
             wraps: HashMap::new(),
             struct_tys: Vec::new(),
@@ -2803,7 +2811,7 @@ impl Steel {
 
     /// 脱出。**段数が静的に分かっていれば `br` 一つになる。**
     fn escape(&mut self, x: &Escape) -> R<()> {
-        let (depth, is_continue, payload, deferred) = self.plan(x)?;
+        let Plan { depth, is_continue, payload, deferred, outward } = self.plan(x)?;
         if is_continue {
             // **段を再開させる。** `break` の連なりの分だけ外へ出てから
             let idx = self
@@ -2837,6 +2845,28 @@ impl Steel {
             Some(e) => self.expr(&e)?,
             None => None,
         };
+        // **フレームを越えるか**（C-70）。
+        //
+        // `outward` は k 番目の段送りに掛かる。この関数が持つ段は `stages.len()` なので、
+        // **その位置に掛かっていなければ越えない**——空振りである
+        if outward != 0 {
+            let here = self.stages.len();
+            let at_frame = here > 0 && (outward >> (here - 1)) & 1 != 0;
+            if !at_frame || depth < here {
+                // 空振り、あるいは段が足りない。**黙って別の意味にしない**（C-70）
+                self.emit("call void @vaak.fail()");
+                self.emit("unreachable");
+                self.done = true;
+                return Ok(());
+            }
+            let Some(slot) = self.esc_slot.clone() else {
+                return err("`outward` は関数の中にしか書けない", x.span);
+            };
+            // **残りの段送りを持ち帰る。** 呼び出し位置で起きる
+            let rest = depth - here;
+            self.emit(&format!("store i64 {rest}, ptr {slot}"));
+            return self.leave(here, p);
+        }
         self.leave(depth, p)
     }
 
@@ -2845,27 +2875,31 @@ impl Steel {
     /// `flow` の本体は**使用位置で読み直される**（C-15）ので、
     /// ここで展開する——`getdepth()` が使用位置の深さになるのはそのためである。
     ///
-    /// 返すのは（段数, 再開か, 積み荷, **遅延した脱出**）。
+    /// 脱出の形を組み立て時に決める。
     ///
     /// 遅延した脱出は `continue` の被演算子である（C-73）。
     /// **段数には混ぜない**——それは「送るもの」であって「抜ける段」ではない。
-    fn plan(&mut self, x: &Escape) -> R<(usize, bool, Option<Expr>, Option<Escape>)> {
-        let inner = |me: &mut Self,
-                     x: &Escape|
-         -> R<(usize, bool, Option<Expr>, Option<Escape>)> {
+    fn plan(&mut self, x: &Escape) -> R<Plan> {
+        let inner = |me: &mut Self, x: &Escape| -> R<Plan> {
             match &x.operand {
                 Some(Operand::Escape(i)) => me.plan(i),
-                Some(Operand::Value(v)) => Ok((0, false, Some(v.clone()), None)),
-                None => Ok((0, false, None, None)),
+                Some(Operand::Value(v)) => Ok(Plan {
+                    payload: Some(v.clone()),
+                    ..Plan::default()
+                }),
+                None => Ok(Plan::default()),
             }
         };
         match &x.kind {
             EscapeKind::Break { outward } => {
+                let mut pl = inner(self, x)?;
+                // **`outward` は k 番目の段送りに掛かる**（C-70）。位置で持つ
+                pl.outward <<= 1;
                 if *outward {
-                    return err("`outward` は STEEL がまだ扱えない", x.span);
+                    pl.outward |= 1;
                 }
-                let (d, c, p, f) = inner(self, x)?;
-                Ok((d + 1, c, p, f))
+                pl.depth += 1;
+                Ok(pl)
             }
             EscapeKind::Continue => {
                 // **`continue` も一段を数える。** 再開する段そのものである——
@@ -2873,12 +2907,17 @@ impl Steel {
                 //
                 // **被演算子は遅延する**（C-73）。段数には混ぜない
                 match &x.operand {
-                    Some(Operand::Escape(i)) => Ok((1, true, None, Some((**i).clone()))),
+                    Some(Operand::Escape(i)) => Ok(Plan {
+                        depth: 1,
+                        is_continue: true,
+                        deferred: Some((**i).clone()),
+                        ..Plan::default()
+                    }),
                     // `continue` は作用素式か虚無しか取らない（C-71）
                     Some(Operand::Value(_)) => {
                         err("`continue` の被演算子は作用素式か虚無だけ", x.span)
                     }
-                    None => Ok((1, true, None, None)),
+                    None => Ok(Plan { depth: 1, is_continue: true, ..Plan::default() }),
                 }
             }
             EscapeKind::Flow { name, args } => {
@@ -2889,9 +2928,9 @@ impl Steel {
                     return err(format!("知らない作用素式 `{name}`"), x.span);
                 };
                 // **本体を使用位置で読み直す。** 積み荷は使用位置のもの
-                let (d, c, _, f) = self.plan(&body)?;
-                let (_, _, p, _) = inner(self, x)?;
-                Ok((d, c, p, f))
+                let b = self.plan(&body)?;
+                let o = inner(self, x)?;
+                Ok(Plan { payload: o.payload, ..b })
             }
         }
     }
@@ -2901,7 +2940,7 @@ impl Steel {
         &mut self,
         args: &[FlowArg],
         x: &Escape,
-    ) -> R<(usize, bool, Option<Expr>, Option<Escape>)> {
+    ) -> R<Plan> {
         let [FlowArg::Escape(op), FlowArg::Value(n)] = args else {
             return err("`$repeat` は作用素と回数を取る", x.span);
         };
@@ -2912,13 +2951,19 @@ impl Steel {
         if times < 0 {
             return err("`$repeat` の回数が負", n.span);
         }
-        let (d, c, _, f) = self.plan(op)?;
-        let (_, _, p, _) = match &x.operand {
+        let b = self.plan(op)?;
+        let o = match &x.operand {
             Some(Operand::Escape(i)) => self.plan(i)?,
-            Some(Operand::Value(v)) => (0, false, Some(v.clone()), None),
-            None => (0, false, None, None),
+            Some(Operand::Value(v)) => Plan { payload: Some(v.clone()), ..Plan::default() },
+            None => Plan::default(),
         };
-        Ok((d * times as usize, c, p, f))
+        Ok(Plan {
+            depth: b.depth * times as usize,
+            is_continue: b.is_continue,
+            payload: o.payload,
+            deferred: b.deferred,
+            outward: b.outward,
+        })
     }
 
     /// 式の指す**枠**（値そのものではない）。書き戻しに要る。
@@ -3472,17 +3517,38 @@ impl Steel {
         };
         let sig: Vec<String> =
             vals.iter().map(|(t, v, ok)| format!("{t} {v}, i1 {ok}")).collect();
+        let rsig = self.ret_sig_of(name, &ret);
         let t = self.tmp();
-        self.emit(&format!(
-            "{t} = call {{ i1, {} }} @vaak_{name}({})",
-            ity(&ret),
-            sig.join(", ")
-        ));
+        self.emit(&format!("{t} = call {rsig} @vaak_{name}({})", sig.join(", ")));
         let ok = self.tmp();
-        self.emit(&format!("{ok} = extractvalue {{ i1, {} }} {t}, 0", ity(&ret)));
+        self.emit(&format!("{ok} = extractvalue {rsig} {t}, 0"));
         let v = self.tmp();
-        self.emit(&format!("{v} = extractvalue {{ i1, {} }} {t}, 1", ity(&ret)));
+        self.emit(&format!("{v} = extractvalue {rsig} {t}, 1"));
+        // **フレームを越えてきたなら、残りの段送りはここで起きる**（C-70）
+        if self.outward_fns.contains(name) {
+            let n = self.tmp();
+            self.emit(&format!("{n} = extractvalue {rsig} {t}, 2"));
+            let val = Val { ok: ok.clone(), v: v.clone(), ty: ret.clone() };
+            self.resume_outward(&n, val, span)?;
+        }
         Ok(Some(Val { ok, v, ty: ret }))
+    }
+
+    /// 関数の返りの形。**越える脱出を持つ関数だけ一つ広い。**
+    fn ret_sig(&self, ret: &ValueType) -> String {
+        match &self.esc_slot {
+            Some(_) => format!("{{ i1, {}, i64 }}", ity(ret)),
+            None => format!("{{ i1, {} }}", ity(ret)),
+        }
+    }
+
+    /// 名前で引く版（呼び出し側は自分の `esc_slot` を見てはいけない）。
+    fn ret_sig_of(&self, name: &str, ret: &ValueType) -> String {
+        if self.outward_fns.contains(name) {
+            format!("{{ i1, {}, i64 }}", ity(ret))
+        } else {
+            format!("{{ i1, {} }}", ity(ret))
+        }
     }
 
     /// 一つの関数を書き出す。**本体の領域がフレームである**（C-23）。
@@ -3495,6 +3561,12 @@ impl Steel {
         self.stages.clear();
         self.push_scope();
 
+        // **越える脱出を持つ関数だけが枠を持つ**（C-70）
+        self.esc_slot = if self.outward_fns.contains(&f.name) {
+            Some(self.alloca_init("i64", "0"))
+        } else {
+            None
+        };
         let ret = match f.ret.as_ref() {
             Some(t) => self.resolve(&t.value),
             None => ValueType::I64,
@@ -3587,15 +3659,26 @@ impl Steel {
             }
             converted.v
         };
+        let sig = self.ret_sig(&ret);
         let a = self.tmp();
-        self.emit(&format!("{a} = insertvalue {{ i1, {} }} undef, i1 {out_ok}, 0", ity(&ret)));
+        self.emit(&format!("{a} = insertvalue {sig} undef, i1 {out_ok}, 0"));
         let b = self.tmp();
-        self.emit(&format!("{b} = insertvalue {{ i1, {} }} {a}, {} {conv}, 1", ity(&ret), ity(&ret)));
-        self.emit(&format!("ret {{ i1, {} }} {b}", ity(&ret)));
+        self.emit(&format!("{b} = insertvalue {sig} {a}, {} {conv}, 1", ity(&ret)));
+        let last = match self.esc_slot.clone() {
+            Some(slot) => {
+                // **残りの段送りを持ち帰る。** 零なら普通の返りである
+                let n = self.tmp();
+                self.emit(&format!("{n} = load i64, ptr {slot}"));
+                let c = self.tmp();
+                self.emit(&format!("{c} = insertvalue {sig} {b}, i64 {n}, 2"));
+                c
+            }
+            None => b,
+        };
+        self.emit(&format!("ret {sig} {last}"));
 
         Ok(format!(
-            "define internal {{ i1, {} }} @vaak_{}({}) {{\nentry:\n{}{}}}\n",
-            ity(&ret),
+            "define internal {sig} @vaak_{}({}) {{\nentry:\n{}{}}}\n",
             f.name,
             params.join(", "),
             self.head,
@@ -4036,6 +4119,14 @@ pub fn compile(prog: &Program) -> R<String> {
     let (mut structs, mut wraps) = (HashMap::new(), HashMap::new());
     collect(&prog.body, &mut fns, &mut flows, &mut structs, &mut wraps);
     s.fns = fns;
+    // **フレームを越える脱出を持つ関数を先に知る**（C-70）。
+    // 呼び出し側が「残りの段数」を受け取るかどうかが、これで決まる
+    s.outward_fns = s
+        .fns
+        .values()
+        .filter(|f| Steel::has_outward(&f.body))
+        .map(|f| f.name.clone())
+        .collect();
     s.flows = flows;
     s.structs = structs;
     s.wraps = wraps;
@@ -4410,7 +4501,8 @@ impl Steel {
             return Ok(None);
         }
         // 作用素は組み立て時に決まらねばならない。**回数だけが動く**
-        let (unit, is_continue, _, _) = self.plan(op)?;
+        let op_plan = self.plan(op)?;
+        let (unit, is_continue) = (op_plan.depth, op_plan.is_continue);
         if unit == 0 && !is_continue {
             return err("`$repeat` の作用素が段を数えない", x.span);
         }
@@ -4500,5 +4592,165 @@ impl Steel {
         self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &vty.clone());
         Ok(Some(Val { ok, v, ty: vty }))
+    }
+}
+
+/// 脱出の形（組み立て時に決まる分）。
+#[derive(Clone, Default)]
+struct Plan {
+    /// 抜ける段の数
+    depth: usize,
+    /// 再開か（`continue`）
+    is_continue: bool,
+    /// 積み荷。**書かれた位置で読まれる**（C-70）
+    payload: Option<Expr>,
+    /// 遅延した脱出（`continue` の被演算子、C-73）
+    deferred: Option<Escape>,
+    /// **どの段送りがフレームを越えるか**（C-70）。ビット 0 が一つ目
+    outward: u64,
+}
+
+// ================= `outward`（C-34 / C-70） =================
+//
+// **フレームを越える脱出。** 積み荷は書かれた位置で読まれ（C-70）、
+// **残りの段送りは呼び出し位置で起きる。**
+//
+// 関数の返りを一つ拡げて「残りの段数」を運ぶ。**零なら普通の返りである。**
+// `outward` を書いていない関数は今までどおり二つ組を返す——**費用を持たない。**
+
+impl Steel {
+    /// 本体に `outward` があるか。**関数ごとに一度だけ調べる。**
+    fn has_outward(e: &Expr) -> bool {
+        fn esc(x: &Escape) -> bool {
+            if let EscapeKind::Break { outward: true } = &x.kind {
+                return true;
+            }
+            match &x.operand {
+                Some(Operand::Escape(i)) => esc(i),
+                Some(Operand::Value(v)) => Steel::has_outward(v),
+                None => false,
+            }
+        }
+        let mut found = false;
+        walk(e, &mut |x| {
+            if let ExprKind::Escape(k) = &x.kind {
+                if esc(k) {
+                    found = true;
+                }
+            }
+        });
+        found
+    }
+}
+
+/// 式の木を辿る。**順序は問わない**——有無を見るだけである。
+fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    f(e);
+    let mut go = |x: &Expr| walk(x, f);
+    match &e.kind {
+        ExprKind::Paren(v) | ExprKind::Block(v) | ExprKind::ArrayLit(v) => v.iter().for_each(go),
+        ExprKind::MapLit(v) => v.iter().for_each(|(a, b)| {
+            walk(a, f);
+            walk(b, f);
+        }),
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Assign { lhs, rhs, .. } => {
+            go(lhs);
+            go(rhs);
+        }
+        ExprKind::Unary { rhs, .. } => go(rhs),
+        ExprKind::Field { base, .. } => go(base),
+        ExprKind::Index { base, index } => {
+            go(base);
+            go(index);
+        }
+        ExprKind::Call { callee, args } => {
+            go(callee);
+            args.iter().for_each(go);
+        }
+        ExprKind::Ascribe { expr, .. } => go(expr),
+        ExprKind::Discard(Some(x)) => go(x),
+        ExprKind::If(i) => {
+            for (c, b) in &i.arms {
+                go(c);
+                go(b);
+            }
+            if let Some(x) = &i.els {
+                go(x);
+            }
+        }
+        ExprKind::Loop(b) => go(b),
+        ExprKind::While { cond, body } => {
+            go(cond);
+            go(body);
+        }
+        ExprKind::NFor { start, count, body, .. } => {
+            go(start);
+            go(count);
+            go(body);
+        }
+        ExprKind::Switch { subject, arms } => {
+            go(subject);
+            for a in arms {
+                go(&a.value);
+            }
+        }
+        ExprKind::Escape(x) => {
+            if let Some(Operand::Value(v)) = &x.operand {
+                go(v);
+            }
+        }
+        ExprKind::Decl(d) => {
+            for b in &d.bindings {
+                if let BindInit::Value(v) = &b.init {
+                    go(v);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+impl Steel {
+    /// 呼び出し位置で、フレームを越えてきた脱出を続ける（C-70）。
+    ///
+    /// 残りの段数は実行時にしか分からないが、**囲む段の数は組み立て時に分かる**ので、
+    /// 動く段数の `$repeat` と同じく `switch` で振り分けられる。
+    fn resume_outward(&mut self, n: &str, payload: Val, span: Span) -> R<()> {
+        let here = self.stages.len();
+        let go = self.label("out.go");
+        let after = self.label("out.after");
+        let zero = self.tmp();
+        self.emit(&format!("{zero} = icmp sgt i64 {n}, 0"));
+        self.cbr(&zero, &go, &after);
+        self.place(&go);
+        if here == 0 {
+            // **越えた先が無い。** 黙って止まるより落とす（C-34）
+            self.emit("call void @vaak.fail()");
+            self.emit("unreachable");
+            self.done = true;
+            self.place(&after);
+            return Ok(());
+        }
+        let over = self.label("out.over");
+        let mut arms = Vec::new();
+        let mut labels = Vec::new();
+        for k in 1..=here {
+            let l = self.label("out.k");
+            arms.push(format!("i64 {k}, label %{l}"));
+            labels.push((k, l));
+        }
+        self.emit(&format!("switch i64 {n}, label %{over} [ {} ]", arms.join(" ")));
+        self.done = true;
+        for (k, l) in labels {
+            self.place(&l);
+            self.leave(k, Some(payload.clone()))?;
+        }
+        self.place(&over);
+        self.emit("call void @vaak.fail()");
+        self.emit("unreachable");
+        self.done = true;
+        self.place(&after);
+        let _ = span;
+        Ok(())
     }
 }

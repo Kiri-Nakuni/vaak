@@ -703,3 +703,22 @@ t!(入れ子のループはそれぞれ持つ,
 t!(遅延が二つあっても混ざらない,
    "var s := 0; nfor (i, 0, 6) { if (i == 1) continue break 100 fi;
     if (i == 3) continue break 200 fi; s += 1; }");
+
+// ── `outward`：フレームを越える脱出（C-34 / C-70） ─────────────────────────
+
+t!(越えて一段抜ける, "fn f () { break outward break 1; } -> i64; {{ f() }}");
+t!(越えた先で二段抜ける,
+   "fn f () { break outward break break 3; } -> i64; {{ { f() }; 9 }}");
+t!(越えても外の領域は残る,
+   "fn f () { break outward break 5; } -> i64; {{ { f() }; 9 }}");
+t!(深いところから越える,
+   "fn f () { { break break outward break 7; }; 0 } -> i64; {{ f() }}");
+t!(条件つきで越える,
+   "fn f (a : i64) { if (a > 2) break outward break a fi; a } -> i64;
+    {{ f(1) + f(5) }}");
+t!(越えない呼び出しは普通に返る, "fn f (a : i64) { a * 2 } -> i64; f(21)");
+t!(越える関数でも越えない道は普通,
+   "fn f (a : i64) { if (a > 100) break outward break a fi; a * 2 } -> i64;
+    {{ f(21) }}");
+t!(越えた値を使う,
+   "fn f () { break outward break 6; } -> i64; {{ f() }} * 7");

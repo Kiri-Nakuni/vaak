@@ -2906,20 +2906,32 @@ impl<'a> Vm<'a> {
             }
 
             // フレーム。**脱出はここで止まる。越えるには `outward` が要る**（C-34）
-            if esc.stages > 1 {
+            // **越えるなら、積み荷を持ったまま越える。**
+            //
+            // 値にしてしまうと、残りの段送りが空手になる——
+            // `break outward break break 3` の 3 が消えていた（参照実装は持ったまま渡す）
+            let crossing = if esc.stages > 1 {
                 if esc.outward & 1 == 0 {
                     return self.err("フレームを越える脱出", esc.span);
                 }
                 esc.stages -= 1;
                 esc.outward >>= 1;
-            }
-            let out = match esc.kind {
-                // **上限まで抜けるのは許される**——関数から返る（C-66）
-                EKind::Break => match esc.payload.take() {
-                    Some(v) => Slot::Value(v),
-                    None => Slot::Paradox(esc.span),
-                },
-                EKind::Continue => return self.err("再開できるものが無い", esc.span),
+                true
+            } else {
+                false
+            };
+            let out = if crossing {
+                // 越える分は積み荷を消費しない。枠だけ揃える
+                Slot::Paradox(esc.span)
+            } else {
+                match esc.kind {
+                    // **上限まで抜けるのは許される**——関数から返る（C-66）
+                    EKind::Break => match esc.payload.take() {
+                        Some(v) => Slot::Value(v),
+                        None => Slot::Paradox(esc.span),
+                    },
+                    EKind::Continue => return self.err("再開できるものが無い", esc.span),
+                }
             };
             let f = self.frames.pop().unwrap();
             self.stack.truncate(f.stack_base);
@@ -2927,14 +2939,17 @@ impl<'a> Vm<'a> {
             if self.frames.is_empty() {
                 return Ok(Some(out));
             }
-            self.stack.push(out);
-            if let Some(c) = f.self_cell {
-                if let Some(v) = self.arena.get(c).cloned() {
-                    self.stack.push(Slot::Value(v));
+            if !crossing {
+                self.stack.push(out);
+                if let Some(c) = f.self_cell {
+                    if let Some(v) = self.arena.get(c).cloned() {
+                        self.stack.push(Slot::Value(v));
+                    }
                 }
+                return Ok(None);
             }
             // `outward` で越えた先で、まだ段が残っていれば続ける
-            if esc.stages > 1 {
+            if esc.stages >= 1 {
                 continue;
             }
             return Ok(None);
