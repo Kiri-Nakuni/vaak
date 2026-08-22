@@ -314,6 +314,20 @@ fn s16_括弧の領域は自分の底を持つ() {
     同じ("var c : u8 := 50; 1 + ((c - 48) -> i64)");
 }
 
+#[test]
+fn 構造体の除去子は脱出側で型を失わない() {
+    同じ(
+        "flow $return = $repeat(break, getdepth());
+         struct P { let x : i64 := 42; };
+         fn maybe (yes : u1) { if (yes) new P ( ) fi } -> P;
+         fn use (yes : u1) {
+             let p := maybe(yes) ?? $return;
+             p.x
+         } -> i64;
+         use(true) ?? 0",
+    );
+}
+
 /// `hash` は木を辿る実装と VM で同じでなければならない（C-98）。
 #[test]
 fn hashも二つの実装で一致する() {
