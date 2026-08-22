@@ -2318,7 +2318,7 @@ impl Interp {
             }
         }
         // ---- 読むだけのもの ----
-        if matches!(name, "len" | "has" | "keys" | "utf8_len" | "utf8_at" | "utf8_valid") {
+        if is_num_method(name) || matches!(name, "len" | "has" | "keys" | "utf8_len" | "utf8_at" | "utf8_valid") {
             let b = match self.need_value(base)? {
                 Ok(v) => v,
                 Err(x) => return Ok(Eval::Escape(x)),
@@ -2388,7 +2388,26 @@ pub fn read_method_pub(b: &Value, name: &str, args: &[Value], span: Span) -> R<E
     read_method(b, name, args, span)
 }
 
+/// 数に効くメンバ関数か（S-23）。**集合体の名前と混ぜない。**
+pub fn is_num_method(name: &str) -> bool {
+    matches!(
+        name,
+        "abs" | "min" | "max"
+            | "count_ones" | "leading_zeros" | "trailing_zeros"
+            | "reverse_bits" | "swap_bytes"
+            | "rotate_left" | "rotate_right"
+            | "saturating_add" | "saturating_sub" | "saturating_mul"
+            | "sqrt" | "floor" | "ceil" | "trunc" | "round"
+            | "copysign" | "mul_add"
+            | "exp" | "ln" | "log2" | "log10" | "pow"
+            | "sin" | "cos" | "tan"
+    )
+}
+
 fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    if is_num_method(name) {
+        return num_method(b, name, args, span);
+    }
     Ok(match (name, b) {
         ("len", Value::Array(ar)) => Eval::Value(Value::I64(ar.items.len() as i64)),
         ("len", Value::Str(s)) => Eval::Value(Value::I64(s.len() as i64)),
@@ -2614,4 +2633,188 @@ fn is_num_type(t: &ValueType) -> bool {
             | ValueType::F32
             | ValueType::F64
     )
+}
+
+// ================= 数のメンバ関数（S-23） =================
+//
+// **LLVM の命令にあるものを、名前で言えるようにする。**
+//
+// 名前は C-7 に倣って**何をするかを言う**——`popcount` ではなく `count_ones`、
+// `fma` ではなく `mul_add`。
+//
+// 非有限になれば **paradox**（C-84）。整数の溢れは**折り返す**（C-21）——
+// 止めたいなら `saturating_*` と書く。**どちらが起きたか名前で分かる。**
+
+/// 引数を受け手と同じ型に揃える。**暗黙変換は無い**（C-21）ので、
+/// 検査器が既に揃えている。ここは値を取り出すだけである。
+fn same_int(v: Option<&Value>) -> Option<i128> {
+    v?.as_int()
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::F32(x) => Some(*x as f64),
+        Value::F64(x) => Some(*x),
+        _ => None,
+    }
+}
+
+/// 受け手と同じ型で返す。**非有限なら `None`**（C-84）。
+fn like(recv: &Value, x: f64) -> Option<Value> {
+    match recv {
+        Value::F32(_) => {
+            let y = x as f32;
+            y.is_finite().then_some(Value::F64(y as f64)).map(|_| Value::F32(y))
+        }
+        _ => x.is_finite().then_some(Value::F64(x)),
+    }
+}
+
+
+/// 受け手の幅と符号。
+fn width_signed(v: &Value) -> Option<(u32, bool)> {
+    Some(match v {
+        Value::U1(_) => (1, false),
+        Value::U8(_) => (8, false),
+        Value::U16(_) => (16, false),
+        Value::U32(_) => (32, false),
+        Value::I32(_) => (32, true),
+        Value::I64(_) => (64, true),
+        _ => return None,
+    })
+}
+
+fn num_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    let paradox = Eval::Paradox(span);
+
+    // ---- 浮動小数 ----
+    if let Some(x) = as_f64(b) {
+        let arg = |i: usize| args.get(i).and_then(as_f64);
+        let out: Option<f64> = match name {
+            "abs" => Some(x.abs()),
+            "sqrt" => Some(x.sqrt()),
+            "floor" => Some(x.floor()),
+            "ceil" => Some(x.ceil()),
+            "trunc" => Some(x.trunc()),
+            // **半分は零から遠い方へ。** Rust の `round` と同じ
+            "round" => Some(x.round()),
+            "exp" => Some(x.exp()),
+            "ln" => Some(x.ln()),
+            "log2" => Some(x.log2()),
+            "log10" => Some(x.log10()),
+            "sin" => Some(x.sin()),
+            "cos" => Some(x.cos()),
+            "tan" => Some(x.tan()),
+            "min" => arg(0).map(|y| x.min(y)),
+            "max" => arg(0).map(|y| x.max(y)),
+            "copysign" => arg(0).map(|y| x.copysign(y)),
+            "pow" => arg(0).map(|y| x.powf(y)),
+            // **一度しか丸めない**（`a * b + c` を融合する）
+            "mul_add" => match (arg(0), arg(1)) {
+                (Some(y), Some(z)) => Some(x.mul_add(y, z)),
+                _ => None,
+            },
+            _ => return rt(format!("`{name}` は浮動小数に使えない"), span),
+        };
+        let Some(v) = out else {
+            return rt(format!("`{name}` の引数が足りない"), span);
+        };
+        // **非有限は値にしない**（C-84）
+        return Ok(match like(b, v) {
+            Some(r) => Eval::Value(r),
+            None => paradox,
+        });
+    }
+
+    // ---- 整数 ----
+    let Some(x) = b.as_int() else {
+        return rt(format!("`{name}` は数にしか使えない"), span);
+    };
+    let Some((w, sg)) = width_signed(b) else {
+        return rt(format!("`{name}` は数にしか使えない"), span);
+    };
+    let mask: i128 = if w >= 128 { -1 } else { (1i128 << w) - 1 };
+    let raw = (x & mask) as u128;
+
+    let out: i128 = match name {
+        // **折り返す**（C-21）。`i32` の最小値は自分自身になる
+        "abs" => {
+            if sg && x < 0 {
+                -x
+            } else {
+                x
+            }
+        }
+        "min" => {
+            let Some(y) = same_int(args.first()) else {
+                return rt("`min` は値を一つ取る", span);
+            };
+            x.min(y)
+        }
+        "max" => {
+            let Some(y) = same_int(args.first()) else {
+                return rt("`max` は値を一つ取る", span);
+            };
+            x.max(y)
+        }
+        // **数える系は `i64` を返す。** 値ではなく個数である
+        "count_ones" => return Ok(Eval::Value(Value::I64(raw.count_ones() as i64))),
+        "leading_zeros" => {
+            let z = raw.leading_zeros() as i64 - (128 - w as i64);
+            return Ok(Eval::Value(Value::I64(z)));
+        }
+        "trailing_zeros" => {
+            let z = if raw == 0 { w as i64 } else { raw.trailing_zeros() as i64 };
+            return Ok(Eval::Value(Value::I64(z)));
+        }
+        "reverse_bits" => {
+            let mut r: u128 = 0;
+            for i in 0..w {
+                if raw >> i & 1 != 0 {
+                    r |= 1 << (w - 1 - i);
+                }
+            }
+            r as i128
+        }
+        "swap_bytes" => {
+            if w % 8 != 0 {
+                return rt("`swap_bytes` は 8 の倍数の幅にしか使えない", span);
+            }
+            let n = w / 8;
+            let mut r: u128 = 0;
+            for i in 0..n {
+                r |= (raw >> (i * 8) & 0xff) << ((n - 1 - i) * 8);
+            }
+            r as i128
+        }
+        // **桁数は別の型でよい**（C-21）。幅で割った余りだけ回す
+        "rotate_left" | "rotate_right" => {
+            let Some(n) = same_int(args.first()) else {
+                return rt(format!("`{name}` は桁数を一つ取る"), span);
+            };
+            let n = n.rem_euclid(w as i128) as u32;
+            let n = if name == "rotate_right" { (w - n) % w } else { n };
+            let r = if n == 0 { raw } else { (raw << n | raw >> (w - n)) & mask as u128 };
+            r as i128
+        }
+        // **折り返さずに止まる。** 折り返してほしいなら `+` と書く
+        "saturating_add" | "saturating_sub" | "saturating_mul" => {
+            let Some(y) = same_int(args.first()) else {
+                return rt(format!("`{name}` は値を一つ取る"), span);
+            };
+            let z = match name {
+                "saturating_add" => x + y,
+                "saturating_sub" => x - y,
+                _ => x * y,
+            };
+            let (lo, hi) = if sg {
+                (-(1i128 << (w - 1)), (1i128 << (w - 1)) - 1)
+            } else {
+                (0, mask)
+            };
+            return Ok(Eval::Value(wrap_like(b, z.clamp(lo, hi))));
+        }
+        _ => return rt(format!("`{name}` は整数に使えない"), span),
+    };
+    Ok(Eval::Value(wrap_like(b, out)))
 }

@@ -1323,10 +1323,12 @@ impl Steel {
         match &e.kind {
             // **リテラルは置かれた場所の型を受け取る**（C-21 / C-100）
             E::Int(t) => {
-                let v: i128 = t.parse().map_err(|_| SteelError {
-                    msg: "整数として読めない".into(),
-                    span: e.span,
-                })?;
+                // **参照実装と同じ読み方をする**（S-5）。
+                // `0x` `0b` `0o` と `_` を自前で解くと、そこだけ違う言語になる
+                let v: i128 = match crate::interp::parse_int_pub(t, e.span) {
+                    Ok(v) => v.as_int().unwrap_or(0),
+                    Err(x) => return err(x.msg, e.span),
+                };
                 let ty = match &want {
                     Some(w) if width(w).is_some() => w.clone(),
                     _ => ValueType::I64,
@@ -1342,10 +1344,13 @@ impl Steel {
             })),
 
             E::Float(t) => {
-                let v: f64 = t.parse().map_err(|_| SteelError {
-                    msg: "浮動小数として読めない".into(),
-                    span: e.span,
-                })?;
+                let v: f64 = match crate::interp::parse_float_pub(t, e.span) {
+                    Ok(crate::value::Value::F64(v)) => v,
+                    Ok(crate::value::Value::F32(v)) => v as f64,
+                    Ok(_) | Err(_) => {
+                        return err("浮動小数として読めない", e.span);
+                    }
+                };
                 // **狭めるのは既存の道を通す。** 直に作ると有限性の検査を飛ばす（C-84）
                 let base = Val {
                     ok: "true".into(),
@@ -3112,6 +3117,10 @@ impl Steel {
         if let ExprKind::Field { base, name } = &callee.kind {
             let b = self.expr(base)?;
             let Some(b) = b else { return err("受け手に値が無い", base.span) };
+            // **数のメンバ関数**（S-23）。LLVM の命令へ落ちる
+            if crate::interp::is_num_method(name) {
+                return self.num_method(b, name, args, span).map(Some);
+            }
             if !is_heap(&b.ty) {
                 return err("STEEL はまだ集合体のメンバ関数しか扱えない", span);
             }
@@ -4010,5 +4019,239 @@ fn type_tag(t: &ValueType) -> String {
         ValueType::Hash(k, v) => format!("h{}_{}", type_tag(k), type_tag(v)),
         ValueType::Named(n) => format!("n{n}"),
         other => ity(other).replace('*', "p"),
+    }
+}
+
+// ================= 数のメンバ関数（S-23） =================
+
+impl Steel {
+    /// 組み込みを一度だけ宣言する。**既存の道と同じ形で入れる**——
+    /// 別々に溜めると、同じ宣言が二度出て clang が断る
+    fn need(&mut self, decl: &str) {
+        self.head_global(decl);
+    }
+
+    /// LLVM の組み込みを呼ぶ。
+    fn intr(&mut self, name: &str, ret: &str, args: &[(String, String)]) -> String {
+        let sig: Vec<String> = args.iter().map(|(t, _)| t.clone()).collect();
+        self.need(&format!("declare {ret} {name}({})", sig.join(", ")));
+        let t = self.tmp();
+        let a: Vec<String> = args.iter().map(|(t, v)| format!("{t} {v}")).collect();
+        self.emit(&format!("{t} = call {ret} {name}({})", a.join(", ")));
+        t
+    }
+
+    fn num_method(&mut self, b: Val, name: &str, args: &[Expr], span: Span) -> R<Val> {
+        // 引数を先に評価する。**左から右**（C-79）
+        let mut av = Vec::new();
+        for a in args {
+            // **引数は受け手と同じ型**（C-21）。桁数だけは `i64`
+            self.want = Some(if matches!(name, "rotate_left" | "rotate_right") {
+                ValueType::I64
+            } else {
+                b.ty.clone()
+            });
+            let v = self.expr(a)?;
+            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            av.push(v);
+        }
+        let ty = b.ty.clone();
+        let mut ok = b.ok.clone();
+        for v in &av {
+            ok = self.both_ok(&ok.clone(), &v.ok);
+        }
+
+        if is_float(&ty) {
+            return self.float_method(b, &av, name, ok, span);
+        }
+        let Some(w) = width(&ty) else {
+            return err("数にしか使えない", span);
+        };
+        self.int_method(b, &av, name, w, ok, span)
+    }
+
+    fn float_method(&mut self, b: Val, av: &[Val], name: &str, ok: String, span: Span) -> R<Val> {
+        let t = ity(&b.ty);
+        let sfx = match b.ty {
+            ValueType::F32 => "f32",
+            ValueType::F80 => "f80",
+            _ => "f64",
+        };
+        let one = |n: &str| format!("@llvm.{n}.{sfx}");
+        let x = (t.clone(), b.v.clone());
+        let a0 = av.first().map(|v| (t.clone(), v.v.clone()));
+        let a1 = av.get(1).map(|v| (t.clone(), v.v.clone()));
+        let need2 = |a: &Option<(String, String)>| -> R<(String, String)> {
+            a.clone().ok_or(SteelError { msg: format!("`{name}` の引数が足りない"), span })
+        };
+
+        let raw = match name {
+            "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "round" | "exp" | "log2"
+            | "log10" | "sin" | "cos" | "tan" => {
+                let n = if name == "abs" { "fabs".to_string() } else { name.to_string() };
+                self.intr(&one(&n), &t, &[x])
+            }
+            // `ln` は LLVM では `log` である
+            "ln" => self.intr(&one("log"), &t, &[x]),
+            "min" => {
+                let y = need2(&a0)?;
+                self.intr(&one("minnum"), &t, &[x, y])
+            }
+            "max" => {
+                let y = need2(&a0)?;
+                self.intr(&one("maxnum"), &t, &[x, y])
+            }
+            "copysign" => {
+                let y = need2(&a0)?;
+                self.intr(&one("copysign"), &t, &[x, y])
+            }
+            "pow" => {
+                let y = need2(&a0)?;
+                self.intr(&one("pow"), &t, &[x, y])
+            }
+            // **一度しか丸めない**
+            "mul_add" => {
+                let y = need2(&a0)?;
+                let z = need2(&a1)?;
+                self.intr(&one("fma"), &t, &[x, y, z])
+            }
+            _ => return err(format!("`{name}` は浮動小数に使えない"), span),
+        };
+        // **非有限は値にしない**（C-84）
+        let fin = self.finite(&raw, &b.ty.clone());
+        let ok = self.both_ok(&ok, &fin);
+        Ok(Val { ok, v: raw, ty: b.ty })
+    }
+
+    fn int_method(
+        &mut self,
+        b: Val,
+        av: &[Val],
+        name: &str,
+        w: u32,
+        ok: String,
+        span: Span,
+    ) -> R<Val> {
+        let t = format!("i{w}");
+        let sg = signed(&b.ty);
+        let x = (t.clone(), b.v.clone());
+        let y = || -> R<(String, String)> {
+            av.first()
+                .map(|v| (t.clone(), v.v.clone()))
+                .ok_or(SteelError { msg: format!("`{name}` は値を一つ取る"), span })
+        };
+        // 数える系は `i64` を返す
+        let count = |me: &mut Self, v: String| -> Val {
+            let out = if w == 64 {
+                v
+            } else {
+                let z = me.tmp();
+                me.emit(&format!("{z} = zext i{w} {v} to i64"));
+                z
+            };
+            Val { ok: ok.clone(), v: out, ty: ValueType::I64 }
+        };
+
+        let raw = match name {
+            // **`i1 false` は「最小値でも poison にしない」。** 折り返す（C-21）
+            "abs" if sg => self.intr(
+                &format!("@llvm.abs.i{w}"),
+                &t,
+                &[x, ("i1".into(), "false".into())],
+            ),
+            "abs" => b.v.clone(),
+            "min" => {
+                let n = if sg { "smin" } else { "umin" };
+                self.intr(&format!("@llvm.{n}.i{w}"), &t, &[x, y()?])
+            }
+            "max" => {
+                let n = if sg { "smax" } else { "umax" };
+                self.intr(&format!("@llvm.{n}.i{w}"), &t, &[x, y()?])
+            }
+            "count_ones" => {
+                let v = self.intr(&format!("@llvm.ctpop.i{w}"), &t, &[x]);
+                return Ok(count(self, v));
+            }
+            "leading_zeros" => {
+                let v = self.intr(
+                    &format!("@llvm.ctlz.i{w}"),
+                    &t,
+                    &[x, ("i1".into(), "false".into())],
+                );
+                return Ok(count(self, v));
+            }
+            "trailing_zeros" => {
+                let v = self.intr(
+                    &format!("@llvm.cttz.i{w}"),
+                    &t,
+                    &[x, ("i1".into(), "false".into())],
+                );
+                return Ok(count(self, v));
+            }
+            "reverse_bits" => self.intr(&format!("@llvm.bitreverse.i{w}"), &t, &[x]),
+            "swap_bytes" => {
+                if w % 8 != 0 {
+                    return err("`swap_bytes` は 8 の倍数の幅にしか使えない", span);
+                }
+                // **一バイトなら何も起きない。** LLVM の `bswap` は 16 ビット以上しか取らない
+                if w == 8 {
+                    b.v.clone()
+                } else {
+                    self.intr(&format!("@llvm.bswap.i{w}"), &t, &[x])
+                }
+            }
+            // **`fshl` / `fshr` は幅で割った余りだけ回す。** 自分で丸めなくてよい
+            "rotate_left" | "rotate_right" => {
+                let n = av
+                    .first()
+                    .ok_or(SteelError { msg: format!("`{name}` は桁数を一つ取る"), span })?;
+                let nn = self.conv(&n.v.clone(), &n.ty.clone(), &b.ty.clone());
+                let f = if name == "rotate_left" { "fshl" } else { "fshr" };
+                self.intr(
+                    &format!("@llvm.{f}.i{w}"),
+                    &t,
+                    &[x.clone(), x, (t.clone(), nn)],
+                )
+            }
+            "saturating_add" | "saturating_sub" => {
+                let op = if name == "saturating_add" { "add" } else { "sub" };
+                let n = if sg { "s" } else { "u" };
+                self.intr(&format!("@llvm.{n}{op}.sat.i{w}"), &t, &[x, y()?])
+            }
+            // **掛け算の飽和は組み込みが無い。** 倍の幅で掛けてから挟む
+            "saturating_mul" => {
+                let d = w * 2;
+                let dt = format!("i{d}");
+                let ext = if sg { "sext" } else { "zext" };
+                let (_, yv) = y()?;
+                let xa = self.tmp();
+                self.emit(&format!("{xa} = {ext} i{w} {} to {dt}", b.v));
+                let ya = self.tmp();
+                self.emit(&format!("{ya} = {ext} i{w} {yv} to {dt}"));
+                let m = self.tmp();
+                self.emit(&format!("{m} = mul {dt} {xa}, {ya}"));
+                let (lo, hi) = if sg {
+                    (
+                        format!("-{}", 1i128 << (w - 1)),
+                        format!("{}", (1i128 << (w - 1)) - 1),
+                    )
+                } else {
+                    ("0".to_string(), format!("{}", (1i128 << w) - 1))
+                };
+                let cmin = if sg { "smax" } else { "umax" };
+                let cmax = if sg { "smin" } else { "umin" };
+                self.need(&format!("declare {dt} @llvm.{cmin}.{dt}({dt}, {dt})"));
+                self.need(&format!("declare {dt} @llvm.{cmax}.{dt}({dt}, {dt})"));
+                let c1 = self.tmp();
+                self.emit(&format!("{c1} = call {dt} @llvm.{cmin}.{dt}({dt} {m}, {dt} {lo})"));
+                let c2 = self.tmp();
+                self.emit(&format!("{c2} = call {dt} @llvm.{cmax}.{dt}({dt} {c1}, {dt} {hi})"));
+                let out = self.tmp();
+                self.emit(&format!("{out} = trunc {dt} {c2} to i{w}"));
+                out
+            }
+            _ => return err(format!("`{name}` は整数に使えない"), span),
+        };
+        Ok(Val { ok, v: raw, ty: b.ty })
     }
 }

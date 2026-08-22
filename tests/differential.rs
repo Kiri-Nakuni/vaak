@@ -464,3 +464,73 @@ fn 文脈の型は演算の中まで届く() {
     同じ("var x : i64 := 1 << 64; x");
     同じ("var x : i64 := 0 - 8; x := x >> 100; x");
 }
+
+/// 数のメンバ関数（S-23）。**LLVM の命令にあるものを名前で言える。**
+#[test]
+fn 数のメンバ関数() {
+    // 絶対値は**折り返す**（C-21）
+    同じ("var x : i64 := 0 - 5; x.abs()");
+    同じ("var x : i32 := 0 - 2147483648; x.abs()");
+    同じ("var x : u8 := 200; x.abs()");
+    同じ("var a : i64 := 5; a.min(3)");
+    同じ("var a : i64 := 5; a.max(3)");
+    同じ("var a : u8 := 5; a.min(200)");
+    // 数える系は **`i64` を返す**（値ではなく個数）
+    同じ("var x : u8 := 0b1011; x.count_ones()");
+    同じ("var x : i64 := 0; x.count_ones()");
+    同じ("var x : u8 := 0b00010000; x.leading_zeros()");
+    同じ("var x : u8 := 0; x.leading_zeros()");
+    同じ("var x : u8 := 0b00010000; x.trailing_zeros()");
+    同じ("var x : u8 := 0; x.trailing_zeros()");
+    同じ("var x : i64 := 1; x.leading_zeros()");
+    同じ("var x : u8 := 0b11010000; x.reverse_bits()");
+    同じ("var x : u16 := 0x1234; x.swap_bytes()");
+    同じ("var x : i64 := 1; x.swap_bytes()");
+    // 回すのは幅で割った余りだけ
+    同じ("var x : u8 := 1; x.rotate_left(1)");
+    同じ("var x : u8 := 1; x.rotate_left(8)");
+    同じ("var x : u8 := 1; x.rotate_left(9)");
+    同じ("var x : u8 := 1; x.rotate_right(1)");
+    同じ("var x : u8 := 0b10000000; x.rotate_left(1)");
+    // **折り返すか止まるかが名前で分かる**
+    同じ("var x : u8 := 250; x.saturating_add(10)");
+    同じ("var x : u8 := 250; x + 10");
+    同じ("var x : u8 := 5; x.saturating_sub(10)");
+    同じ("var x : i32 := 100000; x.saturating_mul(100000)");
+    同じ("var x : i32 := 0 - 100000; x.saturating_mul(100000)");
+    同じ("var x : u8 := 20; x.saturating_mul(20)");
+    // 浮動小数。**非有限は paradox**（C-84）
+    同じ("var x : f64 := 4.0; x.sqrt()");
+    同じ("var x : f64 := 0.0 - 1.0; x.sqrt()");
+    同じ("var x : f64 := 0.0 - 1.0; (x.sqrt() ?? 0.0) > 0.0 - 1.0");
+    同じ("var x : f64 := 0.0 - 2.5; x.abs()");
+    同じ("var x : f64 := 2.5; x.floor()");
+    同じ("var x : f64 := 2.5; x.ceil()");
+    同じ("var x : f64 := 0.0 - 2.5; x.trunc()");
+    同じ("var x : f64 := 2.5; x.round()");
+    同じ("var x : f64 := 1.0; x.min(2.0)");
+    同じ("var x : f64 := 1.0; x.max(2.0)");
+    同じ("var x : f64 := 3.0; x.copysign(0.0 - 1.0)");
+    同じ("var x : f64 := 2.0; x.mul_add(3.0, 1.0)");
+    同じ("var x : f64 := 2.0; x.pow(10.0)");
+    同じ("var x : f64 := 0.0; x.ln()");
+    同じ("var x : f64 := 8.0; x.log2()");
+    同じ("var x : f64 := 1000.0; x.log10()");
+    同じ("var x : f64 := 0.0; x.exp()");
+    同じ("var x : f64 := 0.0; x.sin()");
+    同じ("var x : f64 := 0.0; x.cos()");
+    // f32 でも同じ形
+    同じ("var x : f32 := 4.0; x.sqrt()");
+    同じ("var x : f32 := 0.0 - 2.5; x.abs()");
+}
+
+/// 表記の読み方は**三実装で同じ**でなければならない。
+#[test]
+fn 十進以外の表記() {
+    同じ("0b1011");
+    同じ("0xff");
+    同じ("0o777");
+    同じ("1_000");
+    同じ("0xFF_FF");
+    同じ("var x : u8 := 0b1111_0000; x");
+}
