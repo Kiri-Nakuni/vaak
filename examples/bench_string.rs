@@ -1,7 +1,7 @@
 //! pure Vaak 文字列ライブラリの探索費用を測る。
 //!
-//! 構文解析と VM の組み立ては計時外。時間は最小値で比べ、通常試験には
-//! 閾値を置かない。末尾にだけ `z` を置き、必ず入力全体を走査させる。
+//! 測定対象の構文解析と VM の組み立ては計時外。時間は最小値で比べ、通常試験
+//! には閾値を置かない。末尾にだけ `z` を置き、必ず入力全体を走査させる。
 
 use std::time::{Duration, Instant};
 
@@ -137,7 +137,7 @@ fn main() {
     // 大入力で測定時間が伸びすぎない回数にする。
     let sizes = [(4 * 1024, 4_i64), (32 * 1024, 1_i64)];
 
-    println!("探索（構文解析・VM 組み立てを除く最小値）");
+    println!("探索（対象の構文解析・VM 組み立てを除く最小値）");
     println!("engine bytes kind       ns/search   ns/candidate");
     for engine in [Engine::Interp, Engine::Vm] {
         for (bytes, calls) in sizes {

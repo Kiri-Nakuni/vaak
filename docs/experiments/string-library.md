@@ -12,7 +12,8 @@ cargo run --release --example bench_string
 
 ## 測り方
 
-- 構文解析とVMの組み立ては計時外。
+- 測定対象ソースの構文解析とVMの組み立ては計時外。参照実装は毎回新しい
+  `Interp`を作るため、その起動費用は含む。VMの`Runner`は再利用する。
 - 各計測前に一度予熱し、その後の複数回の最小値を採る。
 - 入力は末尾だけを`z`にした`a`列で、`str_find_byte(source, 122, 0)`と
   `str_find(source, "z")`に同じ全体走査をさせる。
