@@ -7,7 +7,11 @@
 //! **違うのは「どう辿るか」だけ。** 意味論を二度実装しない（C-61 の教訓）。
 
 use crate::ast::*;
-use crate::interp::{arith_pub, read_method_pub, try_coerce_pub, write_method_pub, EKind};
+use crate::interp::{
+    arith_pub, place_cell, place_index_step, place_len, place_read, place_read_checked,
+    place_write, push_step, read_method_pub, try_coerce_pub, write_method_pub, EKind, Place,
+    PlaceReadError, PlaceWriteError, Step,
+};
 use crate::span::Span;
 use crate::value::{Arena, CellId, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -27,6 +31,8 @@ pub enum Op {
     Ref(u16),
     /// 名前の指すセルに書く（上を消費）。
     Store(u16),
+    /// 名前の複合代入。右辺を先に評価し、その後の現在値と畳む（C-79 (6)）。
+    Update(u16, BinOp, Span),
     /// コンパイラが既に型を揃えた値をそのまま書く。値引数の入口だけで使う。
     StoreExact(u16),
     /// 名前を別の名前のセルへ向ける。**値は動かさない**（C-20）。
@@ -76,9 +82,25 @@ pub enum Op {
     LoadField(u16, u32, Span),
     /// 名前の長さを一命令で。集合体を写さない。
     LoadLen(u16, Span),
-    /// 名前への添字に**一命令で書く**。**`[]` はアクセスであり複製しない**（C-20）——
-    /// 集合体をスタックへ写して書き戻す、ということをしない。
-    StoreIndex(u16, Span),
+    /// 名前への添字に**一命令で書く**。添字は右辺の下に解決済み。
+    /// `u32` は host_touched 用の定数表番号。
+    StoreIndex(u16, u32, Span),
+    /// 名前への添字の複合代入。右辺の作用後の要素を読んで畳む。
+    UpdateIndex(u16, u32, BinOp, Span),
+    /// 代入左辺の根を、実セルまで解決して積む。
+    PlaceRoot(u16, Span),
+    /// 解決済み経路へ欄を足す。
+    PlaceField(u32, Span),
+    /// 上の添字を一度だけ取り込み、解決済み経路へ足す。
+    PlaceIndex(Span),
+    /// 経路の末端だけを読む。bool は「欠損なら paradox」の添字終端。
+    LoadPlace(u16, u32, bool, Span),
+    /// 経路の末端の長さだけを読む。集合体そのものは写さない。
+    LoadPlaceLen(u16, u32, Span),
+    /// 解決済み経路へ直接書く。`u32` は host_touched 用の定数表番号。
+    StorePlace(u16, u32, Span),
+    /// 右辺評価後の末端を読み、畳んで直接書く。同上。
+    UpdatePlace(u16, u32, BinOp, Span),
     /// 経路への書き込み。深さは添字・欄の列。
     SetIndex(Span),
     SetField(u32, Span),
@@ -226,8 +248,9 @@ pub fn compile_with_host(
     c.chunk = Chunk::default();
     // ホストの名前を先に枠へ。**スクリプトからは最初から見えている**
     for (n, item) in host {
-        if matches!(item, HostItem::Value(_)) {
+        if let HostItem::Value(ty) = item {
             let slot = c.slot(n);
+            c.note_type(n, Some(ty.clone()));
             c.chunk.host_slots.push(slot);
         }
     }
@@ -292,6 +315,25 @@ struct Compiler {
     want: Option<ValueType>,
     /// ホストが見せている**呼べる名前** → 番号（S-11）
     host_fns: HashMap<String, u16>,
+}
+
+/// `StorePlace` / `UpdatePlace` の添字欄で「部分読み込みにできない」を表す。
+const NO_HOST_TOUCH: u32 = u32::MAX;
+
+#[derive(Clone, Copy, Debug)]
+enum PlaceTouch {
+    /// まだ根の名前だけ。最初の `[]` ならホスト配列の一要素に絞れる。
+    Root,
+    /// 根の配列で定数の添字を一つ解決済み。
+    Index(i128),
+    /// 動く添字、または根の欄を通るので丸ごと要る。
+    Whole,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CompiledPlace {
+    root: u16,
+    touch: PlaceTouch,
 }
 
 impl Compiler {
@@ -405,6 +447,7 @@ impl Compiler {
 
         for p in &f.params {
             let s = self.slot(&p.name);
+            self.note_type(&p.name, Some(p.ty.value.clone()));
             self.chunk.params.push((s, p.ty.is_alias));
             // `const` の別名引数は呼び出し元のセル自体を凍らせる。
             // 凍結はフレームの出口で一括して解く（C-35 / C-37）。
@@ -551,6 +594,13 @@ impl Compiler {
                         return Ok(());
                     }
                 }
+                // 入れ子の経路も根を写さず、末端だけを複製する。
+                if is_place_path(e) {
+                    let place = self.compile_place(e)?;
+                    let touched = self.host_touch_const(place.touch);
+                    self.emit(Op::LoadPlace(place.root, touched, false, e.span));
+                    return Ok(());
+                }
                 self.expr(base)?;
                 self.emit(Op::NeedValue(base.span));
                 self.emit(Op::Field(n, e.span));
@@ -564,6 +614,12 @@ impl Compiler {
                         self.emit(Op::LoadIndex(slot, e.span));
                         return Ok(());
                     }
+                }
+                if is_place_path(e) {
+                    let place = self.compile_place(e)?;
+                    let touched = self.host_touch_const(place.touch);
+                    self.emit(Op::LoadPlace(place.root, touched, true, e.span));
+                    return Ok(());
                 }
                 self.expr(base)?;
                 self.emit(Op::NeedValue(base.span));
@@ -779,85 +835,59 @@ impl Compiler {
                 // **置き場の型が右辺の中まで届く**（C-100）
                 let ty = self.declared_type(n);
                 if let Some(b) = bop {
-                    self.emit(Op::Load(s));
-                    self.emit(Op::NeedValue(lhs.span));
                     self.want = ty;
                     self.expr(rhs)?;
                     self.emit(Op::NeedValue(rhs.span));
-                    self.emit(Op::Bin(b, span));
+                    // 参照実装は右辺の作用を終えてから現在値を読む。
+                    // `x += f(x)` で f が x を変えても、古い値へ戻してはならない。
+                    self.emit(Op::Update(s, b, span));
                 } else {
                     self.want = ty;
                     self.expr(rhs)?;
                     self.emit(Op::NeedValue(rhs.span));
+                    self.emit(Op::NeedValue(span));
+                    self.emit(Op::Store(s));
                 }
-                self.emit(Op::NeedValue(span));
-                self.emit(Op::Store(s));
             }
-            // 名前への添字なら一命令で書く。**複製しない**（C-20）
+            // 一段の `a[i]` は場所を heap に作らず、セルへ直接触れる。
+            // 添字はそれでも右辺より先に一度だけ評価して、値スタックに保つ。
             ExprKind::Index { base, index } if matches!(base.kind, ExprKind::Name(_)) => {
-                let ExprKind::Name(n) = &base.kind else { unreachable!() };
-                let Some(slot) = self.lookup(n) else {
-                    return self.err(format!("知らない名前 `{n}`"), base.span);
+                let ExprKind::Name(name) = &base.kind else { unreachable!() };
+                let Some(root) = self.lookup(name) else {
+                    return self.err(format!("知らない名前 `{name}`"), base.span);
                 };
-                if let Some(b) = bop {
-                    self.expr(index)?;
-                    self.emit(Op::NeedValue(index.span));
-                    self.emit(Op::LoadIndex(slot, span));
-                    self.expr(rhs)?;
-                    self.emit(Op::NeedValue(rhs.span));
-                    self.emit(Op::Bin(b, span));
-                    self.emit(Op::NeedValue(span));
-                } else {
-                    self.expr(rhs)?;
-                    self.emit(Op::NeedValue(rhs.span));
-                }
+                let ty = self.static_place_type(lhs);
                 self.expr(index)?;
                 self.emit(Op::NeedValue(index.span));
-                self.emit(Op::StoreIndex(slot, span));
+                let at = self.chunk.ops.len();
+                let touch = match const_index_before(&self.chunk, at) {
+                    Some(index) => PlaceTouch::Index(index),
+                    None => PlaceTouch::Whole,
+                };
+                let touched = self.host_touch_const(touch);
+                self.want = ty;
+                self.expr(rhs)?;
+                self.emit(Op::NeedValue(rhs.span));
+                if let Some(op) = bop {
+                    self.emit(Op::UpdateIndex(root, touched, op, span));
+                } else {
+                    self.emit(Op::StoreIndex(root, touched, span));
+                }
             }
-            ExprKind::Index { base, index } => {
-                self.expr(base)?;
-                self.emit(Op::NeedValue(base.span));
-                self.expr(index)?;
-                self.emit(Op::NeedValue(index.span));
-                // SetIndex は [値, 場, 添字] の順に積まれているものとして畳む
+            ExprKind::Index { .. } | ExprKind::Field { .. } => {
+                // 経路は左から右へ、右辺より先に一度だけ解く（C-79 (6)）。
+                // Slot::Place は CellId と各添字を保持するだけで、根の集合体を写さない。
+                let ty = self.static_place_type(lhs);
+                let place = self.compile_place(lhs)?;
+                self.want = ty;
+                self.expr(rhs)?;
+                self.emit(Op::NeedValue(rhs.span));
+                let touched = self.host_touch_const(place.touch);
                 if let Some(b) = bop {
-                    self.emit(Op::Index(span));
-                    self.expr(rhs)?;
-                    self.emit(Op::NeedValue(rhs.span));
-                    self.emit(Op::Bin(b, span));
-                    self.emit(Op::NeedValue(span));
+                    self.emit(Op::UpdatePlace(place.root, touched, b, span));
                 } else {
-                    self.stack_drop2();
-                    self.expr(rhs)?;
-                    self.emit(Op::NeedValue(rhs.span));
+                    self.emit(Op::StorePlace(place.root, touched, span));
                 }
-                self.expr(base)?;
-                self.emit(Op::NeedValue(base.span));
-                self.expr(index)?;
-                self.emit(Op::NeedValue(index.span));
-                self.emit(Op::SetIndex(span));
-                self.store_back(base)?;
-            }
-            ExprKind::Field { base, name } => {
-                let n = self.name_idx(name);
-                self.expr(base)?;
-                self.emit(Op::NeedValue(base.span));
-                if let Some(b) = bop {
-                    self.emit(Op::Field(n, span));
-                    self.expr(rhs)?;
-                    self.emit(Op::NeedValue(rhs.span));
-                    self.emit(Op::Bin(b, span));
-                    self.emit(Op::NeedValue(span));
-                } else {
-                    self.emit(Op::Pop);
-                    self.expr(rhs)?;
-                    self.emit(Op::NeedValue(rhs.span));
-                }
-                self.expr(base)?;
-                self.emit(Op::NeedValue(base.span));
-                self.emit(Op::SetField(n, span));
-                self.store_back(base)?;
             }
             _ => return self.err("代入の左辺は経路でなければならない", lhs.span),
         }
@@ -865,11 +895,75 @@ impl Compiler {
         Ok(())
     }
 
-    /// 経路の根へ書き戻す。値は自己完結しているので、根まで戻せば足りる。
-    /// `a[i] := v` で、場所を積む前に不要な二つを捨てる。
-    fn stack_drop2(&mut self) {
-        self.emit(Op::Pop);
-        self.emit(Op::Pop);
+    /// 代入左辺を実行時に解決する命令列へする。
+    /// 添字式はここで左から右へ一度だけ出力され、右辺より前に走る。
+    fn compile_place(&mut self, e: &Expr) -> Result<CompiledPlace, CompileError> {
+        match &e.kind {
+            ExprKind::Name(name) => {
+                let Some(root) = self.lookup(name) else {
+                    return self.err(format!("知らない名前 `{name}`"), e.span);
+                };
+                self.emit(Op::PlaceRoot(root, e.span));
+                Ok(CompiledPlace { root, touch: PlaceTouch::Root })
+            }
+            ExprKind::Field { base, name } => {
+                let mut place = self.compile_place(base)?;
+                let field = self.name_idx(name);
+                self.emit(Op::PlaceField(field, e.span));
+                if matches!(place.touch, PlaceTouch::Root) {
+                    place.touch = PlaceTouch::Whole;
+                }
+                Ok(place)
+            }
+            ExprKind::Index { base, index } => {
+                let mut place = self.compile_place(base)?;
+                self.expr(index)?;
+                self.emit(Op::NeedValue(index.span));
+                let at = self.emit(Op::PlaceIndex(index.span));
+                if matches!(place.touch, PlaceTouch::Root) {
+                    place.touch = match const_index_before(&self.chunk, at) {
+                        Some(index) => PlaceTouch::Index(index),
+                        None => PlaceTouch::Whole,
+                    };
+                }
+                Ok(place)
+            }
+            _ => self.err("代入の左辺は経路でなければならない", e.span),
+        }
+    }
+
+    /// host_touched のために、根の定数添字をこの塊の定数表へ控える。
+    fn host_touch_const(&mut self, touch: PlaceTouch) -> u32 {
+        match touch {
+            PlaceTouch::Index(index) => self.konst(Value::I64(index as i64)),
+            PlaceTouch::Root | PlaceTouch::Whole => NO_HOST_TOUCH,
+        }
+    }
+
+    /// 注釈から代入先の型を静的に辿る。分かるときは C-100 の文脈を右辺へ渡す。
+    fn static_place_type(&self, e: &Expr) -> Option<ValueType> {
+        match &e.kind {
+            ExprKind::Name(name) => self.declared_type(name),
+            ExprKind::Index { base, .. } => match self.static_place_type(base)? {
+                ValueType::Array(elem) => Some(*elem),
+                ValueType::Map(_, value) | ValueType::Hash(_, value) => Some(*value),
+                ValueType::Str => Some(ValueType::U8),
+                _ => None,
+            },
+            ExprKind::Field { base, name } => {
+                let ValueType::Named(owner) = self.static_place_type(base)? else {
+                    return None;
+                };
+                self.out
+                    .structs
+                    .get(&owner)?
+                    .fields
+                    .iter()
+                    .find(|field| field.name == *name)
+                    .map(|field| field.ty.value.clone())
+            }
+            _ => None,
+        }
     }
 
     fn store_back(&mut self, base: &Expr) -> Result<(), CompileError> {
@@ -912,6 +1006,12 @@ impl Compiler {
                         self.emit(Op::LoadLen(slot, span));
                         return Ok(());
                     }
+                }
+                if is_place_path(base) {
+                    let place = self.compile_place(base)?;
+                    let touched = self.host_touch_const(place.touch);
+                    self.emit(Op::LoadPlaceLen(place.root, touched, span));
+                    return Ok(());
                 }
             }
             // 組み込みの破壊的操作を名前へ掛けるなら、セルを直接変更できる。
@@ -1415,6 +1515,9 @@ enum Slot {
     Paradox(Span),
     /// 値ではない。`alias` 引数の束縛にだけ使う（C-48）。
     Cell(CellId),
+    /// 値ではない。代入左辺を一度だけ解決した実セルと経路。
+    /// Box にして通常の値スタックの幅を増やさない。
+    Place(Box<Place>),
 }
 
 impl Slot {
@@ -1424,6 +1527,7 @@ impl Slot {
             // **消費されなかった paradox**（C-46）
             Slot::Paradox(sp) => Err(RtErr { msg: "消費されなかった paradox".into(), span: sp }),
             Slot::Cell(_) => Err(RtErr { msg: "セル参照は値ではない".into(), span }),
+            Slot::Place(_) => Err(RtErr { msg: "代入先の経路は値ではない".into(), span }),
         }
     }
     fn from_eval(e: crate::interp::Eval, span: Span) -> Result<Slot, RtErr> {
@@ -1676,6 +1780,10 @@ impl Vm<'_> {
                 msg: "セル参照が呼び出しの外へ出た".into(),
                 span: Span::NONE,
             }),
+            Ok(Slot::Place(_)) => Err(RtErr {
+                msg: "代入先の経路が呼び出しの外へ出た".into(),
+                span: Span::NONE,
+            }),
             Err(e) => Err(e),
         };
         (ev, after)
@@ -1703,26 +1811,63 @@ impl Program2 {
         let top = &self.chunks[self.top as usize];
         let slot = *top.host_slots.get(i)?;
         let mut idx = Vec::new();
-        for c in &self.chunks {
-            for (k, op) in c.ops.iter().enumerate() {
-                match op {
-                    // 長さだけなら値は要らない
-                    Op::LoadLen(x, _) if *x == slot => {}
-                    // 定数の添字なら、その一個だけ
-                    Op::LoadIndex(x, _) | Op::StoreIndex(x, _) if *x == slot => {
-                        match const_index_before(c, k) {
-                            Some(n) => idx.push(n),
-                            // 動く添字。**全部要る**
-                            None => return None,
-                        }
+        // 関数は外側の名前を捕まえない（C-86）。ホスト枠は最上位だけなので、
+        // 同じ番号の関数局所枠をホスト使用と取り違えない。
+        for (k, op) in top.ops.iter().enumerate() {
+            match op {
+                // 長さだけなら値は要らない
+                Op::LoadLen(x, _) if *x == slot => {}
+                // 定数の添字なら、その一個だけ
+                Op::LoadIndex(x, _) if *x == slot => {
+                    match const_index_before(top, k) {
+                        Some(n) => idx.push(n),
+                        // 動く添字。**全部要る**
+                        None => return None,
                     }
-                    // 丸ごと読む・書く・別名にする → 全部要る
-                    Op::Load(x) | Op::Store(x) | Op::StoreExact(x) | Op::Declare(x)
-                        if *x == slot => return None,
-                    Op::LoadField(x, _, _) if *x == slot => return None,
-                    Op::Alias(a, b) if *a == slot || *b == slot => return None,
-                    _ => {}
                 }
+                Op::StoreIndex(x, touch, _) | Op::UpdateIndex(x, touch, _, _)
+                    if *x == slot =>
+                {
+                    if *touch == NO_HOST_TOUCH {
+                        return None;
+                    }
+                    match top.consts.get(*touch as usize).and_then(Value::as_int) {
+                        Some(n) => idx.push(n),
+                        None => return None,
+                    }
+                }
+                Op::StorePlace(x, touch, _) | Op::UpdatePlace(x, touch, _, _)
+                    if *x == slot =>
+                {
+                    if *touch == NO_HOST_TOUCH {
+                        return None;
+                    }
+                    match top.consts.get(*touch as usize).and_then(Value::as_int) {
+                        Some(n) => idx.push(n),
+                        None => return None,
+                    }
+                }
+                Op::LoadPlace(x, touch, _, _) | Op::LoadPlaceLen(x, touch, _)
+                    if *x == slot =>
+                {
+                    if *touch == NO_HOST_TOUCH {
+                        return None;
+                    }
+                    match top.consts.get(*touch as usize).and_then(Value::as_int) {
+                        Some(n) => idx.push(n),
+                        None => return None,
+                    }
+                }
+                // 丸ごと読む・書く・別名にする → 全部要る
+                Op::Load(x)
+                | Op::Store(x)
+                | Op::Update(x, _, _)
+                | Op::StoreExact(x)
+                | Op::Declare(x)
+                    if *x == slot => return None,
+                Op::LoadField(x, _, _) if *x == slot => return None,
+                Op::Alias(a, b) if *a == slot || *b == slot => return None,
+                _ => {}
             }
         }
         idx.sort_unstable();
@@ -1746,9 +1891,12 @@ impl Program2 {
         self.host_slot_flags(|op, s| match op {
             // 値そのものが要る
             Op::Load(x) | Op::LoadIndex(x, _) | Op::LoadLen(x, _) => *x == s,
+            Op::Update(x, _, _) => *x == s,
             Op::LoadField(x, _, _) => *x == s,
             // **枡へ書くには、まず集合体が要る**
-            Op::StoreIndex(x, _) => *x == s,
+            Op::StoreIndex(x, _, _) | Op::UpdateIndex(x, _, _, _) => *x == s,
+            Op::StorePlace(x, _, _) | Op::UpdatePlace(x, _, _, _) => *x == s,
+            Op::LoadPlace(x, _, _, _) | Op::LoadPlaceLen(x, _, _) => *x == s,
             // 破壊的メソッドも、いまの中身の上で働く
             Op::MutMethod(x, _, _, _) => *x == s,
             // **別名は読みにも書きにもなりうる**（C-53）。倒す先は読む側
@@ -1763,7 +1911,13 @@ impl Program2 {
     /// 契約は「同じなら書かない」だが、**そもそも触れていないなら比べる必要も無い。**
     pub fn host_writes(&self) -> Vec<bool> {
         self.host_slot_flags(|op, s| match op {
-            Op::Store(x) | Op::StoreExact(x) | Op::StoreIndex(x, _) => *x == s,
+            Op::Store(x)
+            | Op::Update(x, _, _)
+            | Op::StoreExact(x)
+            | Op::StoreIndex(x, _, _)
+            | Op::UpdateIndex(x, _, _, _)
+            | Op::StorePlace(x, _, _)
+            | Op::UpdatePlace(x, _, _, _) => *x == s,
             Op::MutMethod(x, _, _, _) => *x == s,
             // 別名で受け直した先から書かれうる
             Op::Alias(a, b) => *a == s || *b == s,
@@ -1777,7 +1931,7 @@ impl Program2 {
         let mut used = vec![false; top.host_slots.len()];
         for (i, slot) in top.host_slots.iter().enumerate() {
             let s = *slot;
-            used[i] = self.chunks.iter().any(|c| c.ops.iter().any(|op| f(op, s)));
+            used[i] = top.ops.iter().any(|op| f(op, s));
         }
         used
     }
@@ -1831,6 +1985,115 @@ impl<'a> Vm<'a> {
             n
         } else {
             c
+        }
+    }
+
+    fn store_resolved_place(
+        &mut self,
+        place: &Place,
+        value: Value,
+        span: Span,
+    ) -> Result<(), RtErr> {
+        let cell = place_cell(place);
+        if self.frozen.contains(&cell) {
+            return self.err("凍っているセルには書けない（`const` の別名がある）", span);
+        }
+        place_write(&mut self.arena, place, value).map_err(|kind| RtErr {
+            msg: match kind {
+                PlaceWriteError::Unbound => "まだ束縛されていない",
+                PlaceWriteError::Unreachable => "経路がたどれない",
+                PlaceWriteError::Coerce => "浮動小数を狭めると非有限になる",
+            }
+            .into(),
+            span,
+        })
+    }
+
+    fn update_resolved_place(
+        &mut self,
+        place: &Place,
+        op: BinOp,
+        rhs: Value,
+        span: Span,
+    ) -> Result<(), RtErr> {
+        let cell = place_cell(place);
+        if self.frozen.contains(&cell) {
+            return self.err("凍っているセルには書けない（`const` の別名がある）", span);
+        }
+        // **右辺を評価し終えた後の現在値**を読む。右辺が同じセルを変えても、
+        // 参照実装と同じくその変更の上に複合代入を重ねる（C-79 (6)）。
+        let current = place_read(&self.arena, place).ok_or_else(|| RtErr {
+            msg: if self.arena.get(cell).is_some() {
+                "経路がたどれない".into()
+            } else {
+                "まだ束縛されていない".into()
+            },
+            span,
+        })?;
+        let value = self.updated_value(current, op, rhs, span)?;
+        self.store_resolved_place(place, value, span)
+    }
+
+    fn store_resolved_index(
+        &mut self,
+        slot: u16,
+        index: Value,
+        value: Value,
+        span: Span,
+    ) -> Result<(), RtErr> {
+        let cell = self.cell(slot);
+        if self.frozen.contains(&cell) {
+            return self.err("凍っているセルには書けない（`const` の別名がある）", span);
+        }
+        let Some(root) = self.arena.get_mut(cell) else {
+            return self.err("まだ束縛されていない", span);
+        };
+        if crate::interp::set_index(root, &index, value) {
+            Ok(())
+        } else {
+            self.err("経路がたどれない", span)
+        }
+    }
+
+    fn update_resolved_index(
+        &mut self,
+        slot: u16,
+        index: Value,
+        op: BinOp,
+        rhs: Value,
+        span: Span,
+    ) -> Result<(), RtErr> {
+        let cell = self.cell(slot);
+        if self.frozen.contains(&cell) {
+            return self.err("凍っているセルには書けない（`const` の別名がある）", span);
+        }
+        let current = self
+            .arena
+            .get(cell)
+            .and_then(|root| crate::interp::get_index(root, &index))
+            .ok_or_else(|| RtErr { msg: "経路がたどれない".into(), span })?;
+        let value = self.updated_value(current, op, rhs, span)?;
+        self.store_resolved_index(slot, index, value, span)
+    }
+
+    fn updated_value(
+        &self,
+        current: Value,
+        op: BinOp,
+        rhs: Value,
+        span: Span,
+    ) -> Result<Value, RtErr> {
+        match arith_pub(op, current, rhs, span)
+            .map_err(|e| RtErr { msg: e.msg, span: e.span })?
+        {
+            crate::interp::Eval::Value(value) => Ok(value),
+            crate::interp::Eval::Paradox(at) => {
+                self.err("消費されなかった paradox", at)
+            }
+            crate::interp::Eval::Akasha => self.err("複合代入に値が無い", span),
+            crate::interp::Eval::Escape(_) => {
+                self.err("複合代入の途中で脱出した", span)
+            }
         }
     }
 }
@@ -1908,6 +2171,11 @@ impl<'a> Vm<'a> {
                 };
                 self.arena.set(c, v);
             }
+            Op::Update(s, op, sp) => {
+                let rhs = self.pop().value(sp)?;
+                let place = Place::Cell(self.cell(s));
+                self.update_resolved_place(&place, op, rhs, sp)?;
+            }
             Op::StoreExact(s) => {
                 let v = self.pop().value(Span::NONE)?;
                 let c = self.cell(s);
@@ -1949,6 +2217,7 @@ impl<'a> Vm<'a> {
                     },
                     Slot::Paradox(sp) => self.stack.push(Slot::Paradox(sp)),
                     Slot::Cell(_) => return self.err("セル参照は値ではない", ty.span),
+                    Slot::Place(_) => return self.err("代入先の経路は値ではない", ty.span),
                 }
             }
             Op::NeedValue(sp) => {
@@ -2058,19 +2327,82 @@ impl<'a> Vm<'a> {
                     None => return self.err(format!("欄 `{name}` が無い"), sp),
                 }
             }
-            Op::StoreIndex(slot, sp) => {
-                let i = self.pop().value(sp)?;
-                let v = self.pop().value(sp)?;
-                let c = self.cell(slot);
-                if self.frozen.contains(&c) {
-                    return self.err("凍っているセルには書けない（`const` の別名がある）", sp);
-                }
-                let Some(coll) = self.arena.get_mut(c) else {
-                    return self.err("まだ束縛されていない", sp);
+            Op::PlaceRoot(slot, _) => {
+                let cell = self.cell(slot);
+                self.stack.push(Slot::Place(Box::new(Place::Cell(cell))));
+            }
+            Op::PlaceField(ni, sp) => {
+                let name = self.p.chunks[self.cur()].names[ni as usize].clone();
+                let place = match self.pop() {
+                    Slot::Place(place) => *place,
+                    _ => return self.err("欄の前に代入先の経路が無い", sp),
                 };
-                if !crate::interp::set_index(coll, &i, v) {
-                    return self.err("経路がたどれない", sp);
+                self.stack.push(Slot::Place(Box::new(push_step(place, Step::Field(name)))));
+            }
+            Op::PlaceIndex(sp) => {
+                let index = self.pop().value(sp)?;
+                let place = match self.pop() {
+                    Slot::Place(place) => *place,
+                    _ => return self.err("添字の前に代入先の経路が無い", sp),
+                };
+                let Some(step) = place_index_step(&index) else {
+                    return self.err("添字にできない値", sp);
+                };
+                self.stack.push(Slot::Place(Box::new(push_step(place, step))));
+            }
+            Op::LoadPlace(_, _, missing_is_paradox, sp) => {
+                let place = match self.pop() {
+                    Slot::Place(place) => place,
+                    _ => return self.err("読む経路が無い", sp),
+                };
+                match place_read_checked(&self.arena, &place) {
+                    Ok(value) => self.stack.push(Slot::Value(value)),
+                    Err(PlaceReadError::Missing) if missing_is_paradox => {
+                        self.stack.push(Slot::Paradox(sp));
+                    }
+                    Err(PlaceReadError::Unbound) => {
+                        return self.err("まだ束縛されていない", sp)
+                    }
+                    Err(PlaceReadError::Intermediate) | Err(PlaceReadError::Missing) => {
+                        return self.err("経路がたどれない", sp)
+                    }
                 }
+            }
+            Op::LoadPlaceLen(_, _, sp) => {
+                let place = match self.pop() {
+                    Slot::Place(place) => place,
+                    _ => return self.err("長さを読む経路が無い", sp),
+                };
+                let Some(len) = place_len(&self.arena, &place) else {
+                    return self.err("`len` は集合体にしか使えない", sp);
+                };
+                self.stack.push(Slot::Value(Value::I64(len as i64)));
+            }
+            Op::StorePlace(_, _, sp) => {
+                let value = self.pop().value(sp)?;
+                let place = match self.pop() {
+                    Slot::Place(place) => place,
+                    _ => return self.err("代入先の経路が無い", sp),
+                };
+                self.store_resolved_place(&place, value, sp)?;
+            }
+            Op::UpdatePlace(_, _, op, sp) => {
+                let rhs = self.pop().value(sp)?;
+                let place = match self.pop() {
+                    Slot::Place(place) => place,
+                    _ => return self.err("複合代入先の経路が無い", sp),
+                };
+                self.update_resolved_place(&place, op, rhs, sp)?;
+            }
+            Op::StoreIndex(slot, _, sp) => {
+                let value = self.pop().value(sp)?;
+                let index = self.pop().value(sp)?;
+                self.store_resolved_index(slot, index, value, sp)?;
+            }
+            Op::UpdateIndex(slot, _, op, sp) => {
+                let rhs = self.pop().value(sp)?;
+                let index = self.pop().value(sp)?;
+                self.update_resolved_index(slot, index, op, rhs, sp)?;
             }
             Op::LoadIndex(slot, sp) => {
                 let i = self.pop().value(sp)?;
@@ -2676,6 +3008,15 @@ pub fn run(src: &str) -> Result<crate::interp::Eval, String> {
     let prog = crate::parser::parse(src).map_err(|e| format!("構文: {}", e.msg))?;
     let p = compile(&prog).map_err(|e| e.msg)?;
     run_program(&p).map_err(|e| e.msg)
+}
+
+/// 名前を根に `.` / `[]` だけで伸ばした、実セルへ解決できる経路か。
+fn is_place_path(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Name(_) => true,
+        ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => is_place_path(base),
+        _ => false,
+    }
 }
 
 /// 添字が定数か。`Const(k); NeedValue; LoadIndex(..)` という並びを見る。

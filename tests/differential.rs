@@ -281,6 +281,118 @@ fn const_別名は同じセルへのほかの経路も凍らせる() {
 }
 
 #[test]
+fn 入れ子の左辺は根を写さず末端だけを書き換える() {
+    same_value(
+        "struct Node { var value : i64 := 0; };
+         var rows := [ [ new Node ( value := 1 ) ], [ new Node ( value := 2 ) ] ];
+         rows[1][0].value := 9;
+         rows[0][0].value * 10 + rows[1][0].value",
+        "19",
+    );
+    same_value(
+        "var rows := [ [1, 2], [3, 4] ];
+         rows[1][0] += 7;
+         rows[0][0] * 100 + rows[1][0]",
+        "110",
+    );
+}
+
+#[test]
+fn 入れ子の読み取りも根を写さず欠損位置を区別する() {
+    same_value(
+        "struct Bucket { var data : i64 array; };
+         var bucket := new Bucket ( data := [3, 4, 5] );
+         bucket.data[1] * 10 + bucket.data.len()",
+        "43",
+    );
+    // 最終添字の欠損だけが paradox。途中が欠ければ、その先は辿れない。
+    same_value("var rows := [[1]]; rows[0][9] ?? 42", "42");
+    same("var rows := [[1]]; rows[9][0] ?? 42");
+}
+
+#[test]
+fn 代入の添字は右辺より先に一度だけ評価する() {
+    same_value(
+        "fn take_index (var calls : i64 alias) {
+             let old := calls;
+             calls += 1;
+             old
+         } -> i64;
+         var calls := 0;
+         var values := [0, 0];
+         values[take_index(calls)] := calls * 10;
+         calls * 100 + values[0] * 10 + values[1]",
+        "200",
+    );
+    same_value(
+        "fn take_index (var calls : i64 alias) {
+             let old := calls;
+             calls += 1;
+             old
+         } -> i64;
+         var calls := 0;
+         var values := [1, 2];
+         values[take_index(calls)] += calls * 10;
+         calls * 100 + values[0] * 10 + values[1]",
+        "212",
+    );
+}
+
+#[test]
+fn 複合代入は右辺が変えた後の現在値へ重ねる() {
+    same_value(
+        "fn replace (var values : i64 array alias) {
+             values[0] := 20;
+             3
+         } -> i64;
+         var values := [5];
+         values[0] += replace(values);
+         values[0]",
+        "23",
+    );
+    same_value(
+        "fn replace (var value : i64 alias) { value := 20; 3 } -> i64;
+         var value := 5;
+         value += replace(value);
+         value",
+        "23",
+    );
+}
+
+#[test]
+fn 入れ子の左辺も別名と凍結を実セルで判定する() {
+    same_value(
+        "var rows := [[1]];
+         var view : i64 array array alias &= rows;
+         view[0][0] := 9;
+         rows[0][0]",
+        "9",
+    );
+    same(
+        "var rows := [[1]];
+         { const frozen : i64 array array alias &= rows; rows[0][0] := 9; };
+         rows[0][0]",
+    );
+}
+
+#[test]
+fn 入れ子の置き場の数値幅は右辺の途中まで届く() {
+    same_value(
+        "struct Pixel { var channel : u8 := 0; };
+         var pixels : Pixel array := [new Pixel ()];
+         pixels[0].channel := 100 * 3 / 2;
+         pixels[0].channel",
+        "22",
+    );
+    same_value(
+        "var bytes : u8 array array := [[0]];
+         bytes[0][0] := 100 * 3 / 2;
+         bytes[0][0]",
+        "22",
+    );
+}
+
+#[test]
 fn 可変メソッドの引数がレシーバを変えても変更を失わない() {
     let source =
         "fn add (var xs : i64 array alias) { xs.push(2); 3 } -> i64;

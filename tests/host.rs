@@ -413,6 +413,14 @@ fn 定数の添字へ書くのも要素だけ() {
 }
 
 #[test]
+fn 定数の添字への複合代入も要素だけ() {
+    let (whole, reads, writes) = 要素で数える("count[7] += 1; 0");
+    assert_eq!(whole, 0, "丸ごと読んではいけない");
+    assert_eq!(reads, 1, "現在値も触った一つから読む");
+    assert_eq!(writes, 1, "触った一つだけ書き戻す");
+}
+
+#[test]
 fn 書いた値が本当に届く() {
     let w = std::rc::Rc::new(std::cell::Cell::new(0));
     let mut h = vaak::host::Host::new();

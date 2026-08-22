@@ -760,16 +760,34 @@ pub fn euclid_div(a: i128, b: i128) -> (i128, i128) {
 // ================= 演算・束縛・制御 =================
 
 /// 経路。代入の左辺を解決した結果。
-enum Place {
+///
+/// VM も**同じ経路操作**を使う。経路の読み書きを二つ実装すると、
+/// 写像への挿入や数値幅の強制が参照実装と食い違うためである。
+#[derive(Clone, Debug)]
+pub(crate) enum Place {
     Cell(CellId),
     Field(CellId, Vec<Step>),
 }
 
 #[derive(Clone, Debug)]
-enum Step {
+pub(crate) enum Step {
     Field(String),
     Index(i128),
     Key(MapKey),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceWriteError {
+    Unbound,
+    Unreachable,
+    Coerce,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceReadError {
+    Unbound,
+    Intermediate,
+    Missing,
 }
 
 impl Interp {
@@ -935,10 +953,7 @@ impl Interp {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
         };
-        let cell = match &place {
-            Place::Cell(c) => *c,
-            Place::Field(c, _) => *c,
-        };
+        let cell = place_cell(&place);
         if self.frozen.contains(&cell) {
             return rt("凍っているセルには書けない（`const` の別名がある）", span);
         }
@@ -991,14 +1006,8 @@ impl Interp {
                     Ok(v) => v,
                     Err(_) => return rt("添字の位置で脱出した", index.span),
                 };
-                let step = match &iv {
-                    Value::Str(_) | Value::F32(_) | Value::F64(_) => {
-                        Step::Key(iv.as_key().unwrap())
-                    }
-                    _ => match iv.as_int() {
-                        Some(i) => Step::Index(i),
-                        None => return rt("添字にできない値", index.span),
-                    },
+                let Some(step) = place_index_step(&iv) else {
+                    return rt("添字にできない値", index.span);
                 };
                 Ok(push_step(p, step))
             }
@@ -1007,56 +1016,36 @@ impl Interp {
     }
 
     fn read_place(&mut self, p: &Place, span: Span) -> R<Value> {
-        let (cell, steps) = match p {
-            Place::Cell(c) => (*c, &[][..]),
-            Place::Field(c, s) => (*c, &s[..]),
-        };
-        let Some(mut cur) = self.arena.get(cell).cloned() else {
-            return rt("まだ束縛されていない", span);
-        };
-        for st in steps {
-            cur = match step_get(&cur, st) {
-                Some(v) => v,
-                None => return rt("経路がたどれない", span),
-            };
-        }
-        Ok(cur)
+        place_read(&self.arena, p).ok_or_else(|| RuntimeError {
+            msg: if self.arena.get(place_cell(p)).is_some() {
+                "経路がたどれない".into()
+            } else {
+                "まだ束縛されていない".into()
+            },
+            span,
+        })
     }
 
     fn write_place(&mut self, p: &Place, v: Value, span: Span) -> R<()> {
-        // **セルの型は一度決まったら変わらない。** 代入右辺のリテラルも
-        // その場所の型を受け取る（C-25 / C-94）。
-        // 写像・hash はまだ無い鍵への代入が**挿入**なので、値を読まず型だけ辿る。
-        let (cell, steps) = match p {
-            Place::Cell(c) => (*c, &[][..]),
-            Place::Field(c, steps) => (*c, &steps[..]),
-        };
-        let target = self
-            .arena
-            .get(cell)
-            .and_then(|root| step_type(root, steps))
-            .ok_or_else(|| RuntimeError { msg: "経路がたどれない".into(), span })?;
-        let v = try_coerce_to(v, &target)
-            .ok_or_else(|| RuntimeError { msg: "浮動小数を狭めると非有限になる".into(), span })?;
-        match p {
-            Place::Cell(c) => {
-                self.arena.set(*c, v);
-                Ok(())
+        place_write(&mut self.arena, p, v).map_err(|kind| RuntimeError {
+            msg: match kind {
+                PlaceWriteError::Unbound => "まだ束縛されていない",
+                PlaceWriteError::Unreachable => "経路がたどれない",
+                PlaceWriteError::Coerce => "浮動小数を狭めると非有限になる",
             }
-            Place::Field(c, steps) => {
-                let Some(root) = self.arena.get_mut(*c) else {
-                    return rt("まだ束縛されていない", span);
-                };
-                if !step_set(root, steps, v) {
-                    return rt("経路がたどれない", span);
-                }
-                Ok(())
-            }
-        }
+            .into(),
+            span,
+        })
     }
 }
 
-fn push_step(p: Place, s: Step) -> Place {
+pub(crate) fn place_cell(p: &Place) -> CellId {
+    match p {
+        Place::Cell(c) | Place::Field(c, _) => *c,
+    }
+}
+
+pub(crate) fn push_step(p: Place, s: Step) -> Place {
     match p {
         Place::Cell(c) => Place::Field(c, vec![s]),
         Place::Field(c, mut v) => {
@@ -1066,29 +1055,118 @@ fn push_step(p: Place, s: Step) -> Place {
     }
 }
 
+pub(crate) fn place_index_step(v: &Value) -> Option<Step> {
+    match v {
+        Value::Str(_) | Value::F32(_) | Value::F64(_) => Some(Step::Key(v.as_key()?)),
+        _ => Some(Step::Index(v.as_int()?)),
+    }
+}
+
+/// 経路を借用で辿り、**末端だけ**を複製する。
+///
+/// 根を先に複製すると `a[i].field` が配列の長さに比例し、ループ全体が
+/// O(N²) になる。`[]` と `.` はアクセスであって複製ではない（C-20）。
+pub(crate) fn place_read(arena: &Arena, p: &Place) -> Option<Value> {
+    place_read_checked(arena, p).ok()
+}
+
+pub(crate) fn place_read_checked(
+    arena: &Arena,
+    p: &Place,
+) -> Result<Value, PlaceReadError> {
+    let (cell, steps) = match p {
+        Place::Cell(c) => (*c, &[][..]),
+        Place::Field(c, steps) => (*c, &steps[..]),
+    };
+    let mut cur = arena.get(cell).ok_or(PlaceReadError::Unbound)?;
+    let Some((last, prefix)) = steps.split_last() else {
+        return Ok(cur.clone());
+    };
+    for step in prefix {
+        cur = step_ref(cur, step).ok_or(PlaceReadError::Intermediate)?;
+    }
+    step_get(cur, last).ok_or(PlaceReadError::Missing)
+}
+
+/// 経路の末端にある集合体の長さだけを借用で読む。
+pub(crate) fn place_len(arena: &Arena, p: &Place) -> Option<usize> {
+    let (cell, steps) = match p {
+        Place::Cell(c) => (*c, &[][..]),
+        Place::Field(c, steps) => (*c, &steps[..]),
+    };
+    let mut cur = arena.get(cell)?;
+    for step in steps {
+        cur = step_ref(cur, step)?;
+    }
+    match cur {
+        Value::Array(array) => Some(array.items.len()),
+        Value::Str(bytes) => Some(bytes.len()),
+        Value::Map(map) => Some(map.entries.len()),
+        Value::Hash(hash) => Some(hash.len()),
+        _ => None,
+    }
+}
+
+/// 経路の末端へ直接書く。VM と参照実装の強制・挿入規則はここで一つになる。
+pub(crate) fn place_write(
+    arena: &mut Arena,
+    p: &Place,
+    v: Value,
+) -> Result<(), PlaceWriteError> {
+    // **セルの型は一度決まったら変わらない。** 代入右辺のリテラルも
+    // その場所の型を受け取る（C-25 / C-94）。
+    // 写像・hash はまだ無い鍵への代入が**挿入**なので、値を読まず型だけ辿る。
+    let (cell, steps) = match p {
+        Place::Cell(c) => (*c, &[][..]),
+        Place::Field(c, steps) => (*c, &steps[..]),
+    };
+    let root = arena.get(cell).ok_or(PlaceWriteError::Unbound)?;
+    let target = step_type(root, steps).ok_or(PlaceWriteError::Unreachable)?;
+    let v = try_coerce_to(v, &target).ok_or(PlaceWriteError::Coerce)?;
+    match p {
+        Place::Cell(c) => {
+            arena.set(*c, v);
+            Ok(())
+        }
+        Place::Field(c, steps) => {
+            let root = arena.get_mut(*c).ok_or(PlaceWriteError::Unbound)?;
+            if step_set(root, steps, v) {
+                Ok(())
+            } else {
+                Err(PlaceWriteError::Unreachable)
+            }
+        }
+    }
+}
+
 fn step_get(v: &Value, s: &Step) -> Option<Value> {
+    if let (Value::Str(bytes), Step::Index(i)) = (v, s) {
+        if *i < 0 {
+            return None;
+        }
+        return bytes.get(*i as usize).map(|x| Value::U8(*x));
+    }
+    step_ref(v, s).cloned()
+}
+
+/// 中間の集合体を借用のまま辿る。`str` の要素は値としてその場で作るため、
+/// 経路の中間にはなれず `step_get` の末端だけで扱う。
+fn step_ref<'a>(v: &'a Value, s: &Step) -> Option<&'a Value> {
     match (v, s) {
         (Value::Struct(sv), Step::Field(n)) => {
-            sv.fields.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())
+            sv.fields.iter().find(|(k, _)| k == n).map(|(_, v)| v)
         }
         (Value::Array(ar), Step::Index(i)) => {
             if *i < 0 {
                 None
             } else {
-                ar.items.get(*i as usize).cloned()
+                ar.items.get(*i as usize)
             }
         }
-        (Value::Str(b), Step::Index(i)) => {
-            if *i < 0 {
-                None
-            } else {
-                b.get(*i as usize).map(|x| Value::U8(*x))
-            }
-        }
-        (Value::Map(mp), Step::Key(k)) => mp.entries.get(k).cloned(),
-        (Value::Map(mp), Step::Index(i)) => mp.entries.get(&MapKey::Int(*i)).cloned(),
-        (Value::Hash(h), Step::Key(k)) => h.get(k).cloned(),
-        (Value::Hash(h), Step::Index(i)) => h.get(&MapKey::Int(*i)).cloned(),
+        (Value::Map(mp), Step::Key(k)) => mp.entries.get(k),
+        (Value::Map(mp), Step::Index(i)) => mp.entries.get(&MapKey::Int(*i)),
+        (Value::Hash(h), Step::Key(k)) => h.get(k),
+        (Value::Hash(h), Step::Index(i)) => h.get(&MapKey::Int(*i)),
         _ => None,
     }
 }
@@ -1112,8 +1190,8 @@ fn step_type(v: &Value, steps: &[Step]) -> Option<ValueType> {
             _ => None,
         };
     }
-    let next = step_get(v, first)?;
-    step_type(&next, rest)
+    let next = step_ref(v, first)?;
+    step_type(next, rest)
 }
 
 fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
