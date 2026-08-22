@@ -42,12 +42,14 @@ fn steel_run(name: &str, src: &str) -> Option<i32> {
     Some(Command::new(&exe).status().unwrap().code().unwrap())
 }
 
-/// **終了コードは 8 ビット。** 参照の値をそこへ落として比べる
+/// Unix の終了コードは 8 ビットだが、Windows は `i32` のまま返す。
+/// **どちらでも観測できる下位 8 ビット**へ揃えて比べる。
 fn agree(name: &str, src: &str) {
     let want = interp(src).expect("参照実装が答えを出せない");
     let Some(got) = steel_run(name, src) else { return };
     let expect = (want.rem_euclid(256)) as i32;
-    assert_eq!(got, expect, "{name}: 参照 {want} → {expect}、STEEL {got}\n{src}");
+    let got8 = got.rem_euclid(256);
+    assert_eq!(got8, expect, "{name}: 参照 {want} → {expect}、STEEL {got} → {got8}\n{src}");
 }
 
 macro_rules! t {
@@ -154,6 +156,18 @@ t!(aliasで受ければ写さない,
 t!(aliasで書き換えると元も変わる,
    "fn bump (var a : i64 array alias) { a[0] := 9; } -> i64;
     var xs := [1,2]; bump(xs); xs[0]");
+t!(alias引数の数値代入が呼び出し元へ届く,
+   "fn set (var x : i64 alias) { x := 42; };
+    var x := 0; set(x); x");
+t!(alias引数から伸ばした配列の根が共有される,
+   "fn push_one (var xs : i64 array alias) { xs.push(42); };
+    var xs : i64 array := new i64 array(0, 0); push_one(xs);
+    if (xs.len() == 1) (xs[0] ?? 0) else 0 fi");
+t!(alias引数へ逃げた確保は関数解放を越えて生きる,
+   "fn push_one (var xs : i64 array alias) { xs.push(42); };
+    var xs : i64 array := new i64 array(0, 0); push_one(xs);
+    let trash := new i64 array(4, 7);
+    (xs[0] ?? 0) + trash[0] - 7");
 t!(値で受ければ元は変わらない,
    "fn bump (var a : i64 array) { a[0] := 9; } -> i64;
     var xs := [1,2]; bump(xs); xs[0]");

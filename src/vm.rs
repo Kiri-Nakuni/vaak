@@ -9,7 +9,7 @@
 use crate::ast::*;
 use crate::interp::{arith_pub, read_method_pub, try_coerce_pub, write_method_pub, EKind};
 use crate::span::Span;
-use crate::value::{Arena, CellId, MapKey, Value};
+use crate::value::{Arena, CellId, Value};
 use std::collections::{BTreeMap, HashMap};
 
 // ================= 命令 =================
