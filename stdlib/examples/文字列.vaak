@@ -1,0 +1,13 @@
+% stdlib/string.vaak を前置きして走らせる利用例。%
+
+let input := "  Apple,banana,,APPLE  ";
+let trimmed := str_trim_ascii(input) ?? "";
+let fields := str_split(trimmed, ",") ?? new str array(0, "");
+let first := fields[0] ?? "";
+let last := fields[3] ?? "";
+let normalized := str_ascii_lowercase(last) ?? "";
+let joined := str_join(fields, "|") ?? "";
+
+if (fields.len() == 4 &&
+    str_eq_ignore_ascii_case(first, normalized) &&
+    str_eq(joined, "Apple|banana||APPLE")) 42 else 0 fi

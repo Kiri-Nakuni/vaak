@@ -1,0 +1,301 @@
+%{ Vaak のバイト文字列ライブラリ。
+
+   `str` の添字と長さはバイト単位である（C-77）。このファイルは
+   中核へ新しい文字概念を足さず、既存の配列操作だけで文字列を扱う。
+
+   公開関数は `str_` で始まる。入力本体は深く複製しないよう alias、
+   needle や separator は文字列リテラルを渡せるよう値引数にしている。 }%
+
+% STEEL は無名標準ライブラリをまだ注入しないので明示する。
+flow $return = $repeat(break, getdepth());
+
+% ここから三つは公開関数からだけ使う内部部品。%
+fn str__match_at (source : str alias, needle : str alias, at : i64) {
+    if (at < 0 || at > source.len()) $return false; fi;
+    if (needle.len() > source.len() - at) $return false; fi;
+    nfor (i, 0, needle.len()) {
+        if (source[at + i] != needle[i]) $return false; fi;
+    };
+    true
+} -> u1;
+
+fn str__find_from (source : str alias, needle : str alias, from : i64) {
+    if (from < 0 || from > source.len()) $return; fi;
+    % 空 needle は、指定された有効な境界に一致する。%
+    if (needle.len() == 0) $return from; fi;
+    if (needle.len() > source.len() - from) $return; fi;
+    let last := source.len() - needle.len();
+    nfor (i, from, last - from + 1) {
+        if (str__match_at(source, needle, i)) $return i; fi;
+    };
+} -> i64;
+
+fn str__rfind_from (source : str alias, needle : str alias, from : i64) {
+    if (from < 0 || from > source.len()) $return; fi;
+    % 空 needle は、指定された有効な境界に一致する。%
+    if (needle.len() == 0) $return from; fi;
+    if (needle.len() > source.len()) $return; fi;
+    var i := from;
+    let last := source.len() - needle.len();
+    if (i > last) i := last; fi;
+    loop {
+        if (str__match_at(source, needle, i)) $return i; fi;
+        if (i == 0) break; fi;
+        i -= 1;
+    };
+} -> i64;
+
+fn str_eq (source : str alias, other : str) {
+    if (source.len() != other.len()) $return false; fi;
+    str__match_at(source, other, 0)
+} -> u1;
+
+fn str_starts_with (source : str alias, needle : str) {
+    str__match_at(source, needle, 0)
+} -> u1;
+
+fn str_ends_with (source : str alias, needle : str) {
+    if (needle.len() > source.len()) $return false; fi;
+    str__match_at(source, needle, source.len() - needle.len())
+} -> u1;
+
+fn str_find_from (source : str alias, needle : str, from : i64) {
+    str__find_from(source, needle, from)
+} -> i64;
+
+fn str_find (source : str alias, needle : str) {
+    str__find_from(source, needle, 0)
+} -> i64;
+
+% CSV/JSON の区切り走査用。needle の構築と候補ごとの関数呼び出しを持たない。%
+fn str_find_byte (source : str alias, byte : u8, from : i64) {
+    if (from < 0 || from > source.len()) $return; fi;
+    nfor (i, from, source.len() - from) {
+        if (source[i] == byte) $return i; fi;
+    };
+} -> i64;
+
+fn str_rfind_from (source : str alias, needle : str, from : i64) {
+    str__rfind_from(source, needle, from)
+} -> i64;
+
+fn str_rfind (source : str alias, needle : str) {
+    str__rfind_from(source, needle, source.len())
+} -> i64;
+
+fn str_contains (source : str alias, needle : str) {
+    let found := str__find_from(source, needle, 0) ?? 0 - 1;
+    found >= 0
+} -> u1;
+
+% [from, upto) のバイトを複製する。範囲が不正なら paradox。%
+fn str_slice (source : str alias, from : i64, upto : i64) {
+    if (from < 0 || upto < from || upto > source.len()) $return; fi;
+    var out : str := "";
+    nfor (i, from, upto - from) {
+        out.push(source[i] ?? $return);
+    };
+    out
+} -> str;
+
+fn str_is_ascii_whitespace (byte : u8) {
+    byte == 9 || byte == 10 || byte == 11 || byte == 12 || byte == 13 || byte == 32
+} -> u1;
+
+fn str_trim_ascii (source : str alias) {
+    var from := 0;
+    var upto := source.len();
+    while (from < upto && str_is_ascii_whitespace(source[from] ?? 0)) {
+        from += 1;
+    };
+    while (upto > from && str_is_ascii_whitespace(source[upto - 1] ?? 0)) {
+        upto -= 1;
+    };
+    str_slice(source, from, upto)
+} -> str;
+
+% separator は空であってはならない。空欄と末尾の空欄は保持する。%
+fn str_split (source : str alias, separator : str) {
+    if (separator.len() == 0) $return; fi;
+    var out : str array := new str array(0, "");
+    var field : str := "";
+    var i := 0;
+    while (i < source.len()) {
+        var hit := false;
+        if (separator.len() <= source.len() - i) {
+            hit := str__match_at(source, separator, i);
+        } fi;
+        if (hit) {
+            out.push(field);
+            field.clear();
+            i += separator.len();
+        } else {
+            field.push(source[i] ?? $return);
+            i += 1;
+        } fi;
+    };
+    out.push(field);
+    out
+} -> str array;
+
+fn str_join (parts : str array alias, separator : str) {
+    var out : str := "";
+    nfor (i, 0, parts.len()) {
+        if (i > 0) {
+            nfor (j, 0, separator.len()) {
+                out.push(separator[j] ?? $return);
+            };
+        } fi;
+        let part := parts[i] ?? $return;
+        nfor (j, 0, part.len()) {
+            out.push(part[j] ?? $return);
+        };
+    };
+    out
+} -> str;
+
+% old は空であってはならない。置換は左から右へ進み、重ならない。%
+fn str_replace_all (source : str alias, old : str, replacement : str) {
+    if (old.len() == 0) $return; fi;
+    var out : str := "";
+    var i := 0;
+    while (i < source.len()) {
+        var hit := false;
+        if (old.len() <= source.len() - i) {
+            hit := str__match_at(source, old, i);
+        } fi;
+        if (hit) {
+            nfor (j, 0, replacement.len()) {
+                out.push(replacement[j] ?? $return);
+            };
+            i += old.len();
+        } else {
+            out.push(source[i] ?? $return);
+            i += 1;
+        } fi;
+    };
+    out
+} -> str;
+
+fn str_repeat (source : str alias, count : i64) {
+    if (count < 0) $return; fi;
+    % 空なら count に比例して周回しない。%
+    if (source.len() == 0) $return ""; fi;
+    % 出力長を i64 で表せない要求は、周回を始める前に畳む。%
+    if (count > 9223372036854775807 / source.len()) $return; fi;
+    var out : str := "";
+    nfor (n, 0, count) {
+        nfor (i, 0, source.len()) {
+            out.push(source[i] ?? $return);
+        };
+    };
+    out
+} -> str;
+
+fn str__ascii_lower_byte (byte : u8) {
+    if (byte >= 65 && byte <= 90) (byte + 32) -> u8 else byte fi
+} -> u8;
+
+fn str__ascii_upper_byte (byte : u8) {
+    if (byte >= 97 && byte <= 122) (byte - 32) -> u8 else byte fi
+} -> u8;
+
+fn str_ascii_lowercase (source : str alias) {
+    var out : str := "";
+    nfor (i, 0, source.len()) {
+        out.push(str__ascii_lower_byte(source[i] ?? $return));
+    };
+    out
+} -> str;
+
+fn str_ascii_uppercase (source : str alias) {
+    var out : str := "";
+    nfor (i, 0, source.len()) {
+        out.push(str__ascii_upper_byte(source[i] ?? $return));
+    };
+    out
+} -> str;
+
+fn str_eq_ignore_ascii_case (source : str alias, other : str) {
+    if (source.len() != other.len()) $return false; fi;
+    nfor (i, 0, source.len()) {
+        let left := str__ascii_lower_byte(source[i] ?? $return);
+        let right := str__ascii_lower_byte(other[i] ?? $return);
+        if (left != right) $return false; fi;
+    };
+    true
+} -> u1;
+
+% RFC 3629 の範囲を検査する。NUL も通常の一バイトとして受け入れる。%
+fn str_utf8_valid (source : str alias) {
+    var i := 0;
+    while (i < source.len()) {
+        let a := source[i] ?? $return false;
+        if (a <= 127) {
+            i += 1;
+        } elif (a >= 194 && a <= 223) {
+            if (i + 1 >= source.len()) $return false; fi;
+            let b := source[i + 1] ?? $return false;
+            if (b < 128 || b > 191) $return false; fi;
+            i += 2;
+        } elif (a == 224) {
+            if (i + 2 >= source.len()) $return false; fi;
+            let b := source[i + 1] ?? $return false;
+            let c := source[i + 2] ?? $return false;
+            if (b < 160 || b > 191 || c < 128 || c > 191) $return false; fi;
+            i += 3;
+        } elif ((a >= 225 && a <= 236) || (a >= 238 && a <= 239)) {
+            if (i + 2 >= source.len()) $return false; fi;
+            let b := source[i + 1] ?? $return false;
+            let c := source[i + 2] ?? $return false;
+            if (b < 128 || b > 191 || c < 128 || c > 191) $return false; fi;
+            i += 3;
+        } elif (a == 237) {
+            if (i + 2 >= source.len()) $return false; fi;
+            let b := source[i + 1] ?? $return false;
+            let c := source[i + 2] ?? $return false;
+            if (b < 128 || b > 159 || c < 128 || c > 191) $return false; fi;
+            i += 3;
+        } elif (a == 240) {
+            if (i + 3 >= source.len()) $return false; fi;
+            let b := source[i + 1] ?? $return false;
+            let c := source[i + 2] ?? $return false;
+            let d := source[i + 3] ?? $return false;
+            if (b < 144 || b > 191 || c < 128 || c > 191 || d < 128 || d > 191) $return false; fi;
+            i += 4;
+        } elif (a >= 241 && a <= 243) {
+            if (i + 3 >= source.len()) $return false; fi;
+            let b := source[i + 1] ?? $return false;
+            let c := source[i + 2] ?? $return false;
+            let d := source[i + 3] ?? $return false;
+            if (b < 128 || b > 191 || c < 128 || c > 191 || d < 128 || d > 191) $return false; fi;
+            i += 4;
+        } elif (a == 244) {
+            if (i + 3 >= source.len()) $return false; fi;
+            let b := source[i + 1] ?? $return false;
+            let c := source[i + 2] ?? $return false;
+            let d := source[i + 3] ?? $return false;
+            if (b < 128 || b > 143 || c < 128 || c > 191 || d < 128 || d > 191) $return false; fi;
+            i += 4;
+        } else {
+            $return false;
+        } fi;
+    };
+    true
+} -> u1;
+
+fn str_is_utf8_boundary (source : str alias, index : i64) {
+    if (index < 0 || index > source.len()) $return false; fi;
+    if (! str_utf8_valid(source)) $return false; fi;
+    if (index == source.len()) $return true; fi;
+    let byte := source[index] ?? $return false;
+    byte < 128 || byte > 191
+} -> u1;
+
+% 妥当な UTF-8 の符号位置境界だけを切る。違反は paradox。%
+fn str_slice_utf8 (source : str alias, from : i64, upto : i64) {
+    if (! str_is_utf8_boundary(source, from)) $return; fi;
+    if (! str_is_utf8_boundary(source, upto)) $return; fi;
+    if (upto < from) $return; fi;
+    str_slice(source, from, upto)
+} -> str;
