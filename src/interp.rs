@@ -88,7 +88,6 @@ struct Scope {
     mark: usize,
     /// 脱出段か。**裸のブロック・ループ本体・関数本体だけ**（C-64）。
     is_stage: bool,
-    is_loop: bool,
     is_frame: bool,
     /// このスコープで凍っているセル（`const` 別名。C-79 (5) は集合で持つ）。
     frozen: Vec<CellId>,
@@ -159,7 +158,7 @@ impl Interp {
             depth_guard: 0,
         };
         // 最上位は領域でありスコープでありフレームである
-        it.push_scope(true, false, true);
+        it.push_scope(true, true);
         let prelude = crate::parser::parse(PRELUDE).expect("無名標準ライブラリの解析に失敗");
         it.collect_decls(&prelude.body);
         it
@@ -205,13 +204,12 @@ impl Interp {
 
     // ---- スコープ ----
 
-    fn push_scope(&mut self, is_stage: bool, is_loop: bool, is_frame: bool) {
+    fn push_scope(&mut self, is_stage: bool, is_frame: bool) {
         let mark = self.arena.mark();
         self.scopes.push(Scope {
             vars: HashMap::new(),
             mark,
             is_stage,
-            is_loop,
             is_frame,
             frozen: Vec::new(),
         });
@@ -378,7 +376,7 @@ impl Interp {
 
             // 裸のブロックは領域・スコープ・脱出段の三つを作る
             ExprKind::Block(body) => {
-                self.push_scope(true, false, false);
+                self.push_scope(true, false);
                 self.collect_decls(body);
                 let r = self.region(body, e.span);
                 self.pop_scope();
@@ -1550,7 +1548,7 @@ impl Interp {
             return rt("ループの本体はブロックでなければならない", body.span);
         };
         // 本体はループの段。**二重にはならない**
-        self.push_scope(true, true, false);
+        self.push_scope(true, false);
         if let Some((n, v)) = loop_var {
             let cell = self.arena.alloc(Some(v));
             self.declare(n, Binding { cell, kind: BindKind::Let, is_alias: false });
@@ -1884,7 +1882,7 @@ impl Interp {
 
         // 関数本体は領域・スコープ・脱出段（**フレーム**）
         let saved_base = self.frame_base;
-        self.push_scope(true, false, true);
+        self.push_scope(true, true);
         self.frame_base = self.scopes.len() - 1;
         for (n, k, c, is_alias) in bound {
             self.declare(&n, Binding { cell: c, kind: k, is_alias });
@@ -1999,7 +1997,7 @@ impl Interp {
         reject_duplicate_alias_cells(bound.iter().filter(|b| b.3).map(|b| b.2), span)?;
 
         let saved = self.frame_base;
-        self.push_scope(true, false, true);
+        self.push_scope(true, true);
         self.frame_base = self.scopes.len() - 1;
         for (n, k, c, is_alias) in bound {
             self.declare(&n, Binding { cell: c, kind: k, is_alias });
@@ -2279,10 +2277,13 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
 fn key_to_value(k: &MapKey, t: &ValueType) -> Value {
     match k {
         MapKey::Bytes(b) => Value::str(b.clone()),
-        MapKey::Float(bits) => match t {
-            ValueType::F32 => Value::F32(f64::from_bits(*bits) as f32),
-            _ => Value::F64(f64::from_bits(*bits)),
-        },
+        MapKey::Float(k) => {
+            let x = crate::value::float_from_key(*k);
+            match t {
+                ValueType::F32 => Value::F32(x as f32),
+                _ => Value::F64(x),
+            }
+        }
         MapKey::Int(i) => match t {
             ValueType::U1 => Value::U1(*i != 0),
             ValueType::U8 => Value::U8(*i as u8),
@@ -2314,7 +2315,7 @@ pub fn set_field(base: &mut Value, name: &str, v: Value) -> bool {
 
 pub fn set_index(base: &mut Value, i: &Value, v: Value) -> bool {
     let step = match base {
-        Value::Map(_) => match i.as_key() {
+        Value::Map(_) | Value::Hash(_) => match i.as_key() {
             Some(k) => Step::Key(k),
             None => return false,
         },

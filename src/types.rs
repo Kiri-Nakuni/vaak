@@ -425,7 +425,7 @@ impl TypeChecker {
         lhs: &Expr,
         rhs: &Expr,
         want: Option<&ValueType>,
-        span: Span,
+        _span: Span,
     ) -> T {
         use BinOp::*;
         match op {

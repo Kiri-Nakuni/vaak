@@ -1764,8 +1764,6 @@ impl Steel {
                 Ok(None)
             }
             E::FnDecl(_) | E::StructDecl(_) | E::WrapDecl(_) => Ok(None),
-
-            _ => err("STEEL がまだ扱えない構文", e.span),
         }
     }
 
@@ -1785,9 +1783,30 @@ impl Steel {
         let cmp = if matches!(kty, ValueType::Str) {
             "  %c = call i32 @vaak.strcmp(ptr %kv, ptr %k)\n".to_string()
         } else if is_float(kty) {
-            // **浮動小数の鍵は断る。** 参照実装はビット列で並べており、
-            // 幅ごとに違う並びになる。合わせ切れないものを黙って違えない
-            return err("STEEL は浮動小数を写像の鍵にできない", Span::default());
+            if matches!(kty, ValueType::F80) {
+                // **`f80` は鍵にできない。** 参照実装が持たない型なので、
+                // 突き合わせる相手がいない（S-20）
+                return err("STEEL は f80 を写像の鍵にできない", Span::default());
+            }
+            // **単調な写しにしてから比べる**（C-99）
+            let widen = if matches!(kty, ValueType::F32) {
+                "  %kvd = fpext float %kv to double
+  %kd = fpext float %k to double
+"
+            } else {
+                "  %kvd = fadd double %kv, 0.0
+  %kd = fadd double %k, 0.0
+"
+            };
+            format!(
+                "{widen}  %ka = call i64 @vaak.fkey(double %kvd)
+                   %kb = call i64 @vaak.fkey(double %kd)
+                   %lt = icmp ult i64 %ka, %kb
+                   %gt = icmp ugt i64 %ka, %kb
+                   %a = select i1 %lt, i32 -1, i32 0
+                   %c = select i1 %gt, i32 1, i32 %a
+"
+            )
         } else {
             let (lt, gt) = if signed(kty) { ("slt", "sgt") } else { ("ult", "ugt") };
             format!(
@@ -1890,8 +1909,27 @@ impl Steel {
                     .to_string(),
             )
         } else if is_float(&kt) {
-            // **浮動小数は鍵にしない**（`map` と同じ理由）
-            return err("STEEL は浮動小数を hash の鍵にできない", Span::default());
+            if matches!(kt, ValueType::F80) {
+                return err("STEEL は f80 を hash の鍵にできない", Span::default());
+            }
+            // **同じ単調な写しを使う**（C-99）。`map` と鍵の同一性が揃う
+            let ext = if matches!(kt, ValueType::F32) {
+                ("fpext float %k to double", "fpext float %ek to double")
+            } else {
+                ("fadd double %k, 0.0", "fadd double %ek, 0.0")
+            };
+            (
+                format!("  %kd = {}
+  %kw = call i64 @vaak.fkey(double %kd)
+                           %hv = call i64 @vaak.hash.i64(i64 %kw)
+", ext.0),
+                format!("  %ekd = {}
+  %eka = call i64 @vaak.fkey(double %ekd)
+                           %kd2 = {}
+  %ekb = call i64 @vaak.fkey(double %kd2)
+                           %same = icmp eq i64 %eka, %ekb
+", ext.1, ext.0.replace("%k,", "%k,")),
+            )
         } else {
             let w = width(&kt).unwrap_or(64);
             let widen = if w >= 64 {
@@ -3116,19 +3154,29 @@ impl Steel {
         };
         let mut vals = Vec::new();
         for (p, a) in f.params.iter().zip(args) {
-            let v = self.expr(a)?;
-            let Some(v) = v else { return err("引数に値が無い", a.span) };
             let ty = self.resolve(&p.ty.value);
             if width(&ty).is_none() && !is_float(&ty) && !is_heap(&ty) {
                 return err("STEEL はまだ数と集合体しか扱えない", a.span);
             }
-            // **複製か別名かは型が決める**（C-20）。`alias` なら写さない
+
+            // **`alias` は値ではなく、呼び出し元と同じセルを渡す**（C-20、S-21）。
+            // 名前が既に別名なら `addr` が一段辿るので、常に値そのものの枠へ届く。
+            if p.ty.is_alias {
+                let ExprKind::Name(n) = &a.kind else {
+                    return err("`alias` 引数に渡せるのは名前だけ", a.span);
+                };
+                let Some((cell, _)) = self.addr(n) else {
+                    return err(format!("知らない名前 `{n}`"), a.span);
+                };
+                vals.push(("ptr".to_string(), cell, "true".to_string()));
+                continue;
+            }
+
+            let v = self.expr(a)?;
+            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            // **値引数は深く複製する**（C-20）。
             let c = if is_heap(&ty) {
-                if p.ty.is_alias {
-                    v.v.clone()
-                } else {
-                    self.deep_copy(&v.v.clone(), &ty)
-                }
+                self.deep_copy(&v.v.clone(), &ty)
             } else {
                 self.conv(&v.v.clone(), &v.ty.clone(), &ty)
             };
@@ -3174,19 +3222,36 @@ impl Steel {
                 return err("STEEL はまだ数と集合体の引数しか扱えない", p.span);
             }
             let pt = self.resolve(&p.ty.value);
-            params.push(format!("{} %p{i}, i1 %pok{i}", ity(&pt)));
+            let abi = if p.ty.is_alias { "ptr".to_string() } else { ity(&pt) };
+            params.push(format!("{abi} %p{i}, i1 %pok{i}"));
         }
 
-        // **場の印を取る。** 関数を出るときに戻す（C-90）
-        let mark = self.tmp();
-        self.emit(&format!("{mark} = call i64 @vaak.mark()"));
+        // 可変な集合体の別名からは、grow や欄への代入で確保が呼び出し元へ逃げる。
+        // その関数だけは場を戻さない（S-21）。読み取り専用の別名と数の別名は戻せる。
+        let keeps_arena = f.params.iter().any(|p| {
+            p.ty.is_alias
+                && p.kind == BindKind::Var
+                && is_heap(&self.resolve(&p.ty.value))
+        });
+        let mark = if keeps_arena {
+            None
+        } else {
+            let mark = self.tmp();
+            self.emit(&format!("{mark} = call i64 @vaak.mark()"));
+            Some(mark)
+        };
 
         // **フレームは段でもある**（C-23）——`break` の上限
         self.open_stage(None, false);
         for (i, p) in f.params.iter().enumerate() {
             let pt = self.resolve(&p.ty.value);
-            let ptr = self.declare(&p.name, pt.clone());
-            self.emit(&format!("store {} %p{i}, ptr {ptr}", ity(&pt)));
+            if p.ty.is_alias {
+                // 局所の別名枠を一つ持つので、`&=` で指し直しても caller の名前は動かない。
+                self.declare_alias(&p.name, &format!("%p{i}"), pt);
+            } else {
+                let ptr = self.declare(&p.name, pt.clone());
+                self.emit(&format!("store {} %p{i}, ptr {ptr}", ity(&pt)));
+            }
         }
         let ExprKind::Block(items) = &f.body.kind else {
             return err("関数の本体はブロックでなければならない", f.span);
@@ -3199,7 +3264,11 @@ impl Steel {
         let out = self.close_stage();
         // **返り値は呼び出し側の領域へ移る**（C-90 の表）。
         // 印の下へ写してから、印を戻す——**領域は高々一つの値**（C-14）なので一つだけ
-        let conv = if is_heap(&ret) && is_heap(&out.ty) {
+        let conv = if keeps_arena && is_heap(&ret) && is_heap(&out.ty) {
+            // 場を保つ場合も、返り値は別の自己完結した値である（C-20）。
+            // 解放を挟まないので、一度の深い複製で足りる。
+            self.deep_copy(&out.v.clone(), &ret)
+        } else if is_heap(&ret) && is_heap(&out.ty) {
             // **二段で写す**（C-90 の表：「返り値は呼び出し側の領域へ移る」）。
             //
             // 1. 印より上へ深く写す（**逃がす**）
@@ -3215,13 +3284,18 @@ impl Steel {
             let f = self.copy_fn(&ret);
             let up = self.tmp();
             self.emit(&format!("{up} = call ptr {f}(ptr {})", out.v));
-            self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            self.emit(&format!(
+                "call void @vaak.release(i64 {})",
+                mark.as_ref().expect("場を戻せる関数")
+            ));
             let down = self.tmp();
             self.emit(&format!("{down} = call ptr {f}(ptr {up})"));
             down
         } else {
             let c = self.conv(&out.v.clone(), &out.ty.clone(), &ret);
-            self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            if let Some(mark) = &mark {
+                self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            }
             c
         };
         let a = self.tmp();
@@ -3254,12 +3328,13 @@ impl Steel {
 /// | 再帰的データ構造は作れない（C-63） | **循環しない** |
 /// | 返り値は複製。実装は移動してよい | **呼び出し側の領域へ移る** |
 ///
-/// > スコープを越えて生き残るものが無い。だから、抜けた時点での解放は正確である。
+/// ただし**可変な集合体の `alias` 引数は呼び出し元のセルそのもの**なので、
+/// grow 等で作った値が関数を越える（S-21）。その関数は印を戻さない。
 ///
 /// # 領域を抜けるときに何をするか
 ///
 /// **印を戻すだけ。** ただし外へ出る値を先に印の下へ写す——
-/// **領域は高々一つの値しか持たない**（C-14）ので、写すのは一つだけである。
+/// **領域は高々一つの値しか持たない**（C-14）ので、通常は写すのは一つだけである。
 ///
 /// これは C-33（`:=` は深い複製）が既に言っていることを、そのまま実装したものである。
 ///
@@ -3542,6 +3617,24 @@ entry:
   %e = getelementptr i8, ptr %p, i64 40
   store i64 0, ptr %e
   ret ptr %p
+}
+
+; 浮動小数を**単調な i64 へ写す。**
+;
+; 生のビット列は数の順と一致しない（負ほど大きくなる）ので並べ替える。
+; **順序と等しさを同時に直す**ので、`map` も `hash` も同じ写しを使える。
+;
+; `-0.0` は `0.0` へ潰す。**`-0.0 == 0.0` が真である以上、鍵も同じでなければならない。**
+define internal i64 @vaak.fkey(double %x) {
+entry:
+  %z = fcmp oeq double %x, 0.0
+  %v = select i1 %z, double 0.0, double %x
+  %b = bitcast double %v to i64
+  %neg = icmp slt i64 %b, 0
+  %inv = xor i64 %b, -1
+  %pos = or i64 %b, -9223372036854775808
+  %k = select i1 %neg, i64 %inv, i64 %pos
+  ret i64 %k
 }
 
 ; 整数の混ぜ方（splitmix64 の仕上げ）。**下位だけ見ても散る**ようにする

@@ -42,12 +42,14 @@ fn steel_run(name: &str, src: &str) -> Option<i32> {
     Some(Command::new(&exe).status().unwrap().code().unwrap())
 }
 
-/// **終了コードは 8 ビット。** 参照の値をそこへ落として比べる
+/// Unix の終了コードは 8 ビットだが、Windows は `i32` のまま返す。
+/// **どちらでも観測できる下位 8 ビット**へ揃えて比べる。
 fn agree(name: &str, src: &str) {
     let want = interp(src).expect("参照実装が答えを出せない");
     let Some(got) = steel_run(name, src) else { return };
     let expect = (want.rem_euclid(256)) as i32;
-    assert_eq!(got, expect, "{name}: 参照 {want} → {expect}、STEEL {got}\n{src}");
+    let got8 = got.rem_euclid(256);
+    assert_eq!(got8, expect, "{name}: 参照 {want} → {expect}、STEEL {got} → {got8}\n{src}");
 }
 
 macro_rules! t {
@@ -140,6 +142,18 @@ t!(aliasで受ければ写さない,
 t!(aliasで書き換えると元も変わる,
    "fn bump (var a : i64 array alias) { a[0] := 9; } -> i64;
     var xs := [1,2]; bump(xs); xs[0]");
+t!(alias引数の数値代入が呼び出し元へ届く,
+   "fn set (var x : i64 alias) { x := 42; };
+    var x := 0; set(x); x");
+t!(alias引数から伸ばした配列の根が共有される,
+   "fn push_one (var xs : i64 array alias) { xs.push(42); };
+    var xs : i64 array := new i64 array(0, 0); push_one(xs);
+    if (xs.len() == 1) (xs[0] ?? 0) else 0 fi");
+t!(alias引数へ逃げた確保は関数解放を越えて生きる,
+   "fn push_one (var xs : i64 array alias) { xs.push(42); };
+    var xs : i64 array := new i64 array(0, 0); push_one(xs);
+    let trash := new i64 array(4, 7);
+    (xs[0] ?? 0) + trash[0] - 7");
 t!(値で受ければ元は変わらない,
    "fn bump (var a : i64 array) { a[0] := 9; } -> i64;
     var xs := [1,2]; bump(xs); xs[0]");
@@ -467,3 +481,26 @@ t!(文字列を鍵にするhash,
    "var h : str i64 hash := ( \"alpha\" => 1, \"beta\" => 2 ); h[\"beta\"] * 10 + h.len()");
 t!(hashの値が集合体,
    "var h := new i64 i64 array hash ( ); h[3] := new i64 array(2, 8); h[3][1] ?? 0");
+
+// ── 浮動小数の鍵（C-99） ─────────────────────────
+
+t!(浮動小数の鍵は昇順,
+   "var m : f64 i64 map := ( 1.0 => 1, 0.0 - 2.0 => 2, 3.0 => 3 );
+    var k := m.keys(); if (k[0] < k[1]) 1 else 0 fi");
+t!(浮動小数の鍵は負が先,
+   "var m : f64 i64 map := ( 1.0 => 1, 0.0 - 2.0 => 2 );
+    var k := m.keys(); if (k[0] == 0.0 - 2.0) 1 else 0 fi");
+t!(負の零は零と同じ鍵,
+   "var m := new f64 i64 map ( ); m[0.0] := 1; m[(0.0 - 1.0) * 0.0] := 2;
+    m.len() * 10 + m[0.0]");
+t!(hashでも負の零は零,
+   "var h := new f64 i64 hash ( ); h[0.0] := 1; h[(0.0 - 1.0) * 0.0] := 2;
+    h.len() * 10 + h[0.0]");
+t!(浮動小数の鍵を引く, "var m : f64 i64 map := ( 1.5 => 7, 2.5 => 9 ); m[2.5]");
+t!(hashで浮動小数の鍵を引く, "var h : f64 i64 hash := ( 1.5 => 7, 2.5 => 9 ); h[2.5]");
+t!(浮動小数の鍵で無いもの, "var m : f64 i64 map := ( 1.5 => 7 ); m[9.5] ?? 42");
+t!(hashで浮動小数の無い鍵, "var h : f64 i64 hash := ( 1.5 => 7 ); h[9.5] ?? 42");
+t!(f32の鍵, "var m : f32 i64 map := ( 1.5 => 7, 0.0 - 2.5 => 9 ); var k := m.keys(); m[k[0]]");
+t!(hashでf32の鍵, "var h : f32 i64 hash := ( 1.5 => 7, 0.0 - 2.5 => 9 ); h[1.5]");
+t!(浮動小数の鍵を抜く, "var m : f64 i64 map := ( 1.5 => 7, 2.5 => 9 ); m.remove(1.5) + m.len()");
+t!(hashで浮動小数の鍵を抜く, "var h : f64 i64 hash := ( 1.5 => 7, 2.5 => 9 ); h.remove(1.5) + h.len()");
