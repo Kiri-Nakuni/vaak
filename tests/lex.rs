@@ -76,6 +76,13 @@ fn 文字列のエスケープ() {
 }
 
 #[test]
+fn unicode_escape_は_u32_を越えても折り返さない() {
+    assert!(lex(r#""\u{100000000}""#).is_err());
+    assert!(lex(r#""\u{ffffffffffffffff}""#).is_err());
+    assert_eq!(toks(r#""\u{10ffff}""#), vec![Tok::Str("\u{10ffff}".into())]);
+}
+
+#[test]
 fn 閉じない文字列はエラー() {
     assert!(lex(r#""ここで終わる"#).is_err());
 }
