@@ -1,0 +1,24 @@
+%{ エラトステネスの篩。
+   段と `continue` の使い方の見本である。 }%
+
+fn sieve (n : i64) {
+    %{ `new` で作る。**`u1` は真偽であって数ではない** }%
+    var mark : bool array := new u1 array(n + 1, true);
+    var count := 0;
+
+    nfor (i, 2, n - 1) {
+        %{ 落ちている印なら**この周を飛ばす**。
+           `continue` は段を再開させる——`break` は終結させる }%
+        if (! mark[i]) continue; fi;
+        count += 1;
+        %{ i の倍数を落とす。`i * i` から始めれば足りる }%
+        var j := i * i;
+        while (j <= n) {
+            mark[j] := false;
+            j += i;
+        };
+    };
+    count
+} -> i64;
+
+sieve(100)

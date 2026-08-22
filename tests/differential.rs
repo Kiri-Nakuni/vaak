@@ -1,0 +1,208 @@
+//! **木を辿る実装（参照）とバイトコード VM の差分テスト。**
+//!
+//! この言語は意味論が特殊なので、**二つの実装を同じ入力に掛けて比べる**のが
+//! 唯一の実際的な検証手段である（設計文書が繰り返し言っていること）。
+//!
+//! 落ちたら、**どちらかが仕様と違う。**
+
+use vaak::interp::Eval;
+
+fn shape(e: &Result<Eval, String>) -> String {
+    match e {
+        Ok(Eval::Value(v)) => format!("値 {}", v.show()),
+        Ok(Eval::Paradox(_)) => "paradox".into(),
+        Ok(Eval::Akasha) => "虚無".into(),
+        Ok(Eval::Escape(_)) => "脱出".into(),
+        Err(_) => "エラー".into(),
+    }
+}
+
+#[track_caller]
+fn same(src: &str) {
+    let a = vaak::interp::run(src);
+    let b = vaak::vm::run(src);
+    assert_eq!(
+        shape(&a),
+        shape(&b),
+        "\n  ソース: {src}\n  木: {a:?}\n  VM: {b:?}"
+    );
+}
+
+/// プローブの「この通りに動きます」を、両方の実装に掛ける。
+const CASES: &[&str] = &[
+    // 領域
+    "{ 1; 2; 3 }",
+    "{ 1; 2; 3; }",
+    "{ }",
+    "( 1; 2 )",
+    "( )",
+    "1;;",
+    "{ ; }",
+    "{ -1 }",
+    "{ 1 -2 }",
+    "{ 1; -2 }",
+    // paradox
+    "1 / 0",
+    "1 / 0 ?? 42",
+    "1 / 0 ?? 2 / 0",
+    "1 / 0 ?? 2 / 0 ?? 42",
+    "( 1 / 0 ) ?? 42",
+    "1 / 0;",
+    "let x := 1 / 0 ?? 0; x",
+    // 算術
+    "-7 / 3",
+    "-7 mod 3",
+    "7 / -3",
+    "7 mod -3",
+    "-7 / -3",
+    "-7 mod -3",
+    "1.0 / 0.0",
+    "1e308 * 1e308",
+    "0 && (1 / 0)",
+    "1 || (1 / 0)",
+    "1 < 2",
+    "2 < 1",
+    "var a : u8 := 255; a + 1",
+    "var a : i32 := 2147483647; a + 1",
+    // 制御
+    "if (1 == 1) 1 else 2 fi",
+    "if (1 == 2) 1 else 2 fi",
+    "if (1 == 2) 1 fi",
+    "if (1 == 2) 1 fi ?? 0",
+    "if (1 == 1) 3; fi",
+    "if (1 == 1) 3 fi;",
+    "while (0) { } ?? 7",
+    "var m := 100; while (m) { m /= 10; }",
+    "nfor (i, 0, 0) { }",
+    "nfor (i, 0, 4) { }",
+    "var s := 0; nfor (i, 10, 3) { s += i; }; s",
+    "loop { break 5; }",
+    "loop { break; }",
+    "loop { 1; break 3; }",
+    "switch (2) case 1 => 10 case 2 => 20",
+    "switch (3) case 1 => 10 case 2 => 20",
+    "switch (3) case 1 => 10 case 2 => 20 ?? 99",
+    // 脱出
+    "loop { break 5 ?? 42; }",
+    "loop { break 2 + 3; }",
+    "{{ let x := 2; break break x }}",
+    "loop { { break break 9; }; }",
+    "var n := 0; loop { { break; }; n += 1; if (n == 3) break n; fi; }",
+    "loop { { $repeat(break, 2) 7; }; }",
+    "$repeat(break, 0) 5",
+    "nfor (i, 0, 10) { continue break i; }",
+    "var n := 0; nfor (i, 0, 4) { if (i == 0) continue continue; fi; n += 1; }; n",
+    // 束縛
+    "var x := 5; var y := 6;",
+    "var x := 1; { x := 5 }",
+    "var a := [1, 2]; var b := a; b[0] := 9; a[0]",
+    "var a := 1; var b &= a; b := 9; a",
+    "var a := 1; var c := 2; var b &= a; b &= c; b",
+    "var a := 10; a += 5; a",
+    "var a := 10; a mod= 3; a",
+    // 集合体
+    "var xs := [ 3, 1, 4 ]; xs.len()",
+    "var xs := [ 3, 1, 4 ]; xs[1]",
+    "var xs := [ 3 ]; xs[9]",
+    "var xs := [1, 2, 3]; xs.pop()",
+    "var xs := [1, 2, 3]; xs.remove(0)",
+    "var xs := [1, 2]; xs.insert(1, 9); xs[1]",
+    "var xs := [1, 2]; xs.clear(); xs.len()",
+    r#"var m := ( "a" => 1 ); m["a"]"#,
+    r#"var m := ( "a" => 1 ); m["z"]"#,
+    r#"var m := ( "a" => 1, "b" => 2 ); m.len()"#,
+    r#"var m := ( "a" => 1 ); m.has("a")"#,
+    r#"var m := ( "b" => 1, "a" => 2 ); var k := m.keys(); k[0]"#,
+    r#"var s := "あい"; s.utf8_len()"#,
+    r#"var s := "あい"; s.utf8_at(1)"#,
+    r#"var s := "abc"; s.len()"#,
+    "var arr := [ [ 1 ] ]; arr[0].push(3); arr[0].len()",
+    // 関数
+    "fn f () { 1 } -> i64; f()",
+    "fn f () { break 42; } -> i64; f()",
+    "fn f () { break; } -> i64; f()",
+    "fn gcd (a : i64, b : i64) { if (b == 0) a else gcd(b, a mod b) fi } -> i64; gcd(48, 18)",
+    "fn add (a : i64, b : i64) { a + b } -> i64; 1 |> add(2)",
+    "fn is_odd (n : i64) { if (n == 0) 0 else is_even(n - 1) fi } -> u1;
+     fn is_even (n : i64) { if (n == 0) 1 else is_odd(n - 1) fi } -> u1;
+     is_odd(3)",
+    "fn find (a : i64 array alias, x : i64) {
+        nfor (i, 0, a.len()) { if (a[i] == x) $return i; fi; };
+     } -> i64;
+     var xs := [ 3, 1, 4 ]; find(xs, 4) ?? -1",
+    "fn find (a : i64 array alias, x : i64) {
+        nfor (i, 0, a.len()) { if (a[i] == x) $return i; fi; };
+     } -> i64;
+     var xs := [ 3, 1, 4 ]; find(xs, 9) ?? -1",
+    // 構造体
+    "struct P { var x : i64 := 0; var y : i64 := 0; };
+     var p := new P ( x := 1, y := 2 ); p.x + p.y",
+    "struct P { var x : i64 := 5; }; var p := new P ( ); p.x",
+    "struct P { var x : i64 := 0; }; var p := new P ( x := 1 ); p.x := 7; p.x",
+    "var a := new i64 array ( 3, 7 ); a[2]",
+    "var m := new str i64 map ( ); m.len()",
+    // メンバ関数（S-1）
+    "struct P { var x : i64 := 0; };
+     fn P.get (self) { self.x } -> i64;
+     var p := new P ( x := 9 ); p.get()",
+    "struct P { var x : i64 := 0; };
+     fn P.bump (var self) { self.x += 1; };
+     var p := new P ( x := 1 ); p.bump(); p.x",
+    // ラップ型（S-2）
+    "wrap M = i64; var m := new M ( 5 ); new i64 ( m )",
+];
+
+#[test]
+fn 木と_vm_が同じ結果になる() {
+    for src in CASES {
+        same(src);
+    }
+}
+
+#[test]
+fn 実例が同じ結果になる() {
+    same(
+        "
+struct Point { var x : i64 := 0; var y : i64 := 0; };
+
+fn dist2 (a : Point alias, b : Point alias) {
+    let dx := a.x - b.x, dy := a.y - b.y;
+    dx * dx + dy * dy
+} -> i64;
+
+var p := new Point ( x := 0, y := 0 );
+var q := new Point ( x := 3, y := 4 );
+dist2(p, q)
+",
+    );
+}
+
+// ===== S-16：分岐は領域である =====
+
+/// 木を辿る実装と VM が同じ答えを出すこと。
+fn 同じ(src: &str) {
+    let p = vaak::parser::parse(src).unwrap_or_else(|e| panic!("{src}: {}", e.msg));
+    let a = format!("{:?}", vaak::interp::Interp::new().run(&p));
+    let c = vaak::vm::compile(&p).unwrap_or_else(|e| panic!("{src}: {}", e.msg));
+    let b = format!("{:?}", vaak::vm::run_program(&c));
+    assert_eq!(a, b, "{src}");
+}
+
+#[test]
+fn s16_分岐が空になっても高さが揃う() {
+    // **条件が真のとき**、分岐は `;` で空になる。それでも paradox が積まれる
+    同じ("fn g (x : i64) { if (x == 0) x; fi; } -> i64; var f := 0; f += g(0) ?? 7; f");
+    同じ("if (1 == 1) 5; fi ?? 9");
+    同じ("if (1 == 2) 5; fi ?? 9");
+    同じ("if (1 == 1) 5; else 6; fi ?? 9");
+    同じ("var i := 0; if (i == 0) i += 1; else i += 2; fi; i");
+}
+
+#[test]
+fn s16_括弧の領域は自分の底を持つ() {
+    同じ("1 + (2)");
+    同じ("1 + (2) + 3");
+    同じ("var n := 1; n + (2)");
+    同じ("1 + ( 2 ; 3 )");
+    同じ("var c : u8 := 50; 1 + ((c - 48) -> i64)");
+}

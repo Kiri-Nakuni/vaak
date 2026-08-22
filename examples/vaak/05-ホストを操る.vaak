@@ -1,0 +1,44 @@
+%{ ホストの状態を操る例。**rtex なら `\count` レジスタである。**
+
+   `\vaakdef\tally{…}` として定義し、`\tally` で呼ぶ。
+
+   二つのことを見せる:
+   1. **ホストの名前は最上位にしか無い**（C-96）。関数で使うなら引数で受ける
+   2. **見ている添字だけがホストとやり取りされる**（S-8）。
+      `count[5]` と書けば、ホストは 5 番だけ用意すればよい }%
+
+flow $return = $repeat(break, getdepth());
+
+%{ 桁を足す。**`alias` と書いてあるので、写しではなく元を触る**——
+   費用が署名に出ている }%
+fn digit_sum (n : i64) {
+    var m := n;
+    if (m < 0) m := 0 - m; fi;
+    var s := 0;
+    while (m > 0) {
+        s += m mod 10;
+        m := m / 10;
+    };
+    s
+} -> i64;
+
+%{ レジスタの束を受け取り、決めた範囲を畳む。
+   **ホストの名前をそのまま使わず、引数で受ける** }%
+fn fold (r : i32 array alias, from : i64, upto : i64) {
+    var acc := 0;
+    var i := from;
+    while (i <= upto) {
+        %{ 範囲外なら paradox。`?? 0` が「無ければ 0 として扱う」 }%
+        acc += digit_sum((r[i] ?? 0) -> i64);
+        i += 1;
+    };
+    acc
+} -> i64;
+
+%{ ここは最上位なので `count` が見える }%
+let total := fold(count, 1, 8);
+
+%{ 書き戻しもここで。**変わった分だけホストへ返る** }%
+count[9] := total -> i32;
+
+total

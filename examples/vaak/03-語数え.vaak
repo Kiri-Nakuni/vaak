@@ -1,0 +1,43 @@
+%{ 語を数える。写像と文字列の扱いの見本。
+   `str` は `u8 array` を包んだ型である（C-77）。 }%
+
+flow $return = $repeat(break, getdepth());
+
+fn is_space (c : u8) {
+    c == 32 || c == 10 || c == 9 || c == 13
+} -> u1;
+
+%{ 空白で切って数える。**戻り値は「語 → 回数」の写像** }%
+fn count_words (s : str alias) {
+    var out : str i64 map := new str i64 map ( );
+    var cur : str := "";
+
+    %{ 終端の語も拾えるように、一つ余分に回す }%
+    nfor (i, 0, s.len() + 1) {
+        %{ 範囲外は paradox。`??` で「空白が来た」ことにして畳む }%
+        let space := is_space(s[i] ?? 32);
+        if (space) {
+            if (cur.len() > 0) {
+                %{ 欠損キーは paradox。`?? 0` が「初めて見た」を意味する }%
+                out[cur] := (out[cur] ?? 0) + 1;
+                cur := "";
+            } fi;
+        } else {
+            cur.push(s[i] ?? 32);
+        } fi;
+    };
+    out
+} -> str i64 map;
+
+let text := "the quick brown fox jumps over the lazy dog the fox";
+let tally := count_words(text);
+
+%{ 一番多く出た語の回数 }%
+var most := 0;
+let ks := tally.keys();
+nfor (i, 0, ks.len()) {
+    let n := tally[ks[i]] ?? 0;
+    if (n > most) most := n; fi;
+};
+
+most * 100 + ks.len()

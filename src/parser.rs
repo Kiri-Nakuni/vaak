@@ -264,6 +264,18 @@ impl Parser {
                         lhs = self.node(ExprKind::Field { base: Box::new(lhs), name }, span);
                         continue;
                     }
+                    // `E -> T` — **領域に型を付ける**（C-30）。
+                    // 後置なので、`200 -> u8 + 100` は `(200 -> u8) + 100`
+                    Tok::Arrow => {
+                        self.bump();
+                        let ty = self.ty()?;
+                        let span = lhs.span.to(self.prev_span());
+                        lhs = self.node(
+                            ExprKind::Ascribe { expr: Box::new(lhs), ty },
+                            span,
+                        );
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -337,6 +349,15 @@ impl Parser {
                 self.bump();
                 self.node(ExprKind::Str(s), start)
             }
+            // **型は `u1` で確定している。** 置かれた場所を見ない（C-97）
+            Tok::True => {
+                self.bump();
+                self.node(ExprKind::Bool(true), start)
+            }
+            Tok::False => {
+                self.bump();
+                self.node(ExprKind::Bool(false), start)
+            }
             Tok::Ident(s) => {
                 self.bump();
                 self.node(ExprKind::Name(s), start)
@@ -365,6 +386,7 @@ impl Parser {
             Tok::Fn => self.fn_decl()?,
             Tok::Flow => self.flow_decl()?,
             Tok::Struct => self.struct_decl()?,
+            Tok::Wrap => self.wrap_decl()?,
             Tok::New => self.construct()?,
             Tok::If => self.if_expr()?,
             Tok::Loop => {
@@ -510,7 +532,13 @@ impl Parser {
     fn fn_decl(&mut self) -> Result<Expr, ParseError> {
         let start = self.span();
         self.expect(Tok::Fn)?;
-        let name = self.ident()?;
+        let first = self.ident()?;
+        // `fn T.m` なら型の名前空間に入る（S-1）
+        let (owner, name) = if self.eat(Tok::Dot) {
+            (Some(first), self.ident()?)
+        } else {
+            (None, first)
+        };
         self.expect(Tok::LParen)?;
         let mut params = Vec::new();
         if *self.peek() != Tok::RParen {
@@ -532,8 +560,18 @@ impl Parser {
                     _ => BindKind::Let, // 既定は let（C-40）
                 };
                 let pname = self.ident()?;
-                self.expect(Tok::Colon)?; // 注釈は省けない
-                let ty = self.ty()?;
+                // **`self` にだけ型注釈を書かない**（型が `fn T.m` から決まる。S-1）
+                let ty = if pname == "self" && owner.is_some() && params.is_empty() {
+                    let t = owner.clone().unwrap();
+                    Type {
+                        value: ValueType::Named(t),
+                        is_alias: true,
+                        span: pstart.to(self.prev_span()),
+                    }
+                } else {
+                    self.expect(Tok::Colon)?; // 注釈は省けない
+                    self.ty()?
+                };
                 params.push(Param { kind, name: pname, ty, span: pstart.to(self.prev_span()) });
                 if !self.eat(Tok::Comma) {
                     break;
@@ -546,7 +584,7 @@ impl Parser {
         let ret = if self.eat(Tok::Arrow) { Some(self.ty()?) } else { None };
         let span = start.to(self.prev_span());
         Ok(self.node(
-            ExprKind::FnDecl(FnDecl { name, params, body: Box::new(body), ret, span }),
+            ExprKind::FnDecl(FnDecl { owner, name, params, body: Box::new(body), ret, span }),
             span,
         ))
     }
@@ -568,6 +606,17 @@ impl Parser {
         let body = self.escape()?;
         let span = start.to(self.prev_span());
         Ok(self.node(ExprKind::FlowDecl(FlowDecl { name, body: Box::new(body), span }), span))
+    }
+
+    /// `wrap 名前 = 型;`（S-2）。`=` は定義であって束縛演算子ではない
+    fn wrap_decl(&mut self) -> Result<Expr, ParseError> {
+        let start = self.span();
+        self.expect(Tok::Wrap)?;
+        let name = self.ident()?;
+        self.expect(Tok::Define)?;
+        let base = self.ty()?;
+        let span = start.to(self.prev_span());
+        Ok(self.node(ExprKind::WrapDecl(WrapDecl { name, base, span }), span))
     }
 
     fn struct_decl(&mut self) -> Result<Expr, ParseError> {
@@ -709,6 +758,8 @@ impl Parser {
             Tok::Int(_)
                 | Tok::Float(_)
                 | Tok::Str(_)
+                | Tok::True
+                | Tok::False
                 | Tok::Ident(_)
                 | Tok::FlowName(_)
                 | Tok::LParen
@@ -864,6 +915,9 @@ impl Parser {
 fn base_type(name: &str) -> ValueType {
     match name {
         "u1" => ValueType::U1,
+        // **`bool` は `u1` の別綴りである。** 包み型ではない——構文糖であり、
+        // 型としては同じものになる。`\show` しても `u1` と出る
+        "bool" => ValueType::U1,
         "u8" => ValueType::U8,
         "u16" => ValueType::U16,
         "u32" => ValueType::U32,
@@ -871,6 +925,8 @@ fn base_type(name: &str) -> ValueType {
         "i64" => ValueType::I64,
         "f32" => ValueType::F32,
         "f64" => ValueType::F64,
+        // **STEEL 方言の基底型**（S-20）
+        "f80" => ValueType::F80,
         "str" => ValueType::Str,
         other => ValueType::Named(other.to_string()),
     }

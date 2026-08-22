@@ -53,24 +53,57 @@ struct Checker {
     frame_base: usize,
     fns: HashMap<String, FnDecl>,
     structs: HashMap<String, StructDecl>,
+    wraps: HashMap<String, ValueType>,
     flows: HashSet<String>,
     /// 内側から外へ。段送りはこの順に起きる（C-70）。
     stages: Vec<Stage>,
     /// 名前が見える範囲の上限。**`continue` の被演算子は本体の先頭で見える名前だけ**（C-81）。
     visible_limit: Option<usize>,
+    /// ホストが見せている名前。**関数の中からは見えない**（C-96）——
+    /// 見えないことを、見えない理由とともに言うために持つ。
+    host_names: HashSet<String>,
+    /// ホストが見せている**呼べる名前**と、その引数の数（S-11）。
+    ///
+    /// **関数と同じくスコープ全体で見える**（C-36）ので、
+    /// 関数の中からも呼べる——値と違うのはそこである
+    host_fns: HashMap<String, usize>,
 }
 
 pub fn check(prog: &Program) -> Vec<StaticError> {
+    check_with_host(prog, &[])
+}
+
+/// ホストが見せている名前を添えて検査する（S-4）。**`var` で見える。**
+pub fn check_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec<StaticError> {
     let mut c = Checker {
         errs: Vec::new(),
         scopes: vec![HashMap::new()],
         frame_base: 0,
         fns: HashMap::new(),
         structs: HashMap::new(),
+        wraps: HashMap::new(),
         flows: HashSet::new(),
         stages: vec![Stage { is_loop: false, is_frame: true }],
         visible_limit: None,
+        host_names: host
+            .iter()
+            .filter(|(_, i)| matches!(i, HostItem::Value(_)))
+            .map(|(n, _)| n.clone())
+            .collect(),
+        host_fns: HashMap::new(),
     };
+    for (n, item) in host {
+        match item {
+            // **値は最上位のスコープに置く。** 関数の中からは見えない（C-96）
+            HostItem::Value(_) => {
+                c.scopes[0].insert(n.clone(), (BindKind::Var, false));
+            }
+            // **呼べる名前は関数と同じ扱いである。** スコープ全体で見える（C-36）
+            HostItem::Fn(sig) => {
+                c.host_fns.insert(n.clone(), sig.params.len());
+            }
+        }
+    }
     c.flows.insert("$return".into());
     c.flows.insert("$repeat".into());
     c.collect(&prog.body);
@@ -87,6 +120,24 @@ enum RegionKind {
 }
 
 impl Checker {
+    /// 知らない名前。**ホストの名前なら、なぜ見えないかを言う。**
+    ///
+    /// 「知らない」で済ませると、書き手は綴りを疑う。
+    /// **見えているはずのものが見えないときは、規則を言うべきである。**
+    fn unknown(&mut self, n: &str, span: Span) {
+        if self.host_names.contains(n) {
+            self.err(
+                format!(
+                    "`{n}` はホストの名前で、**関数の中からは見えない**（C-96）。\
+引数で受ける: `fn f (x : … alias) {{ … }}` と書いて `f({n})` と呼ぶ"
+                ),
+                span,
+            );
+        } else {
+            self.err(format!("知らない名前 `{n}`"), span);
+        }
+    }
+
     fn err(&mut self, msg: impl Into<String>, span: Span) {
         self.errs.push(StaticError { msg: msg.into(), span });
     }
@@ -99,10 +150,13 @@ impl Checker {
             }
             match &e.kind {
                 ExprKind::FnDecl(f) => {
-                    self.fns.insert(f.name.clone(), f.clone());
+                    self.fns.insert(crate::ast::fn_key(f), f.clone());
                 }
                 ExprKind::StructDecl(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
+                }
+                ExprKind::WrapDecl(w) => {
+                    self.wraps.insert(w.name.clone(), w.base.value.clone());
                 }
                 ExprKind::FlowDecl(f) => {
                     self.flows.insert(f.name.clone());
@@ -204,11 +258,19 @@ impl Checker {
 
     fn expr(&mut self, e: &Expr, env: Env) -> Places {
         match &e.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) => Places::Value,
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {
+                Places::Value
+            }
+
+            // `E -> T` は**中の領域を検査してから**型を付ける
+            ExprKind::Ascribe { expr, .. } => {
+                self.operand(expr, env);
+                Places::Value
+            }
 
             ExprKind::Name(n) => {
                 if self.lookup(n).is_none() {
-                    self.err(format!("知らない名前 `{n}`"), e.span);
+                    self.unknown(n, e.span);
                 }
                 Places::Value
             }
@@ -246,6 +308,18 @@ impl Checker {
 
             ExprKind::Unary { rhs, .. } => self.operand(rhs, env),
             ExprKind::Binary { op, lhs, rhs } => {
+                // **`|>` は構文の水準の糖衣**（C-15）。`x |> f(a)` は `f(x, a)`——
+                // **検査もそう見なければならない。**
+                // 見なければ引数の数が合わず、`|>` が一切使えなくなる
+                if *op == BinOp::Feed {
+                    let ExprKind::Call { callee, args } = &rhs.kind else {
+                        self.err("`|>` の右は呼び出しでなければならない", rhs.span);
+                        return Places::Value;
+                    };
+                    let mut all = vec![(**lhs).clone()];
+                    all.extend(args.iter().cloned());
+                    return self.call(callee, &all, env, e.span);
+                }
                 // **比較と代入の連鎖は禁じる。混在も禁じる**（C-86）
                 if is_cmp(*op) {
                     if let ExprKind::Binary { op: inner, .. } = &lhs.kind {
@@ -299,7 +373,9 @@ impl Checker {
                 self.fn_decl(f);
                 Places::Paradox
             }
-            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) => Places::Paradox,
+            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) | ExprKind::WrapDecl(_) => {
+                Places::Paradox
+            }
 
             ExprKind::If(i) => {
                 let mut any_value = false;
@@ -405,7 +481,11 @@ impl Checker {
         }
         if matches!(
             e.kind,
-            ExprKind::Decl(_) | ExprKind::FnDecl(_) | ExprKind::StructDecl(_) | ExprKind::FlowDecl(_)
+            ExprKind::Decl(_)
+                | ExprKind::FnDecl(_)
+                | ExprKind::StructDecl(_)
+                | ExprKind::FlowDecl(_)
+                | ExprKind::WrapDecl(_)
         ) {
             self.err(msg.to_string(), e.span);
         }
@@ -446,7 +526,7 @@ impl Checker {
                         self.err("`&=` で束縛するなら型に `alias` が要る", b.span);
                     }
                     match self.lookup(t) {
-                        None => self.err(format!("知らない名前 `{t}`"), b.span),
+                        None => self.unknown(t, b.span),
                         Some((k, _)) => {
                             if !can_narrow(k, d.kind) {
                                 self.err("経路の権限は増やせない", b.span);
@@ -469,7 +549,7 @@ impl Checker {
                 return Places::Paradox;
             };
             match self.lookup(n) {
-                None => self.err(format!("知らない名前 `{n}`"), lhs.span),
+                None => self.unknown(n, lhs.span),
                 Some((k, is_alias)) => {
                     if !is_alias {
                         self.err(format!("`{n}` は別名ではないので指し直せない"), span);
@@ -479,7 +559,7 @@ impl Checker {
                 }
             }
             if self.lookup(t).is_none() {
-                self.err(format!("知らない名前 `{t}`"), rhs.span);
+                self.unknown(t, rhs.span);
             }
             return Places::Paradox;
         }
@@ -491,7 +571,7 @@ impl Checker {
         match root_of(lhs) {
             None => self.err("代入の左辺は経路でなければならない", lhs.span),
             Some(n) => match self.lookup(n) {
-                None => self.err(format!("知らない名前 `{n}`"), lhs.span),
+                None => self.unknown(n, lhs.span),
                 Some((k, _)) => {
                     if k != BindKind::Var {
                         self.err(format!("`{n}` は書けない（`{k:?}` で束縛されている）"), lhs.span);
@@ -540,8 +620,15 @@ impl Checker {
             for a in args {
                 self.operand(a, env);
             }
-            // **破壊的メンバ関数はレシーバに `var` を要求する**（C-64）
-            if name == "push" {
+            // **破壊的メンバ関数はレシーバに `var` を要求する**（C-64）。
+            // 利用者定義（S-1）なら `var self` かで決まる
+            let destructive = matches!(name.as_str(), "push" | "pop" | "clear" | "insert" | "remove")
+                || self
+                    .fns
+                    .values()
+                    .any(|f| f.owner.is_some() && &f.name == name
+                        && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false));
+            if destructive {
                 match root_of(base) {
                     Some(n) => match self.lookup(n) {
                         Some((BindKind::Var, _)) => {}
@@ -549,7 +636,7 @@ impl Checker {
                             format!("破壊的メンバ関数はレシーバに `var` を要求する（`{n}`）"),
                             span,
                         ),
-                        None => self.err(format!("知らない名前 `{n}`"), base.span),
+                        None => self.unknown(n, base.span),
                     },
                     None => self.err("レシーバは経路でなければならない", base.span),
                 }
@@ -563,6 +650,19 @@ impl Checker {
             return Places::Value;
         };
         if name == "getdepth" {
+            return Places::Value;
+        }
+        // **ホストが見せている呼べる名前**（S-11）
+        if let Some(want) = self.host_fns.get(name).copied() {
+            for a in args {
+                self.operand(a, env);
+            }
+            if want != args.len() {
+                self.err(
+                    format!("`{name}` は引数を {want} 個取るが {} 個来た", args.len()),
+                    span,
+                );
+            }
             return Places::Value;
         }
         let Some(f) = self.fns.get(name).cloned() else {
@@ -587,7 +687,7 @@ impl Checker {
                     continue;
                 };
                 match self.lookup(n) {
-                    None => self.err(format!("知らない名前 `{n}`"), a.span),
+                    None => self.unknown(n, a.span),
                     Some((k, _)) => {
                         if !can_narrow(k, p.kind) {
                             self.err("経路の権限は増やせない", a.span);
@@ -607,7 +707,8 @@ impl Checker {
 
     fn construct(&mut self, ty: &Type, args: &CtorArgs, env: Env, span: Span) -> Places {
         if let ValueType::Named(n) = &ty.value {
-            if !self.structs.contains_key(n) {
+            // 構造体かラップ型（S-2）
+            if !self.structs.contains_key(n) && !self.wraps.contains_key(n) {
                 self.err(format!("知らない型 `{n}`"), span);
             }
         }

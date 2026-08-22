@@ -1,0 +1,30 @@
+id = "vaak"
+name = "Vaak"
+description = "Vaak（PraTeX 埋め込みスクリプト言語）の言語サーバと色分け"
+version = "0.1.0"
+schema_version = 1
+authors = ["Arimura Akihiro"]
+
+# **Zed は LSP の意味トークンで色を付けない。** tree-sitter 文法が要る。
+#
+# だから文法を置いた。ただし**色分けに要る分だけ**である——
+# 式の優先順位も領域の規則も段の数え方も入っていない。
+# **入れれば一つの決定を二箇所で実装することになり、二箇所で間違えられる**
+# （C-61 / C-93 で二度やった誤りである）。
+#
+# 意味は言語サーバが持つ。診断・説明・記号一覧・補完はそちらから来る。
+#
+# **鍵語の一覧だけは `src/lexer.rs` と一致していなければならない。**
+# `tests/grammar.rs` がそれを確かめている。
+#
+# Zed は文法をローカルの道からは読めず、必ず git から取る。
+# だから `editors/tree-sitter-vaak` 自体が git の版方になっている。
+# 文法を直したら `scripts/sync-grammar.sh` を走らせて下の rev を新しくすること。
+
+[grammars.vaak]
+repository = "file:///home/suima/Documents/mydsl/editors/tree-sitter-vaak"
+rev = "ffbf0132f05c9cd506a6e93044dc2c6520d32140"
+
+[language_servers.vaak-lsp]
+name = "Vaak"
+languages = ["Vaak"]

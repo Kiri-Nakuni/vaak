@@ -1,3 +1,14 @@
 /target
 node_modules/
 .git-frozen/
+
+# Zed 拡張の成果物
+editors/zed/target/
+
+# VS Code 拡張の成果物
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/package-lock.json
+
+# Zed が取ってくる文法の写し
+editors/zed/grammars/
