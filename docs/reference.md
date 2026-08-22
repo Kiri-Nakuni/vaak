@@ -197,18 +197,19 @@ let truth := (wide > 0) -> bool;
 
 ### 集合型は後置で書く
 
-`array` は直前の一型、`map` は直前の二型を取ります。写像は鍵、値の順です。
+`array` は直前の一型、`map` と `hash` は直前の二型を取ります。連想型は鍵、値の順です。
 
 ```vaak
 i64 array              % i64 の配列
 str i64 map            % str から i64 への写像
+str i64 hash           % str から i64 へのハッシュ表
 str i64 array map      % str から i64 array への写像
 ```
 
 型列を左から積み、最後にちょうど一型が残る必要があります。`alias` は型修飾子ではなく束縛の
 形なので、`i64 array alias` のように最も外側にだけ置けます。
 
-## 4. 配列、`str`、写像、構造体、ラップ型
+## 4. 配列、`str`、`map`、`hash`、構造体、ラップ型
 
 ### 配列
 
@@ -266,29 +267,34 @@ let text := new str(bytes);
 にはまだ入っていません。また、`str` に配列の `.insert()` と `.remove()` を使えることも決定済み
 ですが未実装です。現時点の移植可能なコードではこれらを使わないでください。
 
-### 写像
+### `map` と `hash`
 
-写像リテラルは `(鍵 => 値, ...)` です。空の写像は型を明示して `new` します。
+連想リテラルは `(鍵 => 値, ...)` です。空なら型を明示して `new` します。
 
 ```vaak
 var score : str i64 map := ("alice" => 10, "bob" => 7);
 var empty : str i64 map := new str i64 map();
+var cache : str i64 hash := new str i64 hash();
 
 score["alice"] := 11;
 let unknown := score["carol"] ?? 0;
+cache["answer"] := 42;
 ```
 
 存在しない鍵の読み取りは paradox です。添字への代入は、既存値の更新にも新しい鍵の挿入にも
-使えます。
+使えます。浮動小数は鍵にできません。
 
 | メソッド | 結果 |
 |---|---|
 | `.len()` | 要素数 |
 | `.has(k)` | 鍵があれば `true` |
 | `.remove(k)` | 削除した値。鍵が無ければ paradox |
-| `.keys()` | 鍵を全順序で並べた配列 |
+| `.keys()` | `map` は鍵順、`hash` は挿入順の配列 |
 
-写像を巡回するときは `.keys()` が新しい配列を作ることを踏まえてください。
+`map` は並べた配列を二分探索するため検索が O(log n) で、`.keys()` は鍵順です。`hash` は
+平均 O(1) で検索し、`.keys()` は挿入順を保ちます。現在の STEEL 実測では数百件が分かれ目で、
+小さい表は `map`、識別子表や大きな表は `hash` が向きます。どちらも `.keys()` は新しい配列を
+作ることを踏まえてください。
 
 ### 構造体
 
@@ -650,12 +656,11 @@ cargo run --release --bin steel -- examples/vaak/01-探索.vaak --emit-ir
 標準出力へ出します。`-o 名前` で実行ファイル名を指定できます。
 
 現在の STEEL は、整数、`f32`、`f64`、`f80`、関数、制御、静的に畳める `flow`、配列、`str`、
-入れ子の集合体、構造体、ラップ型、別名、複合代入、`.push()`、`.pop()`、`.clear()` を扱います。
+`map`、`hash`、入れ子の集合体、構造体、ラップ型、別名、複合代入、適用できる集合型の `.len()`、
+`.push()`、`.pop()`、`.clear()`、`.insert()`、`.remove()`、`.has()`、`.keys()` を扱います。
 
 次はまだ扱いません。
 
-- 写像
-- `.insert()` と `.remove()`
 - `str` の `.utf8_len()`、`.utf8_at()`、`.utf8_valid()`
 - `outward`
 - 実行時に段数が決まる `$repeat`
@@ -694,7 +699,8 @@ cargo install --path .
 説明、補完を提供します。Zed と VS Code の拡張は [`editors/`](../editors/README.md) にあります。
 
 - Zed: `editors/zed` を開発拡張として入れます。色分けは tree-sitter、意味は `vaak-lsp` が担当します。
-- VS Code: `editors/vscode` で `npm install` と `npx tsc -p .` を実行します。
+- VS Code: `editors/vscode` で `npm ci`、`npm run compile` を実行します。配布用 VSIX は
+  `npm run package:vsix` で作れます。
 
 ## 10. 字句と演算子の早見表
 
@@ -736,12 +742,12 @@ false
 非結合なので、`a < b < c` や `a := b := c` は静的エラーです。
 
 式の厳密な結合は [形式構文](vaak/16-形式構文.md) の束縛力表が一次資料です。ただし、後から
-決まった `wrap`、`true` / `false` / `bool`、`f80`、利用者定義メンバ関数については、
-[設計判断](vaak/decisions.md) の S-1、S-2、C-97、S-20 も併せて確認してください。
+決まった `wrap`、`true` / `false` / `bool`、`f80`、利用者定義メンバ関数、`hash` については、
+[設計判断](vaak/decisions.md) の S-1、S-2、C-97、S-20、C-98 も併せて確認してください。
 
 ## 11. 次に読むもの
 
 - [設計を読むための付録](appendix.md) — 領域、Akasha、paradox、脱出、名前の由来
-- [実行できる五つの例](../examples/vaak/README.md) — 探索、篩、語数え、逆ポーランド電卓、ホスト連携
+- [実行できる六つの例](../examples/vaak/README.md) — 探索、篩、語数え、逆ポーランド電卓、ホスト連携、小 LISP
 - [理由を書かない仕様書](vaak/probe.md) — 意味論と構文をまとめて照合したいとき
 - [決定の唯一の記録](vaak/decisions.md) — なぜそうなったか、何を撤回したかを追うとき
