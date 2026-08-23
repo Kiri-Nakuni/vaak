@@ -1,6 +1,7 @@
 src/**
 tsconfig.json
 esbuild.js
+package-vsix.js
 out/**/*.map
 node_modules/**
 package-lock.json

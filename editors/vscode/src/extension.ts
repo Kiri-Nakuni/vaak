@@ -10,6 +10,8 @@
 // VS Code は LSP の意味トークンを扱えるので、**Zed と違って文法だけで終わらない。**
 
 import { workspace, ExtensionContext, window } from "vscode";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -24,7 +26,12 @@ export function activate(context: ExtensionContext) {
   if (!cfg.get<boolean>("server.enable", true)) {
     return;
   }
-  const command = cfg.get<string>("server.path", "vaak-lsp");
+  const configured = cfg.get<string>("server.path", "").trim();
+  const target = `${process.platform}-${process.arch}`;
+  const executable = process.platform === "win32" ? "vaak-lsp.exe" : "vaak-lsp";
+  const bundled = context.asAbsolutePath(join("bin", target, executable));
+  // 明示設定を最優先し、target 別 VSIX なら同梱版、portable VSIX なら PATH を使う。
+  const command = configured || (existsSync(bundled) ? bundled : "vaak-lsp");
 
   const serverOptions: ServerOptions = {
     run: { command, transport: TransportKind.stdio },
@@ -43,7 +50,8 @@ export function activate(context: ExtensionContext) {
     // **色分けは生きている。** 言語サーバが無くても編集はできる
     window.showWarningMessage(
       `Vaak: \`${command}\` を起動できません（${e}）。\n` +
-        "`vaak-lsp` を PATH に入れるか、`vaak.server.path` に道を書いてください。" +
+        "platform版VSIXを使うか、`vaak-lsp`をPATHに入れるか、" +
+        "`vaak.server.path`に道を書いてください。" +
         "色分けは言語サーバが無くても効きます。",
     );
   });
