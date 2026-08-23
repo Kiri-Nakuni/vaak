@@ -766,3 +766,17 @@ fn repeat_は並べたものと同じ() {
     同じ("fn f () { { $repeat(break, 2) 5 } } -> i64; f() ?? 99");
     同じ("var n := 0; {{ $repeat(break, n) 5 }}");
 }
+
+/// 利用者定義のメンバ関数（S-1）。**`self` は `T alias`** なので複製しない。
+#[test]
+fn 利用者定義のメンバ関数() {
+    同じ("struct P { let x : i64; }; fn P.get (self) { self.x } -> i64; let p := new P ( x := 3 ); p.get()");
+    同じ("struct P { let x : i64; }; fn P.plus (self, k : i64) { self.x + k } -> i64; let p := new P ( x := 3 ); p.plus(4)");
+    同じ("struct P { var x : i64 := 3; }; fn P.scale (var self, k : i64) { self.x *= k; }; var p := new P (); p.scale(4); p.x");
+    同じ("struct P { var x : i64 := 1; }; fn P.bump (var self) { self.x += 1; }; var p := new P (); p.bump(); p.bump(); p.x");
+    同じ("wrap M = i64; fn M.twice (self) { (self -> i64) * 2 } -> i64; var m := new M(21); m.twice()");
+    同じ("struct Q { var a : i64 array; }; fn Q.first (self) { self.a[0] ?? 0 } -> i64; var q := new Q ( a := new i64 array(2, 9) ); q.first()");
+    同じ("struct Q { var a : i64 array; }; fn Q.add (var self, v : i64) { self.a.push(v); }; var q := new Q ( a := new i64 array(0, 0) ); q.add(5); q.add(7); q.a[1] ?? 0");
+    同じ("struct A { let v : i64; }; struct B { let v : i64; }; fn A.get (self) { self.v * 10 } -> i64; fn B.get (self) { self.v } -> i64; let a := new A ( v := 4 ); let b := new B ( v := 7 ); a.get() + b.get()");
+    同じ("struct P { var a : i64 array; }; var p := new P ( a := new i64 array(3, 1) ); p.a.len()");
+}

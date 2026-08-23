@@ -751,3 +751,43 @@ t!(動く回数でも繋がる,
    "fn f () { var n := 2; { { $repeat(break, n) break 5 } ; 1 } } -> i64; f() ?? 99");
 t!(負の回数でも被演算子は残る,
    "fn f () { var n := 0 - 3; { $repeat(break, n) break 5 } } -> i64; f() ?? 99");
+
+// ── 利用者定義のメンバ関数（S-1） ─────────────────────────
+
+t!(欄を読むメンバ関数,
+   "struct P { let x : i64; }; fn P.get (self) { self.x } -> i64;
+    let p := new P ( x := 3 ); p.get()");
+t!(引数を取るメンバ関数,
+   "struct P { let x : i64; }; fn P.plus (self, k : i64) { self.x + k } -> i64;
+    let p := new P ( x := 3 ); p.plus(4)");
+t!(varselfは書き換える,
+   "struct P { var x : i64 := 3; }; fn P.scale (var self, k : i64) { self.x *= k; };
+    var p := new P (); p.scale(4); p.x");
+t!(varselfは何度でも効く,
+   "struct P { var x : i64 := 1; }; fn P.bump (var self) { self.x += 1; };
+    var p := new P (); p.bump(); p.bump(); p.bump(); p.x");
+t!(包み型のメンバ関数,
+   "wrap M = i64; fn M.twice (self) { (self -> i64) * 2 } -> i64;
+    var m := new M(21); m.twice()");
+t!(注釈つきの包み型でも引ける,
+   "wrap M = i64; fn M.twice (self) { (self -> i64) * 2 } -> i64;
+    var m : M := new M(21); m.twice()");
+t!(集合体を持つ構造体のメンバ関数,
+   "struct Q { var a : i64 array; }; fn Q.first (self) { self.a[0] ?? 0 } -> i64;
+    var q := new Q ( a := new i64 array(2, 9) ); q.first()");
+t!(メンバ関数が集合体を育てる,
+   "struct Q { var a : i64 array; }; fn Q.add (var self, v : i64) { self.a.push(v); };
+    var q := new Q ( a := new i64 array(0, 0) ); q.add(5); q.add(7); q.a[1] ?? 0");
+t!(欄の受け手にもメンバ関数,
+   "struct P { let x : i64; }; fn P.get (self) { self.x } -> i64;
+    struct R { let p : P; }; let r := new R ( p := new P ( x := 8 ) ); r.p.get()");
+t!(同じ名前でも型が違えば別,
+   "struct A { let v : i64; }; struct B { let v : i64; };
+    fn A.get (self) { self.v * 10 } -> i64; fn B.get (self) { self.v } -> i64;
+    let a := new A ( v := 4 ); let b := new B ( v := 7 ); a.get() + b.get()");
+t!(メンバ関数から自由関数を呼ぶ,
+   "fn dbl (n : i64) { n * 2 } -> i64;
+    struct P { let x : i64; }; fn P.get (self) { dbl(self.x) } -> i64;
+    let p := new P ( x := 21 ); p.get()");
+t!(組み込みのメンバ関数は隠れない,
+   "struct P { var a : i64 array; }; var p := new P ( a := new i64 array(3, 1) ); p.a.len()");

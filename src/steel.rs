@@ -124,6 +124,8 @@ pub struct Steel {
     outward_fns: std::collections::HashSet<String>,
     /// いまの関数の「残りの段数」を入れる枠。持たない関数では `None`
     esc_slot: Option<String>,
+    /// 名前 → **書かれた型**（包みを剥がす前）。メンバ関数を引くのに要る（S-1）
+    written: HashMap<String, ValueType>,
     /// 構造体の宣言。**欄の並びが位置を決める**
     structs: HashMap<String, StructDecl>,
     /// 包み型（S-2）。名前 → 包んだ型
@@ -275,6 +277,7 @@ impl Steel {
             want: None,
             outward_fns: Default::default(),
             esc_slot: None,
+            written: HashMap::new(),
             structs: HashMap::new(),
             wraps: HashMap::new(),
             struct_tys: Vec::new(),
@@ -352,8 +355,19 @@ impl Steel {
     }
 
     fn declare(&mut self, name: &str, ty: ValueType) -> String {
+        self.declare_as(name, ty.clone(), ty)
+    }
+
+    /// **書かれた型も覚える。** 包みを剥がすと `wrap M = i64` の
+    /// メンバ関数が引けなくなる——鍵は `M.名前` である（S-1）
+    fn declare_as(&mut self, name: &str, ty: ValueType, written: ValueType) -> String {
         let p = self.alloca(&ity(&ty));
-        self.scopes.last_mut().unwrap().names.insert(name.to_string(), (p.clone(), ty, false));
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .names
+            .insert(name.to_string(), (p.clone(), ty, false));
+        self.written.insert(name.to_string(), written);
         p
     }
 
@@ -1673,7 +1687,12 @@ impl Steel {
                     } else {
                         self.conv(&v.v.clone(), &v.ty.clone(), &ty)
                     };
-                    let p = self.declare(&b.name, ty.clone());
+                    // **書かれた型を拾う。** 注釈が無ければ初期化子の見た目から
+                    let written = match b.ty.as_ref() {
+                        Some(t) => t.value.clone(),
+                        None => written_of(init).unwrap_or_else(|| v.ty.clone()),
+                    };
+                    let p = self.declare_as(&b.name, ty.clone(), written);
                     self.emit(&format!("store {} {conv}, ptr {p}", ity(&ty)));
                 }
                 // **宣言は値を置かない。** 外界面は paradox だが、`;` が潰す
@@ -3289,6 +3308,12 @@ impl Steel {
                 return self.mutating_method(base, name, args, span);
             }
         }
+        // **利用者定義のメンバ関数を先に探す**（S-1）。無ければ標準ライブラリ（S-3）
+        if let ExprKind::Field { base, name } = &callee.kind {
+            if let Some(key) = self.member_key(base, name)? {
+                return self.call_member(&key, base, args, span);
+            }
+        }
         // 集合体のメンバ関数
         if let ExprKind::Field { base, name } = &callee.kind {
             let b = self.expr(base)?;
@@ -3527,7 +3552,11 @@ impl Steel {
             vals.iter().map(|(t, v, ok)| format!("{t} {v}, i1 {ok}")).collect();
         let rsig = self.ret_sig_of(name, &ret);
         let t = self.tmp();
-        self.emit(&format!("{t} = call {rsig} @vaak_{name}({})", sig.join(", ")));
+        self.emit(&format!(
+            "{t} = call {rsig} @vaak_{}({})",
+            fn_symbol(name),
+            sig.join(", ")
+        ));
         let ok = self.tmp();
         self.emit(&format!("{ok} = extractvalue {rsig} {t}, 0"));
         let v = self.tmp();
@@ -3570,7 +3599,7 @@ impl Steel {
         self.push_scope();
 
         // **越える脱出を持つ関数だけが枠を持つ**（C-70）
-        self.esc_slot = if self.outward_fns.contains(&f.name) {
+        self.esc_slot = if self.outward_fns.contains(&crate::ast::fn_key(f)) {
             Some(self.alloca_init("i64", "0"))
         } else {
             None
@@ -3615,7 +3644,7 @@ impl Steel {
                 // 局所の別名枠を一つ持つので、`&=` で指し直しても caller の名前は動かない。
                 self.declare_alias(&p.name, &format!("%p{i}"), pt);
             } else {
-                let ptr = self.declare(&p.name, pt.clone());
+                let ptr = self.declare_as(&p.name, pt.clone(), p.ty.value.clone());
                 self.emit(&format!("store {} %p{i}, ptr {ptr}", ity(&pt)));
             }
         }
@@ -3687,7 +3716,7 @@ impl Steel {
 
         Ok(format!(
             "define internal {sig} @vaak_{}({}) {{\nentry:\n{}{}}}\n",
-            f.name,
+            fn_symbol(&crate::ast::fn_key(f)),
             params.join(", "),
             self.head,
             self.body
@@ -4131,9 +4160,9 @@ pub fn compile(prog: &Program) -> R<String> {
     // 呼び出し側が「残りの段数」を受け取るかどうかが、これで決まる
     s.outward_fns = s
         .fns
-        .values()
-        .filter(|f| Steel::has_outward(&f.body))
-        .map(|f| f.name.clone())
+        .iter()
+        .filter(|(_, f)| Steel::has_outward(&f.body))
+        .map(|(k, _)| k.clone())
         .collect();
     s.flows = flows;
     s.structs = structs;
@@ -4203,8 +4232,9 @@ fn collect(
             ExprKind::Discard(Some(inner)) => {
                 collect(std::slice::from_ref(inner), fns, flows, structs, wraps)
             }
-            ExprKind::FnDecl(f) if f.owner.is_none() => {
-                fns.insert(f.name.clone(), f.clone());
+            ExprKind::FnDecl(f) => {
+                // **メンバ関数は型の名前空間に入る**（S-1）。鍵は `型.関数名`
+                fns.insert(crate::ast::fn_key(f), f.clone());
             }
             ExprKind::FlowDecl(d) => {
                 flows.insert(d.name.clone(), (*d.body).clone());
@@ -4876,5 +4906,122 @@ impl Steel {
         self.emit("unreachable");
         self.done = true;
         self.place(&ok);
+    }
+}
+
+/// 関数の鍵を LLVM の名前へ写す。**`.` は識別子に使えない。**
+fn fn_symbol(key: &str) -> String {
+    key.replace('.', "__")
+}
+
+// ================= 利用者定義のメンバ関数（S-1） =================
+//
+// **受け手の型で引く。** 鍵は `型.関数名` である。
+//
+// `self` は `T alias` なので（C-20：`.` は複製しない）、
+// **呼び出し元のセルをそのまま渡す。** `var self` の書き戻しが要らない。
+
+impl Steel {
+    /// 受け手の型から `型.関数名` を作る。**組み立て時に型が分かる場合だけ。**
+    fn member_key(&mut self, base: &Expr, name: &str) -> R<Option<String>> {
+        let ty = self.static_recv_type(base)?;
+        let Some(ValueType::Named(t)) = ty else {
+            return Ok(None);
+        };
+        let key = format!("{t}.{name}");
+        Ok(self.fns.contains_key(&key).then_some(key))
+    }
+
+    /// 受け手の型。**書かれた名前のまま返す**——包みを剥がすと
+    /// `wrap M = i64` のメンバ関数が引けなくなる（鍵は `M.名前` である）。
+    ///
+    /// **値を作らずに調べる。** 調べるために複製しない
+    fn static_recv_type(&mut self, base: &Expr) -> R<Option<ValueType>> {
+        Ok(match &base.kind {
+            ExprKind::Name(n) => self.written.get(n).cloned(),
+            ExprKind::Paren(v) if v.len() == 1 => return self.static_recv_type(&v[0]),
+            ExprKind::Field { base, name } => {
+                let Some(t) = self.static_recv_type(base)? else { return Ok(None) };
+                // 欄を辿るときだけは剥がす——構造体でなければ欄が無い
+                let ValueType::Named(sn) = self.resolve(&t) else { return Ok(None) };
+                let Some(fields) = self.fields_of(&sn) else { return Ok(None) };
+                fields.iter().find(|(f, _)| f == name).map(|(_, t)| t.clone())
+            }
+            _ => None,
+        })
+    }
+
+    fn call_member(&mut self, key: &str, base: &Expr, args: &[Expr], span: Span) -> R<Region> {
+        let f = self.fns.get(key).cloned().unwrap();
+        if f.params.len() != args.len() + 1 {
+            return err(
+                format!("`{}` は引数を {} 個取る", f.name, f.params.len() - 1),
+                span,
+            );
+        }
+        // **`self` は呼び出し元のセルそのもの**（S-1：型は `T alias`）。
+        // `var self` が書けばそのまま届くので、書き戻す手当てが要らない
+        let (cell, _) = self.slot(base)?;
+        let mut vals = vec![("ptr".to_string(), cell, "true".to_string())];
+
+        for (p, a) in f.params[1..].iter().zip(args) {
+            let ty = self.resolve(&p.ty.value);
+            if p.ty.is_alias {
+                let ExprKind::Name(n) = &a.kind else {
+                    return err("`alias` 引数に渡せるのは名前だけ", a.span);
+                };
+                let Some((c, _)) = self.addr(n) else {
+                    return err(format!("知らない名前 `{n}`"), a.span);
+                };
+                vals.push(("ptr".to_string(), c, "true".to_string()));
+                continue;
+            }
+            self.want = Some(ty.clone());
+            let v = self.expr(a)?;
+            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            let c = if is_heap(&ty) {
+                self.deep_copy(&v.v.clone(), &ty)
+            } else {
+                self.conv(&v.v.clone(), &v.ty.clone(), &ty)
+            };
+            vals.push((ity(&ty), c, v.ok));
+        }
+
+        let ret = match f.ret.as_ref() {
+            Some(t) => self.resolve(&t.value),
+            None => ValueType::I64,
+        };
+        let rsig = self.ret_sig_of(key, &ret);
+        let sig: Vec<String> =
+            vals.iter().map(|(t, v, ok)| format!("{t} {v}, i1 {ok}")).collect();
+        let t = self.tmp();
+        self.emit(&format!(
+            "{t} = call {rsig} @vaak_{}({})",
+            fn_symbol(key),
+            sig.join(", ")
+        ));
+        let ok = self.tmp();
+        self.emit(&format!("{ok} = extractvalue {rsig} {t}, 0"));
+        let v = self.tmp();
+        self.emit(&format!("{v} = extractvalue {rsig} {t}, 1"));
+        if self.outward_fns.contains(key) {
+            let n = self.tmp();
+            self.emit(&format!("{n} = extractvalue {rsig} {t}, 2"));
+            let val = Val { ok: ok.clone(), v: v.clone(), ty: ret.clone() };
+            self.resume_outward(&n, val, span)?;
+        }
+        Ok(Some(Val { ok, v, ty: ret }))
+    }
+}
+
+/// 式に**書かれている型**。`new M(…)` や `E -> M` の `M` を拾う。
+///
+/// 包みを剥がした後の型では、メンバ関数の鍵（`M.名前`、S-1）が引けない。
+fn written_of(e: &Expr) -> Option<ValueType> {
+    match &e.kind {
+        ExprKind::Construct { ty, .. } => Some(ty.value.clone()),
+        ExprKind::Ascribe { ty, .. } => Some(ty.value.clone()),
+        ExprKind::Paren(v) if v.len() == 1 => written_of(&v[0]),
+        _ => None,
     }
 }
