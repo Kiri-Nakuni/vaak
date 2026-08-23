@@ -113,7 +113,14 @@ pub enum Op {
     /// **`resume` は作用素が `continue` か。** 見ないと再開が離脱になる
     /// `span` は **`$repeat` 全体**（零段のときの paradox の位置）、
     /// `op_span` は**作用素の位置**（実際に脱出したときの位置）である
-    BreakDyn { payload: bool, resume: bool, op_span: Span, span: Span },
+    BreakDyn {
+        payload: bool,
+        resume: bool,
+        /// 零段のときに飛ぶ先。**被演算子が作用素式のときだけ**
+        zero_at: Option<u32>,
+        op_span: Span,
+        span: Span,
+    },
     /// 型注釈に合わせる。paradox はそのまま通す。
     Coerce(u32),
     /// フレームの深さを積む。`getdepth()`。
@@ -1405,16 +1412,28 @@ impl Compiler {
                     }
                 }
             }
-            Shape::Dynamic { count, payload, kind, span: span_of_op } => {
+            Shape::Dynamic { count, payload, kind, span: span_of_op, zero } => {
                 if let Some(p) = &payload {
                     self.expr(p)?;
                     self.emit(Op::NeedValue(p.span));
                 }
                 self.expr(&count)?;
                 self.emit(Op::NeedValue(count.span));
+                // **零段のときの脱出を脇へ置く。** `Op::Continue` の遅延と同じ形
+                let z = match zero {
+                    Some(inner) => {
+                        let j = self.emit(Op::Jump(0));
+                        let at = self.here();
+                        self.escape(&inner, span)?;
+                        self.patch(j);
+                        Some(at)
+                    }
+                    None => None,
+                };
                 self.emit(Op::BreakDyn {
                     payload: payload.is_some(),
                     resume: kind == EKind::Continue,
+                    zero_at: z,
                     op_span: span_of_op,
                     span,
                 });
@@ -1481,11 +1500,17 @@ impl Compiler {
                         Shape::Static { kind, .. } => kind,
                         Shape::Dynamic { kind, .. } => kind,
                     };
+                    // **被演算子が作用素式なら、零段のときに走る**（参照実装に揃える）
+                    let zero = match &esc.operand {
+                        Some(Operand::Escape(i)) => Some((**i).clone()),
+                        _ => None,
+                    };
                     return Ok(Shape::Dynamic {
                         count: n.clone(),
                         payload,
                         kind,
                         span: op.span,
+                        zero,
                     });
                 }
                 let Some(d) = self.flows.get(name).cloned() else {
@@ -1527,7 +1552,14 @@ enum Shape {
     /// **作用素も覚えておく。** `$repeat(continue, n)` を `break` にしてはいけない
     /// `span` は**作用素の位置**である。`$repeat` 全体ではない——
     /// 参照実装は内側の脱出の位置を持つので、診断もそこを指す
-    Dynamic { count: Expr, payload: Option<Expr>, kind: EKind, span: Span },
+    Dynamic {
+        count: Expr,
+        payload: Option<Expr>,
+        kind: EKind,
+        span: Span,
+        /// **零段のときに走る脱出。** 参照実装は被演算子が作用素式でも受ける
+        zero: Option<Escape>,
+    },
 }
 
 // ================= 仮想機械 =================
@@ -2702,11 +2734,16 @@ impl<'a> Vm<'a> {
                     span,
                 }));
             }
-            Op::BreakDyn { payload, resume, op_span: _, span } => {
+            Op::BreakDyn { payload, resume, zero_at, op_span: _, span } => {
                 let n = self.pop().value(span)?.as_int().unwrap_or(0);
                 let p = if payload { Some(self.pop().value(span)?) } else { None };
                 // `n` が 0 以下なら作用素を一つも重ねない（C-75 の 5）
                 if n <= 0 {
+                    // **被演算子が作用素式なら、それが走る**（参照実装に揃える）
+                    if let Some(at) = zero_at {
+                        self.frames.last_mut().unwrap().pc = at as usize;
+                        return Ok(None);
+                    }
                     self.stack.push(match p {
                         Some(v) => Slot::Value(v),
                         None => Slot::Paradox(span),

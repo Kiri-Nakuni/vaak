@@ -1718,7 +1718,9 @@ impl Steel {
                     // **hash も枠を持たない**
                     if is_hash(&b.ty) {
                         if *op != AssignOp::Set {
-                            return err("hash への複合代入は STEEL がまだ扱えない", e.span);
+                            return self
+                                .hash_update(*op, &b, i, r, e.span)
+                                .map(|_| None);
                         }
                         let ValueType::Hash(kt, vt) = &b.ty else { unreachable!() };
                         let (kt, vt) = ((**kt).clone(), (**vt).clone());
@@ -1744,7 +1746,7 @@ impl Steel {
                     // **写像は枠を持たない。** 無い鍵は挿す
                     if is_map(&b.ty) {
                         if *op != AssignOp::Set {
-                            return err("写像への複合代入は STEEL がまだ扱えない", e.span);
+                            return self.map_update(*op, &b, i, r, e.span).map(|_| None);
                         }
                         self.map_put(&b.v.clone(), &b.ty.clone(), i, r, e.span)?;
                         return Ok(None);
@@ -2952,8 +2954,10 @@ impl Steel {
             return err("`$repeat` の回数が負", n.span);
         }
         let b = self.plan(op)?;
+        // **被演算子が作用素式なら積み荷にしない。**
+        // 一段以上のときは捨てられる（参照実装に揃える。S-5）
         let o = match &x.operand {
-            Some(Operand::Escape(i)) => self.plan(i)?,
+            Some(Operand::Escape(_)) => Plan::default(),
             Some(Operand::Value(v)) => Plan { payload: Some(v.clone()), ..Plan::default() },
             None => Plan::default(),
         };
@@ -4496,9 +4500,25 @@ impl Steel {
         let [FlowArg::Escape(op), FlowArg::Value(n)] = &args[..] else {
             return err("`$repeat` は作用素と回数を取る", x.span);
         };
-        // 組み立て時に決まるなら、今までどおり畳む
-        if self.const_int(n).is_some() {
-            return Ok(None);
+        // 組み立て時に決まるなら、今までどおり畳む。
+        // **ただし零以下は別**——一段も抜けないので、被演算子がそのまま値になる（C-75 の 5）
+        if let Some(times) = self.const_int(n) {
+            if times > 0 {
+                return Ok(None);
+            }
+            return match &x.operand {
+                Some(Operand::Escape(i)) => {
+                    let i = (**i).clone();
+                    self.escape(&i)?;
+                    Ok(Some(self.paradox(&ValueType::I64)))
+                }
+                Some(Operand::Value(v)) => {
+                    let v = v.clone();
+                    let r = self.expr(&v)?;
+                    Ok(Some(r.unwrap_or_else(|| self.paradox(&ValueType::I64))))
+                }
+                None => Ok(Some(self.paradox(&ValueType::I64))),
+            };
         }
         // 作用素は組み立て時に決まらねばならない。**回数だけが動く**
         let op_plan = self.plan(op)?;
@@ -4511,13 +4531,18 @@ impl Steel {
         let Some(count) = count else { return err("`$repeat` の回数に値が無い", n.span) };
         let times = self.widen64(&count);
 
-        // 積み荷は**一度だけ**評価する（C-79）
+        // 積み荷は**一度だけ**評価する（C-79）。
+        //
+        // **被演算子が作用素式なら、零段のときにだけ走る。**
+        // 一段以上のときは捨てられる——参照実装がそうしているので揃える（S-5）。
+        // **不揃いに見えるが、揃えないことの方が悪い。** 決定へ問いとして残した
+        let zero_escape = match &x.operand {
+            Some(Operand::Escape(i)) => Some((**i).clone()),
+            _ => None,
+        };
         let payload = match &x.operand {
             Some(Operand::Value(v)) => self.expr(v)?,
-            Some(Operand::Escape(_)) => {
-                return err("`$repeat` の被演算子に作用素式は STEEL がまだ扱えない", x.span)
-            }
-            None => None,
+            _ => None,
         };
 
         let here = self.stages.len();
@@ -4584,7 +4609,15 @@ impl Steel {
         self.done = true;
 
         self.place(&zero);
-        self.br(&done);
+        // **零段なら被演算子の作用素式が走る**（参照実装に揃える）
+        if let Some(z) = &zero_escape {
+            self.escape(z)?;
+            if !self.done {
+                self.br(&done);
+            }
+        } else {
+            self.br(&done);
+        }
         self.place(&done);
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
@@ -4752,5 +4785,82 @@ impl Steel {
         self.place(&after);
         let _ = span;
         Ok(())
+    }
+}
+
+// ================= 写像・hash への複合代入 =================
+//
+// **無い鍵は誤りである。** `:=` は挿すが、`+=` は「いまの値に重ねる」ので、
+// 重ねる相手が無ければ意味が無い（参照実装も「経路がたどれない」と言う）。
+
+impl Steel {
+    fn map_update(&mut self, op: AssignOp, m: &Val, k: Val, r: Val, span: Span) -> R<()> {
+        let ValueType::Map(kt, vt) = &m.ty else {
+            return err("写像ではない", span);
+        };
+        let (kt, vt) = ((**kt).clone(), (**vt).clone());
+        if is_heap(&vt) {
+            return err("集合体には複合代入できない", span);
+        }
+        let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
+        let f = self.map_find_fn(&kt)?;
+        let res = self.tmp();
+        self.emit(&format!(
+            "{res} = call {{ i64, i1 }} {f}(ptr {}, {} {kc})",
+            m.v,
+            ity(&kt)
+        ));
+        let at = self.tmp();
+        self.emit(&format!("{at} = extractvalue {{ i64, i1 }} {res}, 0"));
+        let hit = self.tmp();
+        self.emit(&format!("{hit} = extractvalue {{ i64, i1 }} {res}, 1"));
+        self.fail_unless(&hit, "map.upd");
+        let vals = self.tmp();
+        self.emit(&format!("{vals} = call ptr @vaak.map.vals(ptr {})", m.v));
+        let vp = self.tmp();
+        self.emit(&format!("{vp} = getelementptr {}, ptr {vals}, i64 {at}", ity(&vt)));
+        let out = self.rmw(op, &vp, &vt, r, span)?;
+        self.emit(&format!("store {} {out}, ptr {vp}", ity(&vt)));
+        Ok(())
+    }
+
+    fn hash_update(&mut self, op: AssignOp, h: &Val, k: Val, r: Val, span: Span) -> R<()> {
+        let ValueType::Hash(kt, vt) = &h.ty else {
+            return err("hash ではない", span);
+        };
+        let (kt, vt) = ((**kt).clone(), (**vt).clone());
+        if is_heap(&vt) {
+            return err("集合体には複合代入できない", span);
+        }
+        let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
+        let stem = self.hash_fns(&h.ty.clone())?;
+        let at = self.tmp();
+        self.emit(&format!(
+            "{at} = call i64 {stem}.find(ptr {}, {} {kc})",
+            h.v,
+            ity(&kt)
+        ));
+        let hit = self.tmp();
+        self.emit(&format!("{hit} = icmp sge i64 {at}, 0"));
+        self.fail_unless(&hit, "hash.upd");
+        let ents = self.hash_entries(&h.v.clone());
+        let ent = self.hash_ent_ty(&h.ty.clone());
+        let vp = self.tmp();
+        self.emit(&format!("{vp} = getelementptr {ent}, ptr {ents}, i64 {at}, i32 1"));
+        let out = self.rmw(op, &vp, &vt, r, span)?;
+        self.emit(&format!("store {} {out}, ptr {vp}", ity(&vt)));
+        Ok(())
+    }
+
+    /// 条件が偽なら落とす。**黙って別の意味にしない。**
+    fn fail_unless(&mut self, cond: &str, tag: &str) {
+        let ok = self.label(&format!("{tag}.ok"));
+        let bad = self.label(&format!("{tag}.bad"));
+        self.cbr(cond, &ok, &bad);
+        self.place(&bad);
+        self.emit("call void @vaak.fail()");
+        self.emit("unreachable");
+        self.done = true;
+        self.place(&ok);
     }
 }
