@@ -155,7 +155,8 @@ fn close_after (tokens : str array alias, pos : i64) {
 } -> i64;
 
 fn eval (tokens : str array alias, pos : i64,
-         names : str array alias, values : i64 array alias) {
+         var names : str array alias, var values : i64 array alias,
+         copy_environment : u1) {
     if (pos < 0 || pos >= tokens.len()) $return failed(); fi;
     let token := tokens[pos];
 
@@ -183,7 +184,7 @@ fn eval (tokens : str array alias, pos : i64,
             if (here.len() == 1 && here[0] == 41) {
                 $return new Step ( ok := true, value := total, next := cursor + 1 );
             } fi;
-            let part := eval(tokens, cursor, names, values);
+            let part := eval(tokens, cursor, names, values, copy_environment);
             if (! part.ok) $return failed(); fi;
             if (kind == 1) total += part.value; else total *= part.value; fi;
             cursor := part.next;
@@ -194,7 +195,7 @@ fn eval (tokens : str array alias, pos : i64,
     %{ - と / は先頭を初期値にして、残りを左から畳む。
        - の一引数形だけは符号反転になる。 }%
     if (kind == 3 || kind == 4) {
-        let first := eval(tokens, pos + 2, names, values);
+        let first := eval(tokens, pos + 2, names, values, copy_environment);
         if (! first.ok) $return failed(); fi;
         var cursor := first.next;
         var total := first.value;
@@ -205,7 +206,7 @@ fn eval (tokens : str array alias, pos : i64,
                 if (kind == 3 && count == 1) total := 0 - total; fi;
                 $return new Step ( ok := true, value := total, next := cursor + 1 );
             } fi;
-            let part := eval(tokens, cursor, names, values);
+            let part := eval(tokens, cursor, names, values, copy_environment);
             if (! part.ok) $return failed(); fi;
             if (kind == 3) {
                 total -= part.value;
@@ -221,9 +222,9 @@ fn eval (tokens : str array alias, pos : i64,
 
     %{ 比較は二引数。真を 1、偽を 0 として返す。 }%
     if (kind == 5 || kind == 6) {
-        let left := eval(tokens, pos + 2, names, values);
+        let left := eval(tokens, pos + 2, names, values, copy_environment);
         if (! left.ok) $return failed(); fi;
-        let right := eval(tokens, left.next, names, values);
+        let right := eval(tokens, left.next, names, values, copy_environment);
         if (! right.ok) $return failed(); fi;
         let next := close_after(tokens, right.next);
         if (next < 0) $return failed(); fi;
@@ -237,10 +238,10 @@ fn eval (tokens : str array alias, pos : i64,
 
     %{ if は選んだ腕だけ評価する。選ばない腕は skip で構文だけ飛ばす。 }%
     if (kind == 7) {
-        let condition := eval(tokens, pos + 2, names, values);
+        let condition := eval(tokens, pos + 2, names, values, copy_environment);
         if (! condition.ok) $return failed(); fi;
         if (condition.value != 0) {
-            let yes := eval(tokens, condition.next, names, values);
+            let yes := eval(tokens, condition.next, names, values, copy_environment);
             if (! yes.ok) $return failed(); fi;
             let after_no := skip(tokens, yes.next);
             if (after_no < 0) $return failed(); fi;
@@ -250,7 +251,7 @@ fn eval (tokens : str array alias, pos : i64,
         } else {
             let no_pos := skip(tokens, condition.next);
             if (no_pos < 0) $return failed(); fi;
-            let no := eval(tokens, no_pos, names, values);
+            let no := eval(tokens, no_pos, names, values, copy_environment);
             if (! no.ok) $return failed(); fi;
             let next := close_after(tokens, no.next);
             if (next < 0) $return failed(); fi;
@@ -264,13 +265,24 @@ fn eval (tokens : str array alias, pos : i64,
         if (pos + 2 >= tokens.len()) $return failed(); fi;
         let name := tokens[pos + 2];
         if (name.len() == 1 && (name[0] == 40 || name[0] == 41)) $return failed(); fi;
-        let bound := eval(tokens, pos + 3, names, values);
+        let bound := eval(tokens, pos + 3, names, values, copy_environment);
         if (! bound.ok) $return failed(); fi;
-        var scoped_names := names;
-        var scoped_values := values;
-        scoped_names.push(name);
-        scoped_values.push(bound.value);
-        let body := eval(tokens, bound.next, scoped_names, scoped_values);
+        var body := failed();
+        if (copy_environment) {
+            var scoped_names := names;
+            var scoped_values := values;
+            scoped_names.push(name);
+            scoped_values.push(bound.value);
+            body := eval(
+                tokens, bound.next, scoped_names, scoped_values, copy_environment
+            );
+        } else {
+            names.push(name);
+            values.push(bound.value);
+            body := eval(tokens, bound.next, names, values, copy_environment);
+            names.pop();
+            values.pop();
+        } fi;
         if (! body.ok) $return failed(); fi;
         let next := close_after(tokens, body.next);
         if (next < 0) $return failed(); fi;
@@ -286,7 +298,7 @@ fn eval (tokens : str array alias, pos : i64,
             if (here.len() == 1 && here[0] == 41) {
                 $return new Step ( ok := true, value := value, next := cursor + 1 );
             } fi;
-            let part := eval(tokens, cursor, names, values);
+            let part := eval(tokens, cursor, names, values, copy_environment);
             if (! part.ok) $return failed(); fi;
             value := part.value;
             cursor := part.next;
@@ -295,14 +307,18 @@ fn eval (tokens : str array alias, pos : i64,
     failed()
 } -> Step;
 
-fn run_lisp (source : str alias) {
-    let tokens := tokenize(source);
-    let names : str array := new str array(0, "");
-    let values : i64 array := new i64 array(0, 0);
-    let result := eval(tokens, 0, names, values);
+fn run_tokens (tokens : str array alias, copy_environment : u1) {
+    var names : str array := new str array(0, "");
+    var values : i64 array := new i64 array(0, 0);
+    let result := eval(tokens, 0, names, values, copy_environment);
     if (! result.ok) $return; fi;
     if (result.next != tokens.len()) $return; fi;
     result.value
+} -> i64;
+
+fn run_lisp (source : str alias, copy_environment : u1) {
+    let tokens := tokenize(source);
+    run_tokens(tokens, copy_environment)
 } -> i64;
 
 %{ 選ばれない else は 1 / 0 だが、if はその腕を評価しない。
@@ -310,9 +326,11 @@ fn run_lisp (source : str alias) {
 let main_program := "(let x 6 (do (let x 40 (+ x 2)) (if (= (* x 7) 42) (+ x 36) (/ 1 0))))";
 let arithmetic_program := "(- (* 5 5) (/ 9 3) 2)";
 let else_program := "(if (< 3 -2) 99 (/ 20 4))";
-let main_answer := run_lisp(main_program) ?? 0;
-let arithmetic_answer := run_lisp(arithmetic_program) ?? 0;
-let else_answer := run_lisp(else_program) ?? 0;
+let main_answer := run_lisp(main_program, false) ?? 0;
+let copied_answer := run_lisp(main_program, true) ?? 0;
+let arithmetic_answer := run_lisp(arithmetic_program, false) ?? 0;
+let else_answer := run_lisp(else_program, false) ?? 0;
 
 %{ 支持する演算をまとめて回帰試験しつつ、最上位の答えは 42 に保つ。 }%
-if (main_answer == 42 && arithmetic_answer == 20 && else_answer == 5) 42 else 0 fi
+if (main_answer == 42 && copied_answer == 42 &&
+    arithmetic_answer == 20 && else_answer == 5) 42 else 0 fi

@@ -543,6 +543,11 @@ impl Compiler {
                 self.emit(Op::Coerce(ti));
                 self.emit(Op::StoreExact(s));
             }
+            // `const` の別名引数は呼び出し元のセル自体を凍らせる。
+            // 凍結はフレームの出口で一括して解く（C-35 / C-37）。
+            if p.ty.is_alias && p.kind == BindKind::Const {
+                self.emit(Op::Freeze(s));
+            }
         }
         self.chunk.self_is_var = f.owner.is_some()
             && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false);
@@ -870,6 +875,11 @@ impl Compiler {
                         // 元の名前からの書き込みも同じ間は禁じる（C-35）。
                         self.emit(Op::Freeze(src));
                     }
+                    if d.kind == BindKind::Const {
+                        // `const` は経路ではなくセルの性質。
+                        // 元の名前からの書き込みも同じ間は禁じる（C-35）。
+                        self.emit(Op::Freeze(src));
+                    }
                     self.emit(Op::Alias(dst, src));
                 }
             }
@@ -1088,42 +1098,6 @@ impl Compiler {
                 if let ExprKind::Name(v) = &base.kind {
                     if let Some(slot) = self.lookup(v) {
                         self.emit(Op::LoadLen(slot, span));
-                        return Ok(());
-                    }
-                }
-                if is_place_path(base) {
-                    let place = self.compile_place(base)?;
-                    let touched = self.host_touch_const(place.touch);
-                    self.emit(Op::LoadPlaceLen(place.root, touched, span));
-                    return Ok(());
-                }
-            }
-            // 組み込みの破壊的操作を名前へ掛けるなら、セルを直接変更できる。
-            // 引数はこれまでどおり左から右に評価し、変更はその後に行う。
-            if is_destructive(name) {
-                if let ExprKind::Name(v) = &base.kind {
-                    if let Some(slot) = self.lookup(v) {
-                        for a in args {
-                            self.expr(a)?;
-                            self.emit(Op::NeedValue(a.span));
-                        }
-                        let n = self.name_idx(name);
-                        self.emit(Op::MutMethod(slot, n, argc, span));
-                        return Ok(());
-                    }
-                }
-            }
-            // 組み込みの破壊的操作を名前へ掛けるなら、セルを直接変更できる。
-            // 引数はこれまでどおり左から右に評価し、変更はその後に行う。
-            if is_destructive(name) {
-                if let ExprKind::Name(v) = &base.kind {
-                    if let Some(slot) = self.lookup(v) {
-                        for a in args {
-                            self.expr(a)?;
-                            self.emit(Op::NeedValue(a.span));
-                        }
-                        let n = self.name_idx(name);
-                        self.emit(Op::MutMethod(slot, n, args.len() as u16, span));
                         return Ok(());
                     }
                 }
@@ -2541,6 +2515,9 @@ impl<'a> Vm<'a> {
                     Slot::Place(place) => *place,
                     _ => return self.err("添字の前に代入先の経路が無い", sp),
                 };
+                if self.frozen.contains(&c) {
+                    return self.err("凍っているセルには書けない（`const` の別名がある）", sp);
+                }
                 let Some(step) = place_index_step(&index) else {
                     return self.err("添字にできない値", sp);
                 };
