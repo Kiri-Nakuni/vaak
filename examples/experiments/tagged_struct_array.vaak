@@ -1,0 +1,32 @@
+struct Tagged {
+    var tag : i64 := 0;
+    var left : i64 := 0;
+    var right : i64 := 0;
+};
+
+% ベンチ測定器は次の二行を置換する。単体では小さな実行例として走る。
+let item_count := 200;
+let pass_count := 2;
+
+% append-only arena の通常経路に合わせ、節は完成形を一度だけ push する。
+% `values[i].field := ...` の VM 二乗経路は bench_tagged の別表で測る。
+var values := new Tagged array(0, new Tagged());
+nfor (i, 0, item_count) {
+    values.push(new Tagged (
+        tag := i mod 4,
+        left := i,
+        right := i mod 7
+    ));
+};
+
+var total := 0;
+nfor (pass, 0, pass_count) {
+    nfor (i, 0, values.len()) {
+        total += (switch (values[i].tag)
+            case 0 => values[i].left + 1
+            case 1 => values[i].left - values[i].right
+            case 2 => values[i].left * 2
+            case 3 => values[i].right);
+    };
+};
+total
