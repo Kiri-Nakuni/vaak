@@ -1,6 +1,6 @@
 # 例
 
-**動くものだけを置く。** `tests/examples.rs` と `tests/lisp.rs` で確かめてある。
+**動くものだけを置く。** `tests/examples.rs`、`tests/lisp.rs`、`tests/forth.rs` で確かめてある。
 
 | | 見せているもの | 答え |
 |---|---|---:|
@@ -11,6 +11,7 @@
 | [05-ホストを操る](05-ホストを操る.vaak) | ホストの名前は最上位にしかない（C-96） | rtex で走らせる |
 | [06-LISP](06-LISP.vaak) | Vaak 自身で整数の S 式を評価する。参照実装・VM・STEEL に共通する書き方 | 42 |
 | [07-セルフホスト骨格](07-セルフホスト骨格.vaak) | 算術式を字句解析し、arena/NodeId AST を明示的な作業積みで反復評価する | 42 |
+| [07-Forth](07-Forth.vaak) | `i64 array` をデータスタックにして、小さな連結型言語を評価する | 42 |
 
 ```bash
 cargo build --release
