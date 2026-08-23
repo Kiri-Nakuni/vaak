@@ -3,6 +3,31 @@
 use vaak::vm::Op;
 
 #[test]
+fn const別名は一つの字句境界につき一度だけ凍らせる() {
+    let syntax = vaak::parser::parse(
+        "fn f (const x : i64 alias) { x; };
+         var a := 1;
+         { const b : i64 alias &= a; };
+         f(a); a",
+    )
+    .expect("構文");
+    let program = vaak::vm::compile(&syntax).expect("VM 組み立て");
+    let freezes: Vec<usize> = program
+        .chunks
+        .iter()
+        .map(|chunk| {
+            chunk
+                .ops
+                .iter()
+                .filter(|op| matches!(op, Op::Freeze(..)))
+                .count()
+        })
+        .collect();
+
+    assert_eq!(freezes, vec![1, 1], "局所別名と別名引数を二重に凍らせない");
+}
+
+#[test]
 fn 入れ子代入は根をloadして書き戻す命令列へ戻らない() {
     let source =
         "struct Item { var value : i64 := 0; };
