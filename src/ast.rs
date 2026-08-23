@@ -19,6 +19,8 @@ pub enum ExprKind {
     // --- 一次式 ---
     Int(String),
     Float(String),
+    /// `true` / `false`。**型は `u1` で確定している**——文脈を見ない（C-97）
+    Bool(bool),
     Str(String),
     Name(String),
 
@@ -38,6 +40,7 @@ pub enum ExprKind {
     FnDecl(FnDecl),
     FlowDecl(FlowDecl),
     StructDecl(StructDecl),
+    WrapDecl(WrapDecl),
 
     If(If),
     Loop(Box<Expr>),
@@ -52,6 +55,12 @@ pub enum ExprKind {
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     /// `;` — 左の領域を潰し、内面を空にする。**左辺は無くてもよい**（C-80）。
     Discard(Option<Box<Expr>>),
+    /// `E -> T` — **領域に型を付ける**（C-30）。
+    ///
+    /// 「`:` は識別子に、`->` は領域に」の後半である。
+    /// **リテラルは型が決まるまでソースの表現を保持する**ので、
+    /// これがその型を決める道になる——`1 -> u1`、`300 -> u8`。
+    Ascribe { expr: Box<Expr>, ty: Type },
     /// `a.m`
     Field { base: Box<Expr>, name: String },
     /// `a[i]`
@@ -129,6 +138,8 @@ pub enum BindInit {
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
+    /// `fn T.m` のときの `T`。**型の名前空間に入る**（S-1）。
+    pub owner: Option<String>,
     pub name: String,
     pub params: Vec<Param>,
     pub body: Box<Expr>,
@@ -151,6 +162,14 @@ pub struct FlowDecl {
     pub name: String,
     /// 本体は**使用位置で読み直される**（C-15）。ここでは構文木を保持するだけ。
     pub body: Box<Escape>,
+    pub span: Span,
+}
+
+/// `wrap 名前 = 型;`（S-2）。**包むのも剥がすのも `new`。**
+#[derive(Clone, Debug)]
+pub struct WrapDecl {
+    pub name: String,
+    pub base: Type,
     pub span: Span,
 }
 
@@ -234,10 +253,17 @@ pub struct Type {
 #[derive(Clone, PartialEq, Debug)]
 pub enum ValueType {
     U1, U8, U16, U32, I32, I64, F32, F64,
+    /// **方言が足した基底型**（プローブ：「ホスト方言は基底型を足せる（例: 31/63bit 整数、f80）」）。
+    ///
+    /// **STEEL 方言だけが持つ。** LLVM の `x86_fp80`——符号 1・指数 15・仮数 64 ビット。
+    /// 木を辿る実装と VM は**扱わないと言う**（Rust に対応する型が無い）。
+    F80,
     /// `u8 array` をラップした型（C-77）。
     Str,
     Array(Box<ValueType>),
     Map(Box<ValueType>, Box<ValueType>),
+    /// **鍵の値で飛ぶ連想の型**（C-98）。`map` と違い、`.keys()` は**入れた順**。
+    Hash(Box<ValueType>, Box<ValueType>),
     /// 構造体・ラップ型。名前で参照する。
     Named(String),
 }
@@ -250,8 +276,42 @@ pub enum CtorArgs {
     Positional(Vec<Expr>),
 }
 
+/// ホストが見せるもの（C-95 / S-11）。
+///
+/// **値だけでなく、呼べる名前も見せられる。**
+///
+/// ```text
+/// count            値。読んで、書き戻す
+/// tex_print("…")   呼べる名前。ホストが答える
+/// ```
+///
+/// 呼べる名前を足したのは、**閉包が Vaak では表現できない**からである（S-11）——
+/// コールバックは環境を捕まえるが、参照で捕まえれば C-48（値の中に別名は入らない）に、
+/// 写しで捕まえれば C-33（値は深く複製される）に掛かる。
+#[derive(Clone, PartialEq, Debug)]
+pub enum HostItem {
+    Value(ValueType),
+    Fn(HostSig),
+}
+
+/// 呼べる名前の形。**ホストが宣言する**ので、検査器は無改造で働く。
+#[derive(Clone, PartialEq, Debug)]
+pub struct HostSig {
+    pub params: Vec<ValueType>,
+    /// `None` は**値を置かない**——呼び出しは paradox になる。
+    pub ret: Option<ValueType>,
+}
+
 /// プログラム全体。最上位は領域でありスコープである。
 #[derive(Clone, Debug)]
 pub struct Program {
     pub body: Vec<Expr>,
+}
+
+/// 関数を引く鍵。メンバ関数は**型の名前空間に入る**（S-1）。
+pub fn fn_key(f: &FnDecl) -> String {
+    match &f.owner {
+        Some(t) => format!("{t}.{}", f.name),
+        None => f.name.clone(),
+    }
 }

@@ -9,6 +9,8 @@ fn sexp(e: &Expr) -> String {
     match &e.kind {
         ExprKind::Int(s) | ExprKind::Float(s) => s.clone(),
         ExprKind::Str(s) => format!("{s:?}"),
+        ExprKind::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
+        ExprKind::Ascribe { expr, ty: tv } => format!("(-> {} {})", sexp(expr), ty(&tv.value)),
         ExprKind::Name(s) => s.clone(),
         ExprKind::Paren(v) => format!("(paren{})", items(v)),
         ExprKind::Block(v) => format!("(block{})", items(v)),
@@ -49,13 +51,14 @@ fn sexp(e: &Expr) -> String {
         }
         ExprKind::FnDecl(f) => format!(
             "(fn {}{} {}{})",
-            f.name,
+            match &f.owner { Some(t) => format!("{t}.{}", f.name), None => f.name.clone() },
             f.params.iter().map(|p| format!(" {}", p.name)).collect::<String>(),
             sexp(&f.body),
             f.ret.as_ref().map(|t| format!(" -> {}", ty(&t.value))).unwrap_or_default()
         ),
         ExprKind::FlowDecl(f) => format!("(flow {} {})", f.name, esc_s(&f.body)),
         ExprKind::StructDecl(s) => format!("(struct {})", s.name),
+        ExprKind::WrapDecl(w) => format!("(wrap {})", w.name),
         ExprKind::Construct { ty: t, args } => {
             let a = match args {
                 CtorArgs::Named(v) => {
@@ -151,10 +154,11 @@ fn ty(t: &ValueType) -> String {
     use ValueType::*;
     match t {
         U1 => "u1".into(), U8 => "u8".into(), U16 => "u16".into(), U32 => "u32".into(),
-        I32 => "i32".into(), I64 => "i64".into(), F32 => "f32".into(), F64 => "f64".into(),
+        I32 => "i32".into(), I64 => "i64".into(), F32 => "f32".into(), F64 => "f64".into(), F80 => "f80".into(),
         Str => "str".into(),
         Array(i) => format!("{} array", ty(i)),
         Map(k, v) => format!("{} {} map", ty(k), ty(v)),
+        Hash(k, v) => format!("{} {} hash", ty(k), ty(v)),
         Named(n) => n.clone(),
     }
 }
@@ -334,4 +338,25 @@ fn 構造体と作用素式() {
         "flow $return = $repeat(break, getdepth());",
         "(; (flow $return ($repeat((break) (call getdepth)))))",
     );
+}
+
+// ===== C-97：真偽と後置の型注釈 =====
+
+#[test]
+fn 真偽のリテラル() {
+    t("true", "true");
+    t("! false", "(! false)");
+}
+
+#[test]
+fn 後置の型注釈は最も強く結合する() {
+    // **`->` は領域に付く**（C-30）。後置なので算術より先に取る
+    t("200 -> u8 + 100", "(+ (-> 200 u8) 100)");
+    t("1 -> u1", "(-> 1 u1)");
+}
+
+#[test]
+fn boolはu1の別綴り() {
+    // **包み型ではない。** 型としては同じものになる
+    t("1 -> bool", "(-> 1 u1)");
 }

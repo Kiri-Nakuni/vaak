@@ -187,3 +187,26 @@ fn outward_は書いた_break_の段送りに掛かる() {
 fn outward_無しでフレームは越えられない() {
     bad("fn f () { break break; };", "フレームを越える");
 }
+
+#[test]
+fn flow_の本体に_flow_名は書けない() {
+    bad("flow $a = $a;", "本体に `flow` 名");
+    bad(
+        "flow $a = $repeat($return, 1);",
+        "本体に `flow` 名",
+    );
+    ok("flow $a = $repeat(break, 1);");
+}
+
+#[test]
+fn flow_は同名で再定義できない() {
+    bad(
+        "flow $a = break; flow $a = continue;",
+        "再定義できない",
+    );
+    ok("flow $return = $repeat(break, getdepth());");
+    bad(
+        "flow $return = break; flow $return = continue;",
+        "再定義できない",
+    );
+}

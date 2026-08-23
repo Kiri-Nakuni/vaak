@@ -24,6 +24,7 @@ pub enum Tok {
     Fn,
     Flow,
     Struct,
+    Wrap,
     New,
     If,
     Elif,
@@ -38,8 +39,12 @@ pub enum Tok {
     Continue,
     Outward,
     Mod,
+    /// **真偽の literal。** `u1` の 1 と 0（C-97）
+    True,
+    False,
     Array,
     Map,
+    Hash,
     Alias,
 
     // --- 括弧と区切り ---
@@ -235,6 +240,7 @@ impl<'a> Lexer<'a> {
             "fn" => Tok::Fn,
             "flow" => Tok::Flow,
             "struct" => Tok::Struct,
+            "wrap" => Tok::Wrap,
             "new" => Tok::New,
             "if" => Tok::If,
             "elif" => Tok::Elif,
@@ -250,7 +256,11 @@ impl<'a> Lexer<'a> {
             "outward" => Tok::Outward,
             "array" => Tok::Array,
             "map" => Tok::Map,
+            "hash" => Tok::Hash,
             "alias" => Tok::Alias,
+            // **真偽の literal。`u1` である**（C-97）
+            "true" => Tok::True,
+            "false" => Tok::False,
             // `mod` だけは直後の `=` を取り込む（`mod=` は複合代入）
             "mod" => {
                 if self.peek() == Some(b'=') && self.peek_at(1) != Some(b'=') {
@@ -394,7 +404,12 @@ impl<'a> Lexer<'a> {
                                 let Some(d) = (c as char).to_digit(16) else {
                                     return self.err("16進数ではない", start);
                                 };
-                                v = v * 16 + d;
+                                let Some(next) =
+                                    v.checked_mul(16).and_then(|v| v.checked_add(d))
+                                else {
+                                    return self.err("符号位置ではない", start);
+                                };
+                                v = next;
                                 n += 1;
                                 self.pos += 1;
                             }

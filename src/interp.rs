@@ -7,7 +7,7 @@
 use crate::ast::*;
 use crate::span::Span;
 use crate::value::{Arena, CellId, MapKey, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ================= 評価の結果 =================
 
@@ -57,6 +57,21 @@ fn rt<T>(msg: impl Into<String>, span: Span) -> R<T> {
     Err(RuntimeError { msg: msg.into(), span })
 }
 
+/// 検査を飛ばした実行でも、同じ実セルへ二つの別名を束縛しない（C-87）。
+fn reject_duplicate_alias_cells(
+    cells: impl IntoIterator<Item = CellId>,
+    span: Span,
+) -> R<()> {
+    let mut seen = Vec::new();
+    for cell in cells {
+        if seen.contains(&cell) {
+            return rt("同じセルに別名が二つ届く", span);
+        }
+        seen.push(cell);
+    }
+    Ok(())
+}
+
 // ================= 環境 =================
 
 #[derive(Clone, Debug)]
@@ -73,7 +88,6 @@ struct Scope {
     mark: usize,
     /// 脱出段か。**裸のブロック・ループ本体・関数本体だけ**（C-64）。
     is_stage: bool,
-    is_loop: bool,
     is_frame: bool,
     /// このスコープで凍っているセル（`const` 別名。C-79 (5) は集合で持つ）。
     frozen: Vec<CellId>,
@@ -87,10 +101,23 @@ struct FnEntry {
 pub struct Interp {
     arena: Arena,
     scopes: Vec<Scope>,
+    /// ホストが見せている**呼べる名前**（S-11）。名前 → 番号
+    host_fns: HashMap<String, u16>,
+    /// 答える側（S-11）。走らせている間だけ入っている
+    hosts: Option<Box<dyn crate::value::HostFns>>,
     /// 関数の可視範囲はスコープを越える（C-36）。フレームを跨いでも見える。
     fns: HashMap<String, FnEntry>,
     structs: HashMap<String, StructDecl>,
+    /// ラップ型（S-2）。名前 → 包んだ型。
+    wraps: HashMap<String, ValueType>,
     flows: HashMap<String, FlowDecl>,
+    /// **文脈が求めている型**（C-100）。リテラルがこれを受け取る。
+    ///
+    /// `eval_inner` の先頭で必ず取り上げられるので、**一段しか届かない。**
+    /// 通したい枝が置き直す。
+    want: Option<ValueType>,
+    /// 静的検査を通さず呼ばれても、誤った `flow` の展開で再帰し続けない。
+    expanding_flows: HashSet<String>,
     /// 変数の探索はこの位置より外へ行かない。**関数は局所変数を見ない**（C-86）。
     frame_base: usize,
     /// セルの凍結。`const` 別名は元の名前からの書き込みも禁じる（C-78）。
@@ -103,39 +130,92 @@ flow $return = $repeat(break, getdepth());
 "#;
 
 impl Interp {
+    /// ホストが**呼べる名前**を見せる（S-11）。番号は登録順。
+    pub fn expose_fn(&mut self, name: &str, index: u16) {
+        self.host_fns.insert(name.to_string(), index);
+    }
+
+    /// ホストに尋ねる。**答える側は `run_with` で渡される。**
+    fn host_call(&mut self, index: u16, args: &[Value]) -> Option<Value> {
+        match self.hosts.take() {
+            None => None,
+            Some(mut h) => {
+                let r = h.call(index, args);
+                self.hosts = Some(h);
+                r
+            }
+        }
+    }
+
     pub fn new() -> Self {
         let mut it = Interp {
             arena: Arena::new(),
             scopes: Vec::new(),
+            host_fns: HashMap::new(),
+            hosts: None,
             fns: HashMap::new(),
             structs: HashMap::new(),
+            wraps: HashMap::new(),
             flows: HashMap::new(),
+            want: None,
+            expanding_flows: HashSet::new(),
             frame_base: 0,
             frozen: Vec::new(),
             depth_guard: 0,
         };
         // 最上位は領域でありスコープでありフレームである
-        it.push_scope(true, false, true);
+        it.push_scope(true, true);
         let prelude = crate::parser::parse(PRELUDE).expect("無名標準ライブラリの解析に失敗");
         it.collect_decls(&prelude.body);
         it
     }
 
+    /// ホストのセルを最上位のスコープに置く（S-4）。**`var` で見せる。**
+    pub fn expose(&mut self, name: &str, v: Value) {
+        let cell = self.arena.alloc(Some(v));
+        self.declare(name, Binding { cell, kind: BindKind::Var, is_alias: false });
+    }
+
+    /// 走り終わったあと、ホストのセルの値を**取り出す**。写さない。
+    pub fn host_value(&mut self, name: &str) -> Option<Value> {
+        let cell = self.scopes.first()?.vars.get(name)?.cell;
+        self.arena.take(cell)
+    }
+
     /// プログラムを走らせ、最上位の外界面を返す。
     pub fn run(&mut self, prog: &Program) -> R<Eval> {
+        // **この方言に無い型は断る**（S-20）
+        if let Some((name, span)) = find_dialect_type(&prog.body) {
+            return rt(format!("`{name}` はこの方言には無い型（STEEL 方言の型である）"), span);
+        }
         self.collect_decls(&prog.body);
         self.region(&prog.body, Span::NONE)
     }
 
+    /// 答える側を渡して走らせる（S-11）。
+    /// 答える側を渡して走らせる（S-11）。
+    ///
+    /// **持ち主は呼び出し側のままである**——`Rc` で共有するので、
+    /// 走り終わってもホストの側に残っている。
+    pub fn run_with(
+        &mut self,
+        prog: &Program,
+        hosts: Box<dyn crate::value::HostFns>,
+    ) -> R<Eval> {
+        self.hosts = Some(hosts);
+        let r = self.run(prog);
+        self.hosts = None;
+        r
+    }
+
     // ---- スコープ ----
 
-    fn push_scope(&mut self, is_stage: bool, is_loop: bool, is_frame: bool) {
+    fn push_scope(&mut self, is_stage: bool, is_frame: bool) {
         let mark = self.arena.mark();
         self.scopes.push(Scope {
             vars: HashMap::new(),
             mark,
             is_stage,
-            is_loop,
             is_frame,
             frozen: Vec::new(),
         });
@@ -191,10 +271,13 @@ impl Interp {
             }
             match &e.kind {
                 ExprKind::FnDecl(f) => {
-                    self.fns.insert(f.name.clone(), FnEntry { decl: f.clone() });
+                    self.fns.insert(fn_key(f), FnEntry { decl: f.clone() });
                 }
                 ExprKind::StructDecl(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
+                }
+                ExprKind::WrapDecl(w) => {
+                    self.wraps.insert(w.name.clone(), w.base.value.clone());
                 }
                 ExprKind::FlowDecl(f) => {
                     self.flows.insert(f.name.clone(), f.clone());
@@ -209,10 +292,22 @@ impl Interp {
     /// **一つの領域は値を一つしか持てない。**
     /// 内面に何も残っていなければ、外界面は paradox。
     fn region(&mut self, body: &[Expr], span: Span) -> R<Eval> {
+        self.region_wanting(body, None, span)
+    }
+
+    /// **領域の値は一つだけ**（C-14）。どれがそれかは走らせるまで分からないので、
+    /// 文脈の型は全部に置く。**受け取らない枝は先頭で捨てるだけである。**
+    fn region_wanting(
+        &mut self,
+        body: &[Expr],
+        want: Option<ValueType>,
+        span: Span,
+    ) -> R<Eval> {
         let mut slot: Option<(Value, Span)> = None;
         let mut inner_paradox: Option<Span> = None;
 
         for e in body {
+            self.want = want.clone();
             match self.eval(e)? {
                 Eval::Akasha => {}
                 Eval::Escape(x) => return Ok(Eval::Escape(x)),
@@ -271,10 +366,32 @@ impl Interp {
     }
 
     fn eval_inner(&mut self, e: &Expr) -> R<Eval> {
+        // **文脈の型は一段しか届かない。** 最初に取り上げ、通す枝だけが置き直す。
+        //
+        // こうしておくと、置き忘れは「今までどおり `i64`」に落ちるだけで、
+        // **違う型を黙って持ち込むことは起きない**（C-100）。
+        let want = self.want.take();
         match &e.kind {
-            ExprKind::Int(s) => Ok(Eval::Value(parse_int(s, e.span)?)),
-            ExprKind::Float(s) => Ok(Eval::Value(parse_float(s, e.span)?)),
-            ExprKind::Str(s) => Ok(Eval::Value(Value::Str(s.as_bytes().to_vec()))),
+            // **リテラルは置かれた場所の型を受け取る**（C-21）。
+            // 演算の途中でも同じである（C-100）
+            ExprKind::Int(s) => Ok(Eval::Value(coerce_lit(parse_int(s, e.span)?, &want))),
+            ExprKind::Float(s) => Ok(Eval::Value(coerce_lit(parse_float(s, e.span)?, &want))),
+            ExprKind::Str(s) => Ok(Eval::Value(Value::str(s.as_bytes().to_vec()))),
+            ExprKind::Bool(b) => Ok(Eval::Value(Value::U1(*b))),
+
+            // **注釈はその領域の値の型を決める**（C-30）。
+            // インタプリタは型を解決する——検査はしない
+            ExprKind::Ascribe { expr, ty } => {
+                // **注釈は式の中まで届く**（C-100）
+                self.want = Some(ty.value.clone());
+                match self.need_value(expr)? {
+                Ok(v) => Ok(match try_coerce_to(v, &ty.value) {
+                    Some(v) => Eval::Value(v),
+                    None => Eval::Paradox(e.span),
+                }),
+                Err(x) => Ok(Eval::Escape(x)),
+                }
+            }
 
             ExprKind::Name(n) => {
                 let Some(b) = self.lookup(n).cloned() else {
@@ -287,13 +404,13 @@ impl Interp {
             }
 
             // `( )` は領域を作るが、スコープでも脱出段でもない
-            ExprKind::Paren(body) => self.region(body, e.span),
+            ExprKind::Paren(body) => self.region_wanting(body, want, e.span),
 
             // 裸のブロックは領域・スコープ・脱出段の三つを作る
             ExprKind::Block(body) => {
-                self.push_scope(true, false, false);
+                self.push_scope(true, false);
                 self.collect_decls(body);
-                let r = self.region(body, e.span);
+                let r = self.region_wanting(body, want, e.span);
                 self.pop_scope();
                 self.pass_stage(r?, false, e.span)
             }
@@ -317,7 +434,7 @@ impl Interp {
                 unary(*op, v, e.span).map(Eval::Value)
             }
 
-            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, e.span),
+            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, want, e.span),
 
             ExprKind::Escape(esc) => self.make_escape(esc),
 
@@ -325,11 +442,12 @@ impl Interp {
             ExprKind::Assign { op, lhs, rhs } => self.assign(*op, lhs, rhs, e.span),
 
             // 宣言は値を置かない。外界面は paradox
-            ExprKind::FnDecl(_) | ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) => {
-                Ok(Eval::Paradox(e.span))
-            }
+            ExprKind::FnDecl(_)
+            | ExprKind::StructDecl(_)
+            | ExprKind::FlowDecl(_)
+            | ExprKind::WrapDecl(_) => Ok(Eval::Paradox(e.span)),
 
-            ExprKind::If(i) => self.if_expr(i, e.span),
+            ExprKind::If(i) => self.if_expr(i, want, e.span),
             ExprKind::Loop(body) => self.loop_expr(body, None, e.span),
             ExprKind::While { cond, body } => self.while_expr(cond, body, e.span),
             ExprKind::NFor { name, start, count, body } => {
@@ -338,15 +456,22 @@ impl Interp {
             ExprKind::Switch { subject, arms } => self.switch(subject, arms, e.span),
 
             ExprKind::ArrayLit(items) => {
+                // **注釈が言う要素の型が、要素の式の中まで届く**（C-100）
+                let el = match &want {
+                    Some(ValueType::Array(e)) => Some((**e).clone()),
+                    Some(ValueType::Str) => Some(ValueType::U8),
+                    _ => None,
+                };
                 let mut out = Vec::new();
                 for it in items {
+                    self.want = el.clone();
                     match self.need_value(it)? {
                         Ok(v) => out.push(v),
                         Err(x) => return Ok(Eval::Escape(x)),
                     }
                 }
                 let elem = out.first().map(|v| v.type_of()).unwrap_or(ValueType::I64);
-                Ok(Eval::Value(Value::Array { elem, items: out }))
+                Ok(Eval::Value(Value::array(elem, out)))
             }
 
             ExprKind::MapLit(pairs) => {
@@ -369,7 +494,7 @@ impl Interp {
                     };
                     entries.insert(key, vv);
                 }
-                Ok(Eval::Value(Value::Map { key: kt, val: vt, entries }))
+                Ok(Eval::Value(Value::map(kt, vt, entries)))
             }
 
             ExprKind::Construct { ty, args } => self.construct(ty, args, e.span),
@@ -501,11 +626,30 @@ impl Interp {
             }
             let mut x = base;
             x.stages = count as u32;
-            if let Some(Operand::Value(v)) = operand {
-                x.payload = match self.need_value(v)? {
-                    Ok(v) => Some(v),
-                    Err(e) => return Ok(Eval::Escape(e)),
-                };
+            match operand {
+                // 値なら積み荷。**即時に評価する**（C-73）
+                Some(Operand::Value(v)) => {
+                    x.payload = match self.need_value(v)? {
+                        Ok(v) => Some(v),
+                        Err(e) => return Ok(Eval::Escape(e)),
+                    };
+                }
+                // **作用素式なら鎖として繋ぐ**（C-101）。
+                //
+                // `$repeat(break, 2) break 5` は `break break break 5` と同じ——
+                // 畳んだものと並べたものが同じ意味になる
+                Some(Operand::Escape(i)) => {
+                    let Eval::Escape(rest) = self.make_escape(i)? else {
+                        return rt("脱出のはず", span);
+                    };
+                    // 左が先に起きるので、**内側の印は左の段数だけ後ろへずれる**
+                    x.outward |= rest.outward << x.stages;
+                    x.stages += rest.stages;
+                    x.kind = rest.kind;
+                    x.payload = rest.payload;
+                    x.deferred = rest.deferred;
+                }
+                None => {}
             }
             return Ok(Eval::Escape(x));
         }
@@ -513,8 +657,13 @@ impl Interp {
         let Some(decl) = self.flows.get(name).cloned() else {
             return rt(format!("知らない作用素式 `{name}`"), span);
         };
+        if !self.expanding_flows.insert(name.to_string()) {
+            return rt("`flow` の本体に `flow` 名は書けない", span);
+        }
         // 使用位置で読み直す
-        let mut r = self.make_escape(&decl.body)?;
+        let result = self.make_escape(&decl.body);
+        self.expanding_flows.remove(name);
+        let mut r = result?;
         if let (Eval::Escape(x), Some(Operand::Value(v))) = (&mut r, operand) {
             x.payload = match self.need_value(v)? {
                 Ok(v) => Some(v),
@@ -535,6 +684,10 @@ impl Interp {
 
 // ================= 数値 =================
 
+pub fn parse_int_pub(src: &str, span: Span) -> R<Value> {
+    parse_int(src, span)
+}
+
 fn parse_int(src: &str, span: Span) -> R<Value> {
     let clean: String = src.chars().filter(|c| *c != '_').collect();
     let v = if let Some(h) = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")) {
@@ -553,6 +706,10 @@ fn parse_int(src: &str, span: Span) -> R<Value> {
     }
 }
 
+pub fn parse_float_pub(src: &str, span: Span) -> R<Value> {
+    parse_float(src, span)
+}
+
 fn parse_float(src: &str, span: Span) -> R<Value> {
     let clean: String = src.chars().filter(|c| *c != '_').collect();
     match clean.parse::<f64>() {
@@ -560,6 +717,10 @@ fn parse_float(src: &str, span: Span) -> R<Value> {
         Ok(v) if v.is_finite() => Ok(Value::F64(v)),
         _ => rt("浮動小数として読めない（非有限な値は書けない）", span),
     }
+}
+
+pub fn unary_pub(op: UnOp, v: Value, span: Span) -> R<Value> {
+    unary(op, v, span)
 }
 
 fn unary(op: UnOp, v: Value, span: Span) -> R<Value> {
@@ -618,26 +779,56 @@ pub fn euclid_div(a: i128, b: i128) -> (i128, i128) {
 // ================= 演算・束縛・制御 =================
 
 /// 経路。代入の左辺を解決した結果。
-enum Place {
+///
+/// VM も**同じ経路操作**を使う。経路の読み書きを二つ実装すると、
+/// 写像への挿入や数値幅の強制が参照実装と食い違うためである。
+#[derive(Clone, Debug)]
+pub(crate) enum Place {
     Cell(CellId),
     Field(CellId, Vec<Step>),
 }
 
 #[derive(Clone, Debug)]
-enum Step {
+pub(crate) enum Step {
     Field(String),
     Index(i128),
     Key(MapKey),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceWriteError {
+    Unbound,
+    Unreachable,
+    Coerce,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceReadError {
+    Unbound,
+    Intermediate,
+    Missing,
+}
+
 impl Interp {
     // ---- 中置演算子 ----
 
-    fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> R<Eval> {
+    fn binary(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        want: Option<ValueType>,
+        span: Span,
+    ) -> R<Eval> {
         // `??` は paradox の**唯一の除去子**（C-22）。左を右で置き換えるだけで、右を検査しない
         if op == BinOp::Coalesce {
+            // **どちらも同じ場所に置かれる。** 文脈の型は両方へ届く
+            self.want = want.clone();
             return match self.face(lhs)? {
-                Eval::Paradox(_) => self.face(rhs),
+                Eval::Paradox(_) => {
+                    self.want = want;
+                    self.face(rhs)
+                }
                 other => Ok(other),
             };
         }
@@ -662,9 +853,24 @@ impl Interp {
             return self.feed(lhs, rhs, span);
         }
 
+        // **比較は結果が `u1` なので、外の型は左右へ届かない。**
+        // 左右は互いに揃う（型検査器と同じ扱い）
+        let pass = !matches!(
+            op,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+        );
+        if pass {
+            self.want = want;
+        }
         let a = match self.need_value(lhs)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
+        };
+        // **右は左に揃う**（C-21：暗黙変換は無い）。桁数だけは別の型でよい
+        self.want = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            Some(ValueType::I64)
+        } else {
+            Some(a.type_of())
         };
         let b = match self.need_value(rhs)? {
             Ok(v) => v,
@@ -689,11 +895,13 @@ impl Interp {
             match &b.init {
                 // `:=` は**深く複製する**（C-33）。値は自己完結しているので clone で足りる
                 BindInit::Value(e) => {
+                    // **注釈は式の中まで届く**（C-100）
+                    self.want = b.ty.as_ref().map(|t| t.value.clone());
                     let v = match self.need_value(e)? {
                         Ok(v) => v,
                         Err(x) => return Ok(Eval::Escape(x)),
                     };
-                    let v = coerce(v, b.ty.as_ref());
+                    let v = require_coerce(v, b.ty.as_ref(), e.span)?;
                     let cell = self.arena.alloc(Some(v));
                     self.declare(&b.name, Binding { cell, kind: d.kind, is_alias: false });
                 }
@@ -757,14 +965,14 @@ impl Interp {
 
         // **左辺の場所を先に解決してから**右辺を評価する（C-79 (6)）
         let place = self.resolve_place(lhs)?;
+        // **場所の型が右辺の中まで届く**（C-100）。
+        // 場所を先に解けと決めてあるので、型もここで分かる
+        self.want = self.read_place(&place, span).ok().map(|v| v.type_of());
         let rv = match self.need_value(rhs)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
         };
-        let cell = match &place {
-            Place::Cell(c) => *c,
-            Place::Field(c, _) => *c,
-        };
+        let cell = place_cell(&place);
         if self.frozen.contains(&cell) {
             return rt("凍っているセルには書けない（`const` の別名がある）", span);
         }
@@ -817,14 +1025,8 @@ impl Interp {
                     Ok(v) => v,
                     Err(_) => return rt("添字の位置で脱出した", index.span),
                 };
-                let step = match &iv {
-                    Value::Str(_) | Value::F32(_) | Value::F64(_) => {
-                        Step::Key(iv.as_key().unwrap())
-                    }
-                    _ => match iv.as_int() {
-                        Some(i) => Step::Index(i),
-                        None => return rt("添字にできない値", index.span),
-                    },
+                let Some(step) = place_index_step(&iv) else {
+                    return rt("添字にできない値", index.span);
                 };
                 Ok(push_step(p, step))
             }
@@ -833,42 +1035,36 @@ impl Interp {
     }
 
     fn read_place(&mut self, p: &Place, span: Span) -> R<Value> {
-        let (cell, steps) = match p {
-            Place::Cell(c) => (*c, &[][..]),
-            Place::Field(c, s) => (*c, &s[..]),
-        };
-        let Some(mut cur) = self.arena.get(cell).cloned() else {
-            return rt("まだ束縛されていない", span);
-        };
-        for st in steps {
-            cur = match step_get(&cur, st) {
-                Some(v) => v,
-                None => return rt("経路がたどれない", span),
-            };
-        }
-        Ok(cur)
+        place_read(&self.arena, p).ok_or_else(|| RuntimeError {
+            msg: if self.arena.get(place_cell(p)).is_some() {
+                "経路がたどれない".into()
+            } else {
+                "まだ束縛されていない".into()
+            },
+            span,
+        })
     }
 
     fn write_place(&mut self, p: &Place, v: Value, span: Span) -> R<()> {
-        match p {
-            Place::Cell(c) => {
-                self.arena.set(*c, v);
-                Ok(())
+        place_write(&mut self.arena, p, v).map_err(|kind| RuntimeError {
+            msg: match kind {
+                PlaceWriteError::Unbound => "まだ束縛されていない",
+                PlaceWriteError::Unreachable => "経路がたどれない",
+                PlaceWriteError::Coerce => "浮動小数を狭めると非有限になる",
             }
-            Place::Field(c, steps) => {
-                let Some(root) = self.arena.get_mut(*c) else {
-                    return rt("まだ束縛されていない", span);
-                };
-                if !step_set(root, steps, v) {
-                    return rt("経路がたどれない", span);
-                }
-                Ok(())
-            }
-        }
+            .into(),
+            span,
+        })
     }
 }
 
-fn push_step(p: Place, s: Step) -> Place {
+pub(crate) fn place_cell(p: &Place) -> CellId {
+    match p {
+        Place::Cell(c) | Place::Field(c, _) => *c,
+    }
+}
+
+pub(crate) fn push_step(p: Place, s: Step) -> Place {
     match p {
         Place::Cell(c) => Place::Field(c, vec![s]),
         Place::Field(c, mut v) => {
@@ -878,58 +1074,188 @@ fn push_step(p: Place, s: Step) -> Place {
     }
 }
 
-fn step_get(v: &Value, s: &Step) -> Option<Value> {
-    match (v, s) {
-        (Value::Struct { fields, .. }, Step::Field(n)) => {
-            fields.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone())
-        }
-        (Value::Array { items, .. }, Step::Index(i)) => {
-            if *i < 0 {
-                None
-            } else {
-                items.get(*i as usize).cloned()
-            }
-        }
-        (Value::Str(b), Step::Index(i)) => {
-            if *i < 0 {
-                None
-            } else {
-                b.get(*i as usize).map(|x| Value::U8(*x))
-            }
-        }
-        (Value::Map { entries, .. }, Step::Key(k)) => entries.get(k).cloned(),
-        (Value::Map { entries, .. }, Step::Index(i)) => entries.get(&MapKey::Int(*i)).cloned(),
+pub(crate) fn place_index_step(v: &Value) -> Option<Step> {
+    match v {
+        Value::Str(_) | Value::F32(_) | Value::F64(_) => Some(Step::Key(v.as_key()?)),
+        _ => Some(Step::Index(v.as_int()?)),
+    }
+}
+
+/// 経路を借用で辿り、**末端だけ**を複製する。
+///
+/// 根を先に複製すると `a[i].field` が配列の長さに比例し、ループ全体が
+/// O(N²) になる。`[]` と `.` はアクセスであって複製ではない（C-20）。
+pub(crate) fn place_read(arena: &Arena, p: &Place) -> Option<Value> {
+    place_read_checked(arena, p).ok()
+}
+
+pub(crate) fn place_read_checked(
+    arena: &Arena,
+    p: &Place,
+) -> Result<Value, PlaceReadError> {
+    let (cell, steps) = match p {
+        Place::Cell(c) => (*c, &[][..]),
+        Place::Field(c, steps) => (*c, &steps[..]),
+    };
+    let mut cur = arena.get(cell).ok_or(PlaceReadError::Unbound)?;
+    let Some((last, prefix)) = steps.split_last() else {
+        return Ok(cur.clone());
+    };
+    for step in prefix {
+        cur = step_ref(cur, step).ok_or(PlaceReadError::Intermediate)?;
+    }
+    step_get(cur, last).ok_or(PlaceReadError::Missing)
+}
+
+/// 経路の末端にある集合体の長さだけを借用で読む。
+pub(crate) fn place_len(arena: &Arena, p: &Place) -> Option<usize> {
+    let (cell, steps) = match p {
+        Place::Cell(c) => (*c, &[][..]),
+        Place::Field(c, steps) => (*c, &steps[..]),
+    };
+    let mut cur = arena.get(cell)?;
+    for step in steps {
+        cur = step_ref(cur, step)?;
+    }
+    match cur {
+        Value::Array(array) => Some(array.items.len()),
+        Value::Str(bytes) => Some(bytes.len()),
+        Value::Map(map) => Some(map.entries.len()),
+        Value::Hash(hash) => Some(hash.len()),
         _ => None,
     }
 }
 
+/// 経路の末端へ直接書く。VM と参照実装の強制・挿入規則はここで一つになる。
+pub(crate) fn place_write(
+    arena: &mut Arena,
+    p: &Place,
+    v: Value,
+) -> Result<(), PlaceWriteError> {
+    // **セルの型は一度決まったら変わらない。** 代入右辺のリテラルも
+    // その場所の型を受け取る（C-25 / C-94）。
+    // 写像・hash はまだ無い鍵への代入が**挿入**なので、値を読まず型だけ辿る。
+    let (cell, steps) = match p {
+        Place::Cell(c) => (*c, &[][..]),
+        Place::Field(c, steps) => (*c, &steps[..]),
+    };
+    let root = arena.get(cell).ok_or(PlaceWriteError::Unbound)?;
+    let target = step_type(root, steps).ok_or(PlaceWriteError::Unreachable)?;
+    let v = try_coerce_to(v, &target).ok_or(PlaceWriteError::Coerce)?;
+    match p {
+        Place::Cell(c) => {
+            arena.set(*c, v);
+            Ok(())
+        }
+        Place::Field(c, steps) => {
+            let root = arena.get_mut(*c).ok_or(PlaceWriteError::Unbound)?;
+            if step_set(root, steps, v) {
+                Ok(())
+            } else {
+                Err(PlaceWriteError::Unreachable)
+            }
+        }
+    }
+}
+
+fn step_get(v: &Value, s: &Step) -> Option<Value> {
+    if let (Value::Str(bytes), Step::Index(i)) = (v, s) {
+        if *i < 0 {
+            return None;
+        }
+        return bytes.get(*i as usize).map(|x| Value::U8(*x));
+    }
+    step_ref(v, s).cloned()
+}
+
+/// 中間の集合体を借用のまま辿る。`str` の要素は値としてその場で作るため、
+/// 経路の中間にはなれず `step_get` の末端だけで扱う。
+fn step_ref<'a>(v: &'a Value, s: &Step) -> Option<&'a Value> {
+    match (v, s) {
+        (Value::Struct(sv), Step::Field(n)) => {
+            sv.fields.iter().find(|(k, _)| k == n).map(|(_, v)| v)
+        }
+        (Value::Array(ar), Step::Index(i)) => {
+            if *i < 0 {
+                None
+            } else {
+                ar.items.get(*i as usize)
+            }
+        }
+        (Value::Map(mp), Step::Key(k)) => mp.entries.get(k),
+        (Value::Map(mp), Step::Index(i)) => mp.entries.get(&MapKey::Int(*i)),
+        (Value::Hash(h), Step::Key(k)) => h.get(k),
+        (Value::Hash(h), Step::Index(i)) => h.get(&MapKey::Int(*i)),
+        _ => None,
+    }
+}
+
+/// 経路の置き場所の型だけを辿る。写像・hash の最終鍵は未挿入でも型が分かる。
+fn step_type(v: &Value, steps: &[Step]) -> Option<ValueType> {
+    let Some((first, rest)) = steps.split_first() else {
+        return Some(v.type_of());
+    };
+    if rest.is_empty() {
+        return match (v, first) {
+            (Value::Struct(sv), Step::Field(n)) => sv
+                .fields
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, value)| value.type_of()),
+            (Value::Array(ar), Step::Index(_)) => Some(ar.elem.clone()),
+            (Value::Str(_), Step::Index(_)) => Some(ValueType::U8),
+            (Value::Map(mp), Step::Key(_) | Step::Index(_)) => Some(mp.val.clone()),
+            (Value::Hash(h), Step::Key(_) | Step::Index(_)) => Some(h.val.clone()),
+            _ => None,
+        };
+    }
+    let next = step_ref(v, first)?;
+    step_type(next, rest)
+}
+
 fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
     let Some((first, rest)) = steps.split_first() else {
+        // 構造体の欄も含め、置き場所が現在持つ型を保つ。
+        // 集合体だけを特別扱いすると、`p.x := 300` が `u8` の欄へ
+        // `i64` を入れてしまう（C-25 / C-94）。
+        let Some(new) = try_coerce_to(new, &v.type_of()) else {
+            return false;
+        };
         *v = new;
         return true;
     };
     // **集合体は自分の要素の型を知っている。** 書き込む値をそれに揃える（C-94）
     let new = if rest.is_empty() {
         match v {
-            Value::Array { elem, .. } => coerce_to(new, elem),
-            Value::Map { val, .. } => coerce_to(new, val),
+            Value::Array(ar) => match try_coerce_to(new, &ar.elem) {
+                Some(v) => v,
+                None => return false,
+            },
+            Value::Map(mp) => match try_coerce_to(new, &mp.val) {
+                Some(v) => v,
+                None => return false,
+            },
+            Value::Hash(h) => match try_coerce_to(new, &h.val) {
+                Some(v) => v,
+                None => return false,
+            },
             _ => new,
         }
     } else {
         new
     };
     match (v, first) {
-        (Value::Struct { fields, .. }, Step::Field(n)) => {
-            match fields.iter_mut().find(|(k, _)| k == n) {
+        (Value::Struct(sv), Step::Field(n)) => {
+            match sv.fields.iter_mut().find(|(k, _)| k == n) {
                 Some((_, slot)) => step_set(slot, rest, new),
                 None => false,
             }
         }
-        (Value::Array { items, .. }, Step::Index(i)) => {
+        (Value::Array(ar), Step::Index(i)) => {
             if *i < 0 {
                 return false;
             }
-            match items.get_mut(*i as usize) {
+            match ar.items.get_mut(*i as usize) {
                 Some(slot) => step_set(slot, rest, new),
                 None => false,
             }
@@ -938,32 +1264,56 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
             if *i < 0 {
                 return false;
             }
-            match (b.get_mut(*i as usize), &new) {
-                (Some(slot), Value::U8(x)) if rest.is_empty() => {
-                    *slot = *x;
+            // **`str` の要素は `u8` である**（C-77）。書き込む値をそれに揃える（C-94）
+            match (b.get_mut(*i as usize), new.as_int()) {
+                (Some(slot), Some(x)) if rest.is_empty() => {
+                    *slot = x as u8;
                     true
                 }
                 _ => false,
             }
         }
-        (Value::Map { entries, .. }, Step::Key(k)) => {
+        (Value::Map(mp), Step::Key(k)) => {
             if rest.is_empty() {
-                entries.insert(k.clone(), new);
+                mp.entries.insert(k.clone(), new);
                 true
             } else {
-                match entries.get_mut(k) {
+                match mp.entries.get_mut(k) {
                     Some(slot) => step_set(slot, rest, new),
                     None => false,
                 }
             }
         }
-        (Value::Map { entries, .. }, Step::Index(i)) => {
+        (Value::Map(mp), Step::Index(i)) => {
             let k = MapKey::Int(*i);
             if rest.is_empty() {
-                entries.insert(k, new);
+                mp.entries.insert(k, new);
                 true
             } else {
-                match entries.get_mut(&k) {
+                match mp.entries.get_mut(&k) {
+                    Some(slot) => step_set(slot, rest, new),
+                    None => false,
+                }
+            }
+        }
+        (Value::Hash(h), Step::Key(k)) => {
+            if rest.is_empty() {
+                h.insert(k.clone(), new);
+                true
+            } else {
+                match h.get_mut(k) {
+                    Some(slot) => step_set(slot, rest, new),
+                    None => false,
+                }
+            }
+        }
+        (Value::Hash(h), Step::Index(i)) => {
+            let k = MapKey::Int(*i);
+            if rest.is_empty() {
+                h.insert(k, new);
+                true
+            } else {
+                match h.get_mut(&k) {
                     Some(slot) => step_set(slot, rest, new),
                     None => false,
                 }
@@ -989,60 +1339,272 @@ fn can_narrow(from: BindKind, to: BindKind) -> bool {
 /// **集合体の中まで降りる。** `i32 array` と書いたなら、要素も `i32` でなければならない——
 /// 型検査は「リテラルは置かれた場所の型を受け取る」として通すので、
 /// ここで降りないと**検査器と評価器で食い違う**（C-94）。
-fn coerce(v: Value, ty: Option<&Type>) -> Value {
-    let Some(t) = ty else { return v };
-    // ラップ型を基底型で構築したら**剥がす**（S-2 の側で使う）
+pub fn coerce_pub(v: Value, ty: Option<&Type>) -> Value {
+    let original = v.clone();
+    try_coerce(v, ty).unwrap_or(original)
+}
+
+/// 型注釈で決まった表現へ揃える。
+///
+/// `f64` では有限でも `f32` へ狭めると infinity になる値がある。
+/// **非有限値は言語に存在しない**（C-84）ので、その場合は値を作らない。
+pub fn try_coerce_pub(v: Value, ty: Option<&Type>) -> Option<Value> {
+    try_coerce(v, ty)
+}
+
+fn require_coerce(v: Value, ty: Option<&Type>, span: Span) -> R<Value> {
+    try_coerce(v, ty)
+        .ok_or_else(|| RuntimeError { msg: "浮動小数を狭めると非有限になる".into(), span })
+}
+
+/// 関数本体の外界面を返り値型へ揃える。
+/// 非有限になる狭化は値を作らず paradox になる（C-84）。
+fn coerce_result(result: Eval, ty: Option<&Type>, span: Span) -> Eval {
+    match (result, ty) {
+        (Eval::Value(v), Some(t)) => match try_coerce(v, Some(t)) {
+            Some(v) => Eval::Value(v),
+            None => Eval::Paradox(span),
+        },
+        (other, _) => other,
+    }
+}
+
+fn try_coerce(v: Value, ty: Option<&Type>) -> Option<Value> {
+    let Some(t) = ty else { return Some(v) };
+    // ラップ型を基底型で構築したら**剥がす**（S-2）。包みの欄は名前を持たない
     if !matches!(t.value, ValueType::Named(_)) {
-        if let Value::Struct { fields, .. } = &v {
-            if fields.len() == 1 && fields[0].0.is_empty() {
-                return coerce(fields[0].1.clone(), ty);
+        if let Value::Struct(sv) = &v {
+            if sv.fields.len() == 1 && sv.fields[0].0.is_empty() {
+                return try_coerce(sv.fields[0].1.clone(), ty);
             }
         }
     }
     // 配列と写像は中へ降りる
     match (&t.value, v) {
-        (ValueType::Array(el), Value::Array { items, .. }) => {
+        // `str` は `u8 array` を包んだ型（C-77）。包みを行き来するのは
+        // `new` だけだが、VM の `Coerce` もこの一つの変換を共有する。
+        (ValueType::Array(el), Value::Str(bytes)) if **el == ValueType::U8 => {
+            return Some(Value::array(
+                ValueType::U8,
+                bytes.into_iter().map(Value::U8).collect(),
+            ));
+        }
+        (ValueType::Str, Value::Array(array)) => {
+            let bytes = array
+                .items
+                .into_iter()
+                .map(|v| v.as_int().map(|byte| byte as u8))
+                .collect::<Option<Vec<_>>>()?;
+            return Some(Value::str(bytes));
+        }
+        (ValueType::Array(el), Value::Array(ar)) => {
             let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
-            return Value::Array {
-                elem: (**el).clone(),
-                items: items.into_iter().map(|x| coerce(x, Some(&et))).collect(),
-            };
+            let items = ar
+                .items
+                .into_iter()
+                .map(|x| try_coerce(x, Some(&et)))
+                .collect::<Option<Vec<_>>>()?;
+            return Some(Value::array((**el).clone(), items));
         }
-        (ValueType::Map(kt, vt), Value::Map { entries, .. }) => {
+        (ValueType::Map(kt, vt), Value::Map(mp)) => {
             let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
-            return Value::Map {
-                key: (**kt).clone(),
-                val: (**vt).clone(),
-                entries: entries
-                    .into_iter()
-                    .map(|(k, x)| (k, coerce(x, Some(&vty))))
-                    .collect(),
-            };
+            let entries = mp
+                .entries
+                .into_iter()
+                .map(|(k, x)| Some((k, try_coerce(x, Some(&vty))?)))
+                .collect::<Option<_>>()?;
+            return Some(Value::map((**kt).clone(), (**vt).clone(), entries));
         }
-        (_, other) => return coerce_scalar(other, t),
+        (ValueType::Hash(kt, vt), Value::Hash(hv)) => {
+            let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
+            let mut out = crate::value::HashVal::new((**kt).clone(), (**vt).clone());
+            // **入れた順を保つ**（C-98）。穴は飛ばす
+            for (k, x) in hv.entries.into_iter().flatten() {
+                out.insert(k, try_coerce(x, Some(&vty))?);
+            }
+            return Some(Value::Hash(Box::new(out)));
+        }
+        (_, other) => return try_coerce_scalar(other, t),
     }
 }
 
 /// 型を一つ与えて揃える。`coerce` の型だけ版。
-pub fn coerce_to(v: Value, t: &ValueType) -> Value {
-    coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
+/// **`f80` はこの方言では扱えない。**
+///
+/// プローブは「ホスト方言は基底型を足せる（例: 31/63bit 整数、f80）」と言う。
+/// **`f80` は STEEL 方言の型である**——Rust に対応する型が無いので、
+/// 木を辿る実装と VM は持たない（S-20）。
+pub fn is_dialect_only(t: &ValueType) -> bool {
+    match t {
+        ValueType::F80 => true,
+        ValueType::Array(e) => is_dialect_only(e),
+        ValueType::Map(k, v) | ValueType::Hash(k, v) => {
+            is_dialect_only(k) || is_dialect_only(v)
+        }
+        _ => false,
+    }
 }
 
-fn coerce_scalar(v: Value, t: &Type) -> Value {
+/// 構文木のどこかに**この方言に無い型**が書かれていないか。
+///
+/// **黙って受けるより、断る方がよい。** `f80` を書いたのに `f64` で走ったら、
+/// 書き手は精度が出ていることを疑わない。
+pub fn find_dialect_type(items: &[Expr]) -> Option<(String, Span)> {
+    fn ty(t: &Type) -> Option<(String, Span)> {
+        if is_dialect_only(&t.value) {
+            return Some((crate::types::show(&t.value), t.span));
+        }
+        None
+    }
+    fn walk(items: &[Expr], out: &mut Option<(String, Span)>) {
+        use ExprKind as E;
+        for e in items {
+            if out.is_some() {
+                return;
+            }
+            match &e.kind {
+                E::Ascribe { expr, ty: t } => {
+                    *out = ty(t);
+                    walk(std::slice::from_ref(expr), out);
+                }
+                E::Construct { ty: t, .. } => *out = ty(t),
+                E::Decl(d) => {
+                    for b in &d.bindings {
+                        if let Some(t) = &b.ty {
+                            if out.is_none() {
+                                *out = ty(t);
+                            }
+                        }
+                        if let BindInit::Value(v) = &b.init {
+                            walk(std::slice::from_ref(v), out);
+                        }
+                    }
+                }
+                E::FnDecl(f) => {
+                    for p in &f.params {
+                        if out.is_none() {
+                            *out = ty(&p.ty);
+                        }
+                    }
+                    if out.is_none() {
+                        if let Some(r) = &f.ret {
+                            *out = ty(r);
+                        }
+                    }
+                    walk(std::slice::from_ref(&f.body), out);
+                }
+                E::StructDecl(d) => {
+                    for f in &d.fields {
+                        if out.is_none() {
+                            *out = ty(&f.ty);
+                        }
+                    }
+                }
+                E::WrapDecl(d) => *out = ty(&d.base),
+                E::Discard(Some(i)) => walk(std::slice::from_ref(i), out),
+                E::Block(v) | E::Paren(v) | E::ArrayLit(v) => walk(v, out),
+                E::Loop(b) => walk(std::slice::from_ref(b), out),
+                E::While { cond, body } => {
+                    walk(std::slice::from_ref(cond), out);
+                    walk(std::slice::from_ref(body), out);
+                }
+                E::NFor { start, count, body, .. } => {
+                    walk(std::slice::from_ref(start), out);
+                    walk(std::slice::from_ref(count), out);
+                    walk(std::slice::from_ref(body), out);
+                }
+                E::If(i) => {
+                    for (c, b) in &i.arms {
+                        walk(std::slice::from_ref(c), out);
+                        walk(std::slice::from_ref(b), out);
+                    }
+                    if let Some(b) = &i.els {
+                        walk(std::slice::from_ref(b), out);
+                    }
+                }
+                E::Switch { subject, arms } => {
+                    walk(std::slice::from_ref(subject), out);
+                    for a in arms {
+                        walk(std::slice::from_ref(&a.value), out);
+                    }
+                }
+                E::Binary { lhs, rhs, .. } | E::Assign { lhs, rhs, .. } => {
+                    walk(std::slice::from_ref(lhs), out);
+                    walk(std::slice::from_ref(rhs), out);
+                }
+                E::Unary { rhs, .. } => walk(std::slice::from_ref(rhs), out),
+                E::Call { args, .. } => walk(args, out),
+                E::Index { base, index } => {
+                    walk(std::slice::from_ref(base), out);
+                    walk(std::slice::from_ref(index), out);
+                }
+                E::Field { base, .. } => walk(std::slice::from_ref(base), out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = None;
+    walk(items, &mut out);
+    out
+}
+
+pub fn coerce_to(v: Value, t: &ValueType) -> Value {
+    let original = v.clone();
+    try_coerce_to(v, t).unwrap_or(original)
+}
+
+pub fn try_coerce_to(v: Value, t: &ValueType) -> Option<Value> {
+    try_coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
+}
+
+/// `new u8 array(x)` の一引数構築を、参照実装と VM で一箇所に保つ。
+///
+/// `str` なら C-78 の深い複製、`i64` なら従来どおり長さを表す。
+/// `try_coerce_scalar` は対象外の型をそのまま返すため、そこで両者を
+/// 見分けると将来の変更で長さを失い得る。入力の型を先に分ける。
+pub(crate) fn make_u8_array_one(source: Value) -> Option<Value> {
+    match source {
+        source @ Value::Str(_) => try_coerce_to(
+            source,
+            &ValueType::Array(Box::new(ValueType::U8)),
+        ),
+        Value::I64(count) => Some(Value::array(
+            ValueType::U8,
+            vec![Value::U8(0); count.max(0) as usize],
+        )),
+        _ => None,
+    }
+}
+
+fn try_coerce_scalar(v: Value, t: &Type) -> Option<Value> {
     match (&t.value, &v) {
-        (ValueType::U1, _) => v.as_int().map(|i| Value::U1(i != 0)).unwrap_or(v),
-        (ValueType::U8, _) => v.as_int().map(|i| Value::U8(i as u8)).unwrap_or(v),
-        (ValueType::U16, _) => v.as_int().map(|i| Value::U16(i as u16)).unwrap_or(v),
-        (ValueType::U32, _) => v.as_int().map(|i| Value::U32(i as u32)).unwrap_or(v),
-        (ValueType::I32, _) => v.as_int().map(|i| Value::I32(i as i32)).unwrap_or(v),
-        (ValueType::I64, _) => v.as_int().map(|i| Value::I64(i as i64)).unwrap_or(v),
-        (ValueType::F32, _) => v.as_float().map(|f| Value::F32(f as f32)).unwrap_or(v),
-        (ValueType::F64, _) => v.as_float().map(Value::F64).unwrap_or(v),
-        _ => v,
+        (ValueType::U1, _) => Some(v.as_int().map(|i| Value::U1(i != 0)).unwrap_or(v)),
+        (ValueType::U8, _) => Some(v.as_int().map(|i| Value::U8(i as u8)).unwrap_or(v)),
+        (ValueType::U16, _) => Some(v.as_int().map(|i| Value::U16(i as u16)).unwrap_or(v)),
+        (ValueType::U32, _) => Some(v.as_int().map(|i| Value::U32(i as u32)).unwrap_or(v)),
+        (ValueType::I32, _) => Some(v.as_int().map(|i| Value::I32(i as i32)).unwrap_or(v)),
+        (ValueType::I64, _) => Some(v.as_int().map(|i| Value::I64(i as i64)).unwrap_or(v)),
+        (ValueType::F32, _) => match v.as_float() {
+            Some(f) => {
+                let narrowed = f as f32;
+                narrowed.is_finite().then_some(Value::F32(narrowed))
+            }
+            None => Some(v),
+        },
+        (ValueType::F64, _) => match v.as_float() {
+            Some(f) if f.is_finite() => Some(Value::F64(f)),
+            Some(_) => None,
+            None => Some(v),
+        },
+        _ => Some(v),
     }
 }
 
 /// 算術。**0 除算は paradox。浮動小数の非有限な結果もすべて paradox**（C-84）。
+pub fn arith_pub(op: BinOp, a: Value, b: Value, span: Span) -> R<Eval> {
+    arith(op, a, b, span)
+}
+
 fn arith(op: BinOp, a: Value, b: Value, span: Span) -> R<Eval> {
     use BinOp::*;
     // 比較の結果は `u1`
@@ -1072,14 +1634,25 @@ fn arith(op: BinOp, a: Value, b: Value, span: Span) -> R<Eval> {
                 Mod => x % y,
                 _ => return rt("浮動小数に使えない演算子", span),
             };
-            // **inf も NaN も、この言語には存在しない**
-            if !r.is_finite() {
-                return Ok(Eval::Paradox(span));
-            }
-            return Ok(Eval::Value(match a {
-                Value::F32(_) => Value::F32(r as f32),
-                _ => Value::F64(r),
-            }));
+            // **inf も NaN も、この言語には存在しない。** `f32` の演算は
+            // `f64` で計算した途中値ではなく、`f32` へ丸めた後を確かめる。
+            // `3e38 + 3e38` は f64 では有限でも f32 では infinity になる。
+            let out = match a {
+                Value::F32(_) => {
+                    let narrowed = r as f32;
+                    if !narrowed.is_finite() {
+                        return Ok(Eval::Paradox(span));
+                    }
+                    Value::F32(narrowed)
+                }
+                _ => {
+                    if !r.is_finite() {
+                        return Ok(Eval::Paradox(span));
+                    }
+                    Value::F64(r)
+                }
+            };
+            return Ok(Eval::Value(out));
         }
     }
 
@@ -1138,8 +1711,9 @@ fn compare(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 
 impl Interp {
     /// `if` は演算子。**分岐は被演算子位置なので領域だが、スコープでも脱出段でもない。**
-    fn if_expr(&mut self, i: &If, span: Span) -> R<Eval> {
+    fn if_expr(&mut self, i: &If, want: Option<ValueType>, span: Span) -> R<Eval> {
         for (cond, body) in &i.arms {
+            // **条件は `u1` である**（C-21）。外の型は届かない
             let c = match self.need_value(cond)? {
                 Ok(v) => v,
                 Err(x) => return Ok(Eval::Escape(x)),
@@ -1148,11 +1722,16 @@ impl Interp {
                 return rt("`if` の条件は `u1` でなければならない", cond.span);
             };
             if b {
+                // **どの枝も同じ場所に置かれる。** 文脈の型はそこへ届く
+                self.want = want;
                 return self.face(body);
             }
         }
         match &i.els {
-            Some(e) => self.face(e),
+            Some(e) => {
+                self.want = want;
+                self.face(e)
+            }
             // `else` の無い `if` で条件が偽 → paradox
             None => Ok(Eval::Paradox(span)),
         }
@@ -1289,7 +1868,7 @@ impl Interp {
             return rt("ループの本体はブロックでなければならない", body.span);
         };
         // 本体はループの段。**二重にはならない**
-        self.push_scope(true, true, false);
+        self.push_scope(true, false);
         if let Some((n, v)) = loop_var {
             let cell = self.arena.alloc(Some(v));
             self.declare(n, Binding { cell, kind: BindKind::Let, is_alias: false });
@@ -1374,12 +1953,15 @@ impl Interp {
                 let mut out = Vec::new();
                 for f in &decl.fields {
                     let given = fields.iter().find(|(n, _)| n == &f.name);
+                    // **欄の型が式の中まで届く**（C-100）
                     let v = if let Some((_, e)) = given {
+                        self.want = Some(f.ty.value.clone());
                         match self.need_value(e)? {
                             Ok(v) => v,
                             Err(x) => return Ok(Eval::Escape(x)),
                         }
                     } else if let Some(d) = &f.default {
+                        self.want = Some(f.ty.value.clone());
                         match self.need_value(d)? {
                             Ok(v) => v,
                             Err(x) => return Ok(Eval::Escape(x)),
@@ -1387,9 +1969,23 @@ impl Interp {
                     } else {
                         return rt(format!("欄 `{}` に値が無い", f.name), span);
                     };
-                    out.push((f.name.clone(), coerce(v, Some(&f.ty))));
+                    out.push((f.name.clone(), require_coerce(v, Some(&f.ty), f.span)?));
                 }
-                Ok(Eval::Value(Value::Struct { name: name.clone(), fields: out }))
+                Ok(Eval::Value(Value::strukt(name.clone(), out)))
+            }
+            // `new u8 array(str)` は C-78 の「剥がす」構築。
+            // 一引数の通常構築 `new u8 array(n)` とは値の型で見分ける。
+            (ValueType::Array(elem), CtorArgs::Positional(a))
+                if **elem == ValueType::U8 && a.len() == 1 =>
+            {
+                let first = match self.need_value(&a[0])? {
+                    Ok(v) => v,
+                    Err(x) => return Ok(Eval::Escape(x)),
+                };
+                match make_u8_array_one(first) {
+                    Some(array) => Ok(Eval::Value(array)),
+                    None => rt("`u8 array` は `str` または `i64` の長さから作る", span),
+                }
             }
             (ValueType::Array(elem), CtorArgs::Positional(a)) => {
                 let (n, fill) = match a.len() {
@@ -1411,27 +2007,49 @@ impl Interp {
                     }
                 };
                 // 充填値も**要素の型**でなければならない（C-94）
-                let fill = coerce_to(fill, elem);
-                Ok(Eval::Value(Value::Array {
-                    elem: (**elem).clone(),
-                    items: vec![fill; n as usize],
-                }))
+                let fill = require_coerce(
+                    fill,
+                    Some(&Type { value: (**elem).clone(), is_alias: false, span }),
+                    span,
+                )?;
+                Ok(Eval::Value(Value::array((**elem).clone(), vec![fill; n as usize])))
             }
-            (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::Map {
-                key: (**k).clone(),
-                val: (**v).clone(),
-                entries: Default::default(),
-            })),
+            // ラップを剥がす：`new i64 ( m )` のように基底型で構築する
+            (base, CtorArgs::Positional(a))
+                if a.len() == 1
+                    && !matches!(base, ValueType::Named(_) | ValueType::Array(_)) =>
+            {
+                match self.need_value(&a[0])? {
+                    Ok(Value::Struct(sv)) if sv.fields.len() == 1 && sv.fields[0].0.is_empty() => {
+                        Ok(Eval::Value(sv.fields[0].1.clone()))
+                    }
+                    Ok(v) => Ok(match try_coerce(v, Some(ty)) {
+                        Some(v) => Eval::Value(v),
+                        None => Eval::Paradox(span),
+                    }),
+                    Err(x) => Ok(Eval::Escape(x)),
+                }
+            }
+            (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::map((**k).clone(), (**v).clone(), Default::default()))),
+            (ValueType::Hash(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::Hash(
+                Box::new(crate::value::HashVal::new((**k).clone(), (**v).clone())),
+            ))),
             // ラップ型：包むのも剥がすのも `new`（C-78）
             (ValueType::Str, CtorArgs::Positional(a)) if a.len() == 1 => {
                 match self.need_value(&a[0])? {
-                    Ok(Value::Array { items, .. }) => {
-                        let b: Vec<u8> =
-                            items.iter().filter_map(|v| v.as_int()).map(|i| i as u8).collect();
-                        Ok(Eval::Value(Value::Str(b)))
-                    }
-                    Ok(Value::Str(b)) => Ok(Eval::Value(Value::Str(b))),
-                    Ok(_) => rt("`str` は `u8 array` から作る", span),
+                    Ok(v) => match try_coerce(v, Some(ty)) {
+                        Some(v @ Value::Str(_)) => Ok(Eval::Value(v)),
+                        _ => rt("`str` は `u8 array` から作る", span),
+                    },
+                    Err(x) => Ok(Eval::Escape(x)),
+                }
+            }
+            // ラップ型（S-2）。包むのも剥がすのも `new`
+            (ValueType::Named(name), CtorArgs::Positional(a))
+                if self.wraps.contains_key(name) && a.len() == 1 =>
+            {
+                match self.need_value(&a[0])? {
+                    Ok(v) => Ok(Eval::Value(Value::strukt(name.clone(), vec![("".to_string(), v)]))),
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
@@ -1445,13 +2063,15 @@ impl Interp {
                     let Some(d) = &f.default else {
                         return rt(format!("欄 `{}` に値が無い", f.name), span);
                     };
+                    // **欄の型が既定の式の中まで届く**（C-100）
+                    self.want = Some(f.ty.value.clone());
                     let v = match self.need_value(d)? {
                         Ok(v) => v,
                         Err(x) => return Ok(Eval::Escape(x)),
                     };
-                    out.push((f.name.clone(), coerce(v, Some(&f.ty))));
+                    out.push((f.name.clone(), require_coerce(v, Some(&f.ty), f.span)?));
                 }
-                Ok(Eval::Value(Value::Struct { name: name.clone(), fields: out }))
+                Ok(Eval::Value(Value::strukt(name.clone(), out)))
             }
             (ValueType::Array(_), CtorArgs::Named(_)) | (_, CtorArgs::Named(_)) => {
                 rt("この型は欄を名前で取らない", span)
@@ -1462,6 +2082,18 @@ impl Interp {
 
     /// `.` は**アクセスであり複製しない**（C-20）。ここでは値を読むだけ。
     fn field(&mut self, base: &Expr, name: &str, span: Span) -> R<Eval> {
+        // **`.` はアクセスであり複製しない**（C-20）
+        if let ExprKind::Name(n) = &base.kind {
+            let Some(b) = self.lookup(n).cloned() else {
+                return rt(format!("知らない名前 `{n}`"), base.span);
+            };
+            if let Some(v) = self.arena.get(b.cell) {
+                return match step_get(v, &Step::Field(name.to_string())) {
+                    Some(v) => Ok(Eval::Value(v)),
+                    None => rt(format!("欄 `{name}` が無い"), span),
+                };
+            }
+        }
         let b = match self.need_value(base)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
@@ -1473,6 +2105,34 @@ impl Interp {
     }
 
     fn index(&mut self, base: &Expr, index: &Expr, span: Span) -> R<Eval> {
+        // **`[]` はアクセスであり複製しない**（C-20）。
+        // 名前への添字なら、セルから**要素だけ**を取る——集合体ごと写さない
+        if let ExprKind::Name(n) = &base.kind {
+            let i = match self.need_value(index)? {
+                Ok(v) => v,
+                Err(x) => return Ok(Eval::Escape(x)),
+            };
+            let Some(b) = self.lookup(n).cloned() else {
+                return rt(format!("知らない名前 `{n}`"), base.span);
+            };
+            if let Some(coll) = self.arena.get(b.cell) {
+                let step = match (coll, &i) {
+                    (Value::Map(_) | Value::Hash(_), _) => match i.as_key() {
+                        Some(k) => Step::Key(k),
+                        None => return rt("写像の鍵にできない値", index.span),
+                    },
+                    _ => match i.as_int() {
+                        Some(x) => Step::Index(x),
+                        None => return rt("添字にできない値", index.span),
+                    },
+                };
+                return Ok(match step_get(coll, &step) {
+                    Some(v) => Eval::Value(v),
+                    None => Eval::Paradox(span),
+                });
+            }
+            return rt(format!("`{n}` はまだ束縛されていない"), base.span);
+        }
         let b = match self.need_value(base)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
@@ -1482,7 +2142,7 @@ impl Interp {
             Err(x) => return Ok(Eval::Escape(x)),
         };
         let step = match (&b, &i) {
-            (Value::Map { .. }, _) => match i.as_key() {
+            (Value::Map(_) | Value::Hash(_), _) => match i.as_key() {
                 Some(k) => Step::Key(k),
                 None => return rt("写像の鍵にできない値", index.span),
             },
@@ -1510,6 +2170,22 @@ impl Interp {
         if name == "getdepth" {
             return Ok(Eval::Value(Value::I64(self.depth())));
         }
+        // **ホストが答える名前**（S-11）。
+        // 値と違って、**呼べる名前はスコープ全体で見える**（C-36 と同じ扱い）
+        if let Some(hi) = self.host_fns.get(name).copied() {
+            let mut argv = Vec::new();
+            for a in args {
+                match self.need_value(a)? {
+                    Ok(v) => argv.push(v),
+                    Err(x) => return Ok(Eval::Escape(x)),
+                }
+            }
+            return Ok(match self.host_call(hi, &argv) {
+                Some(v) => Eval::Value(v),
+                // **返り値が無ければ領域に値を置かない**
+                None => Eval::Paradox(span),
+            });
+        }
         let Some(f) = self.fns.get(name).cloned() else {
             return rt(format!("知らない関数 `{name}`"), callee.span);
         };
@@ -1536,27 +2212,23 @@ impl Interp {
                 }
                 bound.push((p.name.clone(), p.kind, b.cell, true));
             } else {
+                // **引数の型が式の中まで届く**（C-100）
+                self.want = Some(p.ty.value.clone());
                 let v = match self.need_value(a)? {
                     Ok(v) => v,
                     Err(x) => return Ok(Eval::Escape(x)),
                 };
-                let cell = self.arena.alloc(Some(coerce(v, Some(&p.ty))));
+                let v = require_coerce(v, Some(&p.ty), a.span)?;
+                let cell = self.arena.alloc(Some(v));
                 bound.push((p.name.clone(), p.kind, cell, false));
             }
         }
         // **同じ呼び出しで、同じセルに届く別名を二つ以上渡せない**（C-87）
-        let cells: Vec<CellId> = bound.iter().filter(|b| b.3).map(|b| b.2).collect();
-        for i in 0..cells.len() {
-            for j in i + 1..cells.len() {
-                if cells[i] == cells[j] {
-                    return rt("同じセルに別名が二つ届く", span);
-                }
-            }
-        }
+        reject_duplicate_alias_cells(bound.iter().filter(|b| b.3).map(|b| b.2), span)?;
 
         // 関数本体は領域・スコープ・脱出段（**フレーム**）
         let saved_base = self.frame_base;
-        self.push_scope(true, false, true);
+        self.push_scope(true, true);
         self.frame_base = self.scopes.len() - 1;
         for (n, k, c, is_alias) in bound {
             self.declare(&n, Binding { cell: c, kind: k, is_alias });
@@ -1567,13 +2239,15 @@ impl Interp {
             return rt("関数の本体はブロックでなければならない", span);
         };
         self.collect_decls(items);
-        let r = self.region(items, f.decl.body.span);
+        // **返り値の型が本体の中まで届く**（C-100）
+        let want = f.decl.ret.as_ref().map(|t| t.value.clone());
+        let r = self.region_wanting(items, want, f.decl.body.span);
         self.frame_base = saved_base;
         self.pop_scope();
 
         let r = r?;
         // 脱出は**フレームで止まる**。**上限まで抜けるのは許される**（C-66）
-        Ok(match r {
+        let out = match r {
             Eval::Escape(mut x) => {
                 if x.stages > 1 {
                     // **この段送りに `outward` が掛かっているときだけ越えられる**
@@ -1596,27 +2270,167 @@ impl Interp {
             }
             Eval::Akasha => Eval::Paradox(span),
             other => other,
-        })
+        };
+        Ok(coerce_result(out, f.decl.ret.as_ref(), span))
     }
 
-    /// 組み込みのメンバ関数。**レシーバは複製されない。破壊的である**（C-20）。
+    /// メンバ関数。**レシーバは複製されない。破壊的である**（C-20）。
+    ///
+    /// 利用者定義（S-1）を先に探し、無ければ標準ライブラリ（S-3）。
     fn method(&mut self, base: &Expr, name: &str, args: &[Expr], span: Span) -> R<Eval> {
-        // 読むだけのもの
-        if name == "len" {
+        // 名前ならセルから型だけを見る。値を評価すると、組み込みの `push` や
+        // `pop` に着く前に配列全体を複製してしまい、操作が長さに比例する。
+        let receiver_type = if let ExprKind::Name(n) = &base.kind {
+            self.lookup(n)
+                .and_then(|binding| self.arena.get(binding.cell))
+                .map(Value::type_of)
+        } else {
+            match self.need_value(base) {
+                Ok(Ok(receiver)) => Some(receiver.type_of()),
+                _ => None,
+            }
+        };
+        if let Some(receiver_type) = receiver_type {
+            let key = match receiver_type {
+                ValueType::Named(t) => format!("{t}.{name}"),
+                _ => String::new(),
+            };
+            if let Some(f) = self.fns.get(&key).cloned() {
+                return self.call_method(f, base, args, span);
+            }
+        }
+        self.builtin_method(base, name, args, span)
+    }
+
+    /// 利用者定義のメンバ関数。**第一引数 `self` はレシーバの別名**（S-1）。
+    fn call_method(&mut self, f: FnEntry, base: &Expr, args: &[Expr], span: Span) -> R<Eval> {
+        let d = f.decl.clone();
+        if d.params.len() != args.len() + 1 {
+            return rt(format!("`{}` は引数を {} 個取る", d.name, d.params.len() - 1), span);
+        }
+        let self_param = d.params[0].clone();
+        // 破壊するなら `var self`。書き戻す先を先に押さえる
+        let recv_place = if self_param.kind == BindKind::Var {
+            Some(self.resolve_place(base)?)
+        } else {
+            None
+        };
+        let recv = match self.need_value(base)? {
+            Ok(v) => v,
+            Err(x) => return Ok(Eval::Escape(x)),
+        };
+        let self_cell = self.arena.alloc(Some(recv));
+
+        let mut bound = vec![(self_param.name.clone(), self_param.kind, self_cell, true)];
+        for (p, a) in d.params[1..].iter().zip(args) {
+            if p.ty.is_alias {
+                let ExprKind::Name(n) = &a.kind else {
+                    return rt("`alias` 引数に渡せるのは名前だけ", a.span);
+                };
+                let Some(b) = self.lookup(n).cloned() else {
+                    return rt(format!("知らない名前 `{n}`"), a.span);
+                };
+                bound.push((p.name.clone(), p.kind, b.cell, true));
+            } else {
+                let v = match self.need_value(a)? {
+                    Ok(v) => v,
+                    Err(x) => return Ok(Eval::Escape(x)),
+                };
+                let v = require_coerce(v, Some(&p.ty), a.span)?;
+                let cell = self.arena.alloc(Some(v));
+                bound.push((p.name.clone(), p.kind, cell, false));
+            }
+        }
+        // 標準の入口は静的検査済みだが、参照実装を直接呼ぶ差分試験でも
+        // C-87 を破る呼び出しを受け入れない。self_cell は常に新しいので、
+        // ここで実際に衝突し得るのは追加 alias 同士である。
+        reject_duplicate_alias_cells(bound.iter().filter(|b| b.3).map(|b| b.2), span)?;
+
+        let saved = self.frame_base;
+        self.push_scope(true, true);
+        self.frame_base = self.scopes.len() - 1;
+        for (n, k, c, is_alias) in bound {
+            self.declare(&n, Binding { cell: c, kind: k, is_alias });
+        }
+        let ExprKind::Block(items) = &d.body.kind else {
+            self.frame_base = saved;
+            self.pop_scope();
+            return rt("関数の本体はブロックでなければならない", span);
+        };
+        self.collect_decls(items);
+        let r = self.region(items, d.body.span);
+        let written = self.arena.get(self_cell).cloned();
+        self.frame_base = saved;
+        self.pop_scope();
+        // **レシーバは複製されない。** 書き換えたなら戻す
+        if let (Some(place), Some(v)) = (recv_place, written) {
+            self.write_place(&place, v, span)?;
+        }
+
+        let r = r?;
+        let out = match r {
+            Eval::Escape(mut x) => {
+                if x.stages > 1 {
+                    if x.outward & 1 != 0 {
+                        x.stages -= 1;
+                        x.outward >>= 1;
+                        Eval::Escape(x)
+                    } else {
+                        return rt("フレームを越える脱出", x.span);
+                    }
+                } else {
+                    match x.kind {
+                        EKind::Break => match x.payload.take() {
+                            Some(v) => Eval::Value(v),
+                            None => Eval::Paradox(x.span),
+                        },
+                        EKind::Continue => return rt("再開できるものが無い", x.span),
+                    }
+                }
+            }
+            Eval::Akasha => Eval::Paradox(span),
+            other => other,
+        };
+        Ok(coerce_result(out, d.ret.as_ref(), span))
+    }
+
+    /// 標準ライブラリのメンバ関数（S-3）。**言語が知るのはバイトまで。**
+    fn builtin_method(&mut self, base: &Expr, name: &str, args: &[Expr], span: Span) -> R<Eval> {
+        // `len` は長さだけ要る。**集合体を写さない**
+        if name == "len" && args.is_empty() {
+            if let ExprKind::Name(n) = &base.kind {
+                if let Some(b) = self.lookup(n).cloned() {
+                    if let Some(v) = self.arena.get(b.cell) {
+                        let len = match v {
+                            Value::Array(ar) => Some(ar.items.len()),
+                            Value::Str(s) => Some(s.len()),
+                            Value::Map(mp) => Some(mp.entries.len()),
+                            _ => None,
+                        };
+                        if let Some(len) = len {
+                            return Ok(Eval::Value(Value::I64(len as i64)));
+                        }
+                    }
+                }
+            }
+        }
+        // ---- 読むだけのもの ----
+        if is_num_method(name) || matches!(name, "len" | "has" | "keys" | "utf8_len" | "utf8_at" | "utf8_valid") {
             let b = match self.need_value(base)? {
                 Ok(v) => v,
                 Err(x) => return Ok(Eval::Escape(x)),
             };
-            let n = match &b {
-                Value::Array { items, .. } => items.len(),
-                Value::Str(s) => s.len(),
-                Value::Map { entries, .. } => entries.len(),
-                _ => return rt("`len` は集合体にしか使えない", span),
-            };
-            return Ok(Eval::Value(Value::I64(n as i64)));
+            let mut argv = Vec::new();
+            for a in args {
+                match self.need_value(a)? {
+                    Ok(v) => argv.push(v),
+                    Err(x) => return Ok(Eval::Escape(x)),
+                }
+            }
+            return read_method(&b, name, &argv, span);
         }
-        // 破壊的なもの。**レシーバに `var` を要求する**（C-64）
-        if name == "push" {
+        // ---- 破壊的なもの。**レシーバに `var` を要求する**（C-64）----
+        if matches!(name, "push" | "pop" | "clear" | "insert" | "remove") {
             let place = self.resolve_place(base)?;
             let cell = match &place {
                 Place::Cell(c) | Place::Field(c, _) => *c,
@@ -1624,21 +2438,26 @@ impl Interp {
             if self.frozen.contains(&cell) {
                 return rt("凍っているセルには書けない", span);
             }
-            let [a] = args else {
-                return rt("`push` は値を一つ取る", span);
-            };
-            let v = match self.need_value(a)? {
-                Ok(v) => v,
-                Err(x) => return Ok(Eval::Escape(x)),
-            };
-            let mut cur = self.read_place(&place, span)?;
-            match (&mut cur, &v) {
-                (Value::Array { items, .. }, _) => items.push(v.clone()),
-                (Value::Str(b), Value::U8(x)) => b.push(*x),
-                _ => return rt("`push` は配列か `str` にしか使えない", span),
+            let mut argv = Vec::new();
+            for a in args {
+                match self.need_value(a)? {
+                    Ok(v) => argv.push(v),
+                    Err(x) => return Ok(Eval::Escape(x)),
+                }
             }
+            // 名前そのものがレシーバなら、セルの値をその場で変える。
+            // `read_place` を通すと集合体全体を深く複製してから同じセルへ
+            // 書き戻すため、`array.push` まで長さに比例してしまう。
+            if let Place::Cell(cell) = place {
+                let Some(cur) = self.arena.get_mut(cell) else {
+                    return rt("まだ束縛されていない", span);
+                };
+                return write_method(cur, name, &argv, span);
+            }
+            let mut cur = self.read_place(&place, span)?;
+            let out = write_method(&mut cur, name, &argv, span)?;
             self.write_place(&place, cur, span)?;
-            return Ok(Eval::Paradox(span));
+            return Ok(out);
         }
         rt(format!("知らないメンバ関数 `{name}`"), span)
     }
@@ -1655,4 +2474,444 @@ pub fn run(src: &str) -> Result<Eval, String> {
     let prog = crate::parser::parse(src).map_err(|e| format!("構文: {}", e.msg))?;
     let mut it = Interp::new();
     it.run(&prog).map_err(|e| e.msg)
+}
+
+// ================= 標準ライブラリ（S-3） =================
+//
+// **言語が知るのはバイトまで。文字は標準ライブラリが数える**（C-7）。
+// メソッドの名前が**何を数えているか**を言っている。
+
+pub fn read_method_pub(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    read_method(b, name, args, span)
+}
+
+/// 数に効くメンバ関数か（S-23）。**集合体の名前と混ぜない。**
+pub fn is_num_method(name: &str) -> bool {
+    matches!(
+        name,
+        "abs" | "min" | "max"
+            | "count_ones" | "leading_zeros" | "trailing_zeros"
+            | "reverse_bits" | "swap_bytes"
+            | "rotate_left" | "rotate_right"
+            | "saturating_add" | "saturating_sub" | "saturating_mul"
+            | "sqrt" | "floor" | "ceil" | "trunc" | "round"
+            | "copysign" | "mul_add"
+            | "exp" | "ln" | "log2" | "log10" | "pow"
+            | "sin" | "cos" | "tan"
+    )
+}
+
+fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    if is_num_method(name) {
+        return num_method(b, name, args, span);
+    }
+    Ok(match (name, b) {
+        ("len", Value::Array(ar)) => Eval::Value(Value::I64(ar.items.len() as i64)),
+        ("len", Value::Str(s)) => Eval::Value(Value::I64(s.len() as i64)),
+        ("len", Value::Map(mp)) => Eval::Value(Value::I64(mp.entries.len() as i64)),
+        ("len", Value::Hash(h)) => Eval::Value(Value::I64(h.len() as i64)),
+
+        ("has", Value::Hash(h)) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`has` は鍵を一つ取る", span);
+            };
+            Eval::Value(Value::U1(h.get(&k).is_some()))
+        }
+        ("has", Value::Map(mp)) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`has` は鍵を一つ取る", span);
+            };
+            Eval::Value(Value::U1(mp.entries.contains_key(&k)))
+        }
+        // 並びは鍵の順。**全順序なので決まる**（C-75）
+        ("keys", Value::Map(mp)) => Eval::Value(Value::array(mp.key.clone(), mp.entries.keys().map(|k| key_to_value(k, &mp.key)).collect())),
+        // **入れた順**（C-98）。穴は飛ばす
+        ("keys", Value::Hash(h)) => Eval::Value(Value::array(
+            h.key.clone(),
+            h.iter().map(|(k, _)| key_to_value(k, &h.key)).collect(),
+        )),
+
+        // **符号位置の数。**「1文字」とは言わない
+        ("utf8_len", Value::Str(s)) => match std::str::from_utf8(s) {
+            Ok(t) => Eval::Value(Value::I64(t.chars().count() as i64)),
+            Err(_) => Eval::Paradox(span),
+        },
+        ("utf8_at", Value::Str(s)) => {
+            let Some(i) = args.first().and_then(|v| v.as_int()) else {
+                return rt("`utf8_at` は添字を一つ取る", span);
+            };
+            match std::str::from_utf8(s) {
+                Ok(t) if i >= 0 => match t.chars().nth(i as usize) {
+                    Some(c) => Eval::Value(Value::I32(c as i32)),
+                    None => Eval::Paradox(span),
+                },
+                _ => Eval::Paradox(span),
+            }
+        }
+        ("utf8_valid", Value::Str(s)) => Eval::Value(Value::U1(std::str::from_utf8(s).is_ok())),
+
+        _ => return rt(format!("`{name}` はこの型に使えない"), span),
+    })
+}
+
+pub fn write_method_pub(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    write_method(cur, name, args, span)
+}
+
+fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    let paradox = Eval::Paradox(span);
+    Ok(match (name, cur) {
+        ("push", Value::Array(ar)) => {
+            let Some(v) = args.first() else { return rt("`push` は値を一つ取る", span) };
+            // **集合体は自分の要素の型を知っている**（C-94）。書き込む値をそれに揃える
+            let el = ar.elem.clone();
+            let Some(v) = try_coerce_to(v.clone(), &el) else {
+                return rt("浮動小数を狭めると非有限になる", span);
+            };
+            ar.items.push(v);
+            paradox
+        }
+        ("push", Value::Str(b)) => {
+            // `str` は `u8 array` を包んだ型（C-77）。要素は `u8` である
+            let Some(x) = args.first().and_then(|v| v.as_int()) else {
+                return rt("`str` の `push` は `u8` を取る", span);
+            };
+            b.push(x as u8);
+            paradox
+        }
+        // **空なら paradox**
+        ("pop", Value::Array(ar)) => match ar.items.pop() {
+            Some(v) => Eval::Value(v),
+            None => paradox,
+        },
+        ("pop", Value::Str(b)) => match b.pop() {
+            Some(v) => Eval::Value(Value::U8(v)),
+            None => paradox,
+        },
+        ("clear", Value::Array(ar)) => {
+            ar.items.clear();
+            paradox
+        }
+        ("clear", Value::Str(b)) => {
+            b.clear();
+            paradox
+        }
+        ("clear", Value::Hash(h)) => {
+            h.clear();
+            paradox
+        }
+        ("clear", Value::Map(mp)) => {
+            mp.entries.clear();
+            paradox
+        }
+        ("insert", Value::Array(ar)) => {
+            let (Some(i), Some(v)) = (args.first().and_then(|x| x.as_int()), args.get(1)) else {
+                return rt("`insert` は添字と値を取る", span);
+            };
+            if i < 0 || i as usize > ar.items.len() {
+                return Ok(paradox);
+            }
+            let el = ar.elem.clone();
+            let Some(v) = try_coerce_to(v.clone(), &el) else {
+                return rt("浮動小数を狭めると非有限になる", span);
+            };
+            ar.items.insert(i as usize, v);
+            paradox
+        }
+        // **範囲外は paradox**
+        ("remove", Value::Array(ar)) => {
+            let Some(i) = args.first().and_then(|x| x.as_int()) else {
+                return rt("`remove` は添字を一つ取る", span);
+            };
+            if i < 0 || i as usize >= ar.items.len() {
+                return Ok(paradox);
+            }
+            Eval::Value(ar.items.remove(i as usize))
+        }
+        ("remove", Value::Hash(h)) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`remove` は鍵を一つ取る", span);
+            };
+            match h.remove(&k) {
+                Some(v) => Eval::Value(v),
+                None => paradox,
+            }
+        }
+        ("remove", Value::Map(mp)) => {
+            let Some(k) = args.first().and_then(|v| v.as_key()) else {
+                return rt("`remove` は鍵を一つ取る", span);
+            };
+            match mp.entries.remove(&k) {
+                Some(v) => Eval::Value(v),
+                None => paradox,
+            }
+        }
+        (n, _) => return rt(format!("`{n}` はこの型に使えない"), span),
+    })
+}
+
+fn key_to_value(k: &MapKey, t: &ValueType) -> Value {
+    match k {
+        MapKey::Bytes(b) => Value::str(b.clone()),
+        MapKey::Float(k) => {
+            let x = crate::value::float_from_key(*k);
+            match t {
+                ValueType::F32 => Value::F32(x as f32),
+                _ => Value::F64(x),
+            }
+        }
+        MapKey::Int(i) => match t {
+            ValueType::U1 => Value::U1(*i != 0),
+            ValueType::U8 => Value::U8(*i as u8),
+            ValueType::U16 => Value::U16(*i as u16),
+            ValueType::U32 => Value::U32(*i as u32),
+            ValueType::I32 => Value::I32(*i as i32),
+            _ => Value::I64(*i as i64),
+        },
+    }
+}
+
+// ---- 経路の操作。VM と共有する（意味論を二度実装しない） ----
+
+pub fn get_field(v: &Value, name: &str) -> Option<Value> {
+    step_get(v, &Step::Field(name.to_string()))
+}
+
+pub fn get_index(base: &Value, i: &Value) -> Option<Value> {
+    let step = match base {
+        Value::Map(_) | Value::Hash(_) => Step::Key(i.as_key()?),
+        _ => Step::Index(i.as_int()?),
+    };
+    step_get(base, &step)
+}
+
+pub fn set_field(base: &mut Value, name: &str, v: Value) -> bool {
+    step_set(base, &[Step::Field(name.to_string())], v)
+}
+
+pub fn set_index(base: &mut Value, i: &Value, v: Value) -> bool {
+    let step = match base {
+        Value::Map(_) | Value::Hash(_) => match i.as_key() {
+            Some(k) => Step::Key(k),
+            None => return false,
+        },
+        _ => match i.as_int() {
+            Some(n) => Step::Index(n),
+            None => return false,
+        },
+    };
+    step_set(base, &[step], v)
+}
+
+pub fn coerce_lit_pub(v: Value, want: &Option<ValueType>) -> Value {
+    coerce_lit(v, want)
+}
+
+/// リテラルを文脈の型へ寄せる（C-21 / C-100）。
+///
+/// **数でないものは触らない。** 場所の型が数でなければ、そのままにする——
+/// 集合体や構造体の中は `coerce` が別に降りている（C-94）。
+fn coerce_lit(v: Value, want: &Option<ValueType>) -> Value {
+    match want {
+        Some(t) if is_num_type(t) => coerce_to(v, t),
+        _ => v,
+    }
+}
+
+fn is_num_type(t: &ValueType) -> bool {
+    matches!(
+        t,
+        ValueType::U1
+            | ValueType::U8
+            | ValueType::U16
+            | ValueType::U32
+            | ValueType::I32
+            | ValueType::I64
+            | ValueType::F32
+            | ValueType::F64
+    )
+}
+
+// ================= 数のメンバ関数（S-23） =================
+//
+// **LLVM の命令にあるものを、名前で言えるようにする。**
+//
+// 名前は C-7 に倣って**何をするかを言う**——`popcount` ではなく `count_ones`、
+// `fma` ではなく `mul_add`。
+//
+// 非有限になれば **paradox**（C-84）。整数の溢れは**折り返す**（C-21）——
+// 止めたいなら `saturating_*` と書く。**どちらが起きたか名前で分かる。**
+
+/// 引数を受け手と同じ型に揃える。**暗黙変換は無い**（C-21）ので、
+/// 検査器が既に揃えている。ここは値を取り出すだけである。
+fn same_int(v: Option<&Value>) -> Option<i128> {
+    v?.as_int()
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::F32(x) => Some(*x as f64),
+        Value::F64(x) => Some(*x),
+        _ => None,
+    }
+}
+
+/// 受け手と同じ型で返す。**非有限なら `None`**（C-84）。
+fn like(recv: &Value, x: f64) -> Option<Value> {
+    match recv {
+        Value::F32(_) => {
+            let y = x as f32;
+            y.is_finite().then_some(Value::F64(y as f64)).map(|_| Value::F32(y))
+        }
+        _ => x.is_finite().then_some(Value::F64(x)),
+    }
+}
+
+
+/// 受け手の幅と符号。
+fn width_signed(v: &Value) -> Option<(u32, bool)> {
+    Some(match v {
+        Value::U1(_) => (1, false),
+        Value::U8(_) => (8, false),
+        Value::U16(_) => (16, false),
+        Value::U32(_) => (32, false),
+        Value::I32(_) => (32, true),
+        Value::I64(_) => (64, true),
+        _ => return None,
+    })
+}
+
+fn num_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
+    let paradox = Eval::Paradox(span);
+
+    // ---- 浮動小数 ----
+    if let Some(x) = as_f64(b) {
+        let arg = |i: usize| args.get(i).and_then(as_f64);
+        let out: Option<f64> = match name {
+            "abs" => Some(x.abs()),
+            "sqrt" => Some(x.sqrt()),
+            "floor" => Some(x.floor()),
+            "ceil" => Some(x.ceil()),
+            "trunc" => Some(x.trunc()),
+            // **半分は零から遠い方へ。** Rust の `round` と同じ
+            "round" => Some(x.round()),
+            "exp" => Some(x.exp()),
+            "ln" => Some(x.ln()),
+            "log2" => Some(x.log2()),
+            "log10" => Some(x.log10()),
+            "sin" => Some(x.sin()),
+            "cos" => Some(x.cos()),
+            "tan" => Some(x.tan()),
+            "min" => arg(0).map(|y| x.min(y)),
+            "max" => arg(0).map(|y| x.max(y)),
+            "copysign" => arg(0).map(|y| x.copysign(y)),
+            "pow" => arg(0).map(|y| x.powf(y)),
+            // **一度しか丸めない**（`a * b + c` を融合する）
+            "mul_add" => match (arg(0), arg(1)) {
+                (Some(y), Some(z)) => Some(x.mul_add(y, z)),
+                _ => None,
+            },
+            _ => return rt(format!("`{name}` は浮動小数に使えない"), span),
+        };
+        let Some(v) = out else {
+            return rt(format!("`{name}` の引数が足りない"), span);
+        };
+        // **非有限は値にしない**（C-84）
+        return Ok(match like(b, v) {
+            Some(r) => Eval::Value(r),
+            None => paradox,
+        });
+    }
+
+    // ---- 整数 ----
+    let Some(x) = b.as_int() else {
+        return rt(format!("`{name}` は数にしか使えない"), span);
+    };
+    let Some((w, sg)) = width_signed(b) else {
+        return rt(format!("`{name}` は数にしか使えない"), span);
+    };
+    let mask: i128 = if w >= 128 { -1 } else { (1i128 << w) - 1 };
+    let raw = (x & mask) as u128;
+
+    let out: i128 = match name {
+        // **折り返す**（C-21）。`i32` の最小値は自分自身になる
+        "abs" => {
+            if sg && x < 0 {
+                -x
+            } else {
+                x
+            }
+        }
+        "min" => {
+            let Some(y) = same_int(args.first()) else {
+                return rt("`min` は値を一つ取る", span);
+            };
+            x.min(y)
+        }
+        "max" => {
+            let Some(y) = same_int(args.first()) else {
+                return rt("`max` は値を一つ取る", span);
+            };
+            x.max(y)
+        }
+        // **数える系は `i64` を返す。** 値ではなく個数である
+        "count_ones" => return Ok(Eval::Value(Value::I64(raw.count_ones() as i64))),
+        "leading_zeros" => {
+            let z = raw.leading_zeros() as i64 - (128 - w as i64);
+            return Ok(Eval::Value(Value::I64(z)));
+        }
+        "trailing_zeros" => {
+            let z = if raw == 0 { w as i64 } else { raw.trailing_zeros() as i64 };
+            return Ok(Eval::Value(Value::I64(z)));
+        }
+        "reverse_bits" => {
+            let mut r: u128 = 0;
+            for i in 0..w {
+                if raw >> i & 1 != 0 {
+                    r |= 1 << (w - 1 - i);
+                }
+            }
+            r as i128
+        }
+        "swap_bytes" => {
+            if w % 8 != 0 {
+                return rt("`swap_bytes` は 8 の倍数の幅にしか使えない", span);
+            }
+            let n = w / 8;
+            let mut r: u128 = 0;
+            for i in 0..n {
+                r |= (raw >> (i * 8) & 0xff) << ((n - 1 - i) * 8);
+            }
+            r as i128
+        }
+        // **桁数は別の型でよい**（C-21）。幅で割った余りだけ回す
+        "rotate_left" | "rotate_right" => {
+            let Some(n) = same_int(args.first()) else {
+                return rt(format!("`{name}` は桁数を一つ取る"), span);
+            };
+            let n = n.rem_euclid(w as i128) as u32;
+            let n = if name == "rotate_right" { (w - n) % w } else { n };
+            let r = if n == 0 { raw } else { (raw << n | raw >> (w - n)) & mask as u128 };
+            r as i128
+        }
+        // **折り返さずに止まる。** 折り返してほしいなら `+` と書く
+        "saturating_add" | "saturating_sub" | "saturating_mul" => {
+            let Some(y) = same_int(args.first()) else {
+                return rt(format!("`{name}` は値を一つ取る"), span);
+            };
+            let z = match name {
+                "saturating_add" => x + y,
+                "saturating_sub" => x - y,
+                _ => x * y,
+            };
+            let (lo, hi) = if sg {
+                (-(1i128 << (w - 1)), (1i128 << (w - 1)) - 1)
+            } else {
+                (0, mask)
+            };
+            return Ok(Eval::Value(wrap_like(b, z.clamp(lo, hi))));
+        }
+        _ => return rt(format!("`{name}` は整数に使えない"), span),
+    };
+    Ok(Eval::Value(wrap_like(b, out)))
 }

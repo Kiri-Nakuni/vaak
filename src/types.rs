@@ -11,14 +11,32 @@ use crate::span::Span;
 use std::collections::HashMap;
 
 pub fn check_types(prog: &Program) -> Vec<StaticError> {
+    check_types_with_host(prog, &[])
+}
+
+/// ホストが見せている名前と型を添えて検査する（S-4）。
+pub fn check_types_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec<StaticError> {
     let mut t = TypeChecker {
         errs: Vec::new(),
         scopes: vec![HashMap::new()],
         frame_base: 0,
         fns: HashMap::new(),
         structs: HashMap::new(),
+        wraps: HashMap::new(),
         stage_want: vec![None],
+        host_fns: HashMap::new(),
     };
+    for (n, item) in host {
+        match item {
+            HostItem::Value(ty) => {
+                t.scopes[0].insert(n.clone(), (ty.clone(), BindKind::Var));
+            }
+            // **型はホストが宣言する。** だから検査器は無改造で働く（S-11）
+            HostItem::Fn(sig) => {
+                t.host_fns.insert(n.clone(), sig.clone());
+            }
+        }
+    }
     t.collect(&prog.body);
     t.body(&prog.body);
     t.errs
@@ -26,13 +44,18 @@ pub fn check_types(prog: &Program) -> Vec<StaticError> {
 
 struct TypeChecker {
     errs: Vec<StaticError>,
-    scopes: Vec<HashMap<String, ValueType>>,
+    /// 型と権限。メソッドはレシーバ型で宣言を選ぶため、選んだ後の
+    /// alias 権限検査もここで通常関数と同じ規則へ掛ける。
+    scopes: Vec<HashMap<String, (ValueType, BindKind)>>,
     frame_base: usize,
     fns: HashMap<String, FnDecl>,
     structs: HashMap<String, StructDecl>,
+    wraps: HashMap<String, ValueType>,
     /// 段ごとの「そこに置かれる値の型」。**脱出が運ぶ値はこれに合わねばならない。**
     /// 内側が末尾。段送りは書いた順（左から右）に外へ進む（C-70）。
     stage_want: Vec<T>,
+    /// ホストが見せている**呼べる名前**の形（S-11）。
+    host_fns: HashMap<String, HostSig>,
 }
 
 /// 分かっている型。`None` は「分からない」——**そこでは何も言わない**。
@@ -51,10 +74,13 @@ impl TypeChecker {
             }
             match &e.kind {
                 ExprKind::FnDecl(f) => {
-                    self.fns.insert(f.name.clone(), f.clone());
+                    self.fns.insert(crate::ast::fn_key(f), f.clone());
                 }
                 ExprKind::StructDecl(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
+                }
+                ExprKind::WrapDecl(w) => {
+                    self.wraps.insert(w.name.clone(), w.base.value.clone());
                 }
                 _ => {}
             }
@@ -63,8 +89,17 @@ impl TypeChecker {
 
     fn lookup(&self, n: &str) -> T {
         for s in self.scopes[self.frame_base..].iter().rev() {
-            if let Some(t) = s.get(n) {
+            if let Some((t, _)) = s.get(n) {
                 return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn kind_of(&self, n: &str) -> Option<BindKind> {
+        for s in self.scopes[self.frame_base..].iter().rev() {
+            if let Some((_, kind)) = s.get(n) {
+                return Some(*kind);
             }
         }
         None
@@ -83,6 +118,7 @@ impl TypeChecker {
     }
 
     /// 型が合うか。**暗黙の変換は無いので、同じでなければならない。**
+    /// ラップ型も**別の型である**（S-2）——包むには `new` が要る。
     fn unify(&mut self, want: &ValueType, got: &ValueType, span: Span) {
         if want != got {
             self.err(format!("型が合わない（`{}` が要るのに `{}`）", show(want), show(got)), span);
@@ -110,6 +146,14 @@ impl TypeChecker {
                 _ => ValueType::F64,
             }),
             ExprKind::Str(_) => Some(ValueType::Str),
+            // **`u1` で確定。** 文脈を見ない——真偽は数ではない（C-97）
+            ExprKind::Bool(_) => Some(ValueType::U1),
+
+            // **`->` が求める型になる。** リテラルはここで型が決まる（C-30 / C-25）
+            ExprKind::Ascribe { expr, ty } => {
+                self.expr(expr, Some(&ty.value));
+                Some(ty.value.clone())
+            }
 
             ExprKind::Name(n) => self.lookup(n),
 
@@ -201,7 +245,7 @@ impl TypeChecker {
                         self.expr(index, Some(&ValueType::I64));
                         Some(ValueType::U8)
                     }
-                    ValueType::Map(k, v) => {
+                    ValueType::Map(k, v) | ValueType::Hash(k, v) => {
                         self.expect(index, k);
                         Some((**v).clone())
                     }
@@ -232,8 +276,12 @@ impl TypeChecker {
             }
 
             ExprKind::MapLit(pairs) => {
+                // **`hash` にも同じリテラルが使える。** 文脈の型が決める（C-98）
+                let as_hash = matches!(want, Some(ValueType::Hash(..)));
                 let (mut kt, mut vt) = match want {
-                    Some(ValueType::Map(k, v)) => (Some((**k).clone()), Some((**v).clone())),
+                    Some(ValueType::Map(k, v)) | Some(ValueType::Hash(k, v)) => {
+                        (Some((**k).clone()), Some((**v).clone()))
+                    }
                     _ => (None, None),
                 };
                 for (k, v) in pairs {
@@ -250,10 +298,11 @@ impl TypeChecker {
                         _ => {}
                     }
                 }
-                Some(ValueType::Map(
+                let (k, v) = (
                     Box::new(kt.unwrap_or(ValueType::I64)),
                     Box::new(vt.unwrap_or(ValueType::I64)),
-                ))
+                );
+                Some(if as_hash { ValueType::Hash(k, v) } else { ValueType::Map(k, v) })
             }
 
             ExprKind::Construct { ty, args } => {
@@ -274,13 +323,21 @@ impl TypeChecker {
                 self.fn_decl(f);
                 None
             }
-            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) => None,
+            ExprKind::StructDecl(_) | ExprKind::FlowDecl(_) | ExprKind::WrapDecl(_) => None,
 
             ExprKind::If(i) => {
                 let mut ty: T = want.cloned();
                 for (c, b) in &i.arms {
-                    // 条件は `u1` 一つの領域
-                    self.expect(c, &ValueType::U1);
+                    // 条件は `u1` 一つの領域。
+                    //
+                    // **求める型を渡さない。** 渡せば整数リテラルが `u1` を名乗り、
+                    // `if (0)` が静的に通ってしまう——そして評価器は落とす（S-13）。
+                    //
+                    // `u1` は真偽であって数ではない。`if (0)` と書きたいなら
+                    // `if (1 == 0)` と書く。**`while` が任意の整数を取るのと分けてある**
+                    if let Some(got) = self.expr(c, None) {
+                        self.unify(&ValueType::U1, &got, c.span);
+                    }
                     let t = self.expr(b, ty.as_ref());
                     match (&ty, t) {
                         (None, Some(t)) => ty = Some(t),
@@ -326,7 +383,10 @@ impl TypeChecker {
                 let it = st.unwrap_or(ValueType::I64);
                 let w = want.cloned();
                 self.scoped(|s| {
-                    s.scopes.last_mut().unwrap().insert(name.clone(), it);
+                    s.scopes
+                        .last_mut()
+                        .unwrap()
+                        .insert(name.clone(), (it, BindKind::Let));
                     s.loop_body(body, w.as_ref());
                 });
                 want.cloned().or(Some(ValueType::I64))
@@ -365,7 +425,7 @@ impl TypeChecker {
         lhs: &Expr,
         rhs: &Expr,
         want: Option<&ValueType>,
-        span: Span,
+        _span: Span,
     ) -> T {
         use BinOp::*;
         match op {
@@ -455,7 +515,7 @@ impl TypeChecker {
                 }
             };
             if let Some(t) = t {
-                self.scopes.last_mut().unwrap().insert(b.name.clone(), t);
+                self.scopes.last_mut().unwrap().insert(b.name.clone(), (t, d.kind));
             }
         }
     }
@@ -481,7 +541,10 @@ impl TypeChecker {
         self.scopes.push(HashMap::new());
         self.frame_base = self.scopes.len() - 1;
         for p in &f.params {
-            self.scopes.last_mut().unwrap().insert(p.name.clone(), p.ty.value.clone());
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .insert(p.name.clone(), (p.ty.value.clone(), p.kind));
         }
         // `->` は**外界面の型**（C-66）。本体の値がそれに合わねばならない
         let want = f.ret.as_ref().map(|t| t.value.clone());
@@ -507,6 +570,22 @@ impl TypeChecker {
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> T {
         if let ExprKind::Field { base, name } = &callee.kind {
             let bt = self.expr(base, None);
+            // 利用者定義のメンバ関数（S-1）を先に探す
+            if let Some(ValueType::Named(t)) = &bt {
+                if let Some(f) = self.fns.get(&format!("{t}.{name}")).cloned() {
+                    let alias_errs = crate::check::alias_arg_errors(
+                        &f.params[1..],
+                        args,
+                        Some(base),
+                        |n| self.kind_of(n),
+                    );
+                    self.errs.extend(alias_errs);
+                    for (p, a) in f.params[1..].iter().zip(args) {
+                        self.expect(a, &p.ty.value);
+                    }
+                    return f.ret.map(|r| r.value);
+                }
+            }
             return match name.as_str() {
                 "len" => {
                     for a in args {
@@ -530,6 +609,83 @@ impl TypeChecker {
                     }
                     None
                 }
+                "pop" => match &bt {
+                    Some(ValueType::Array(el)) => Some((**el).clone()),
+                    Some(ValueType::Str) => Some(ValueType::U8),
+                    _ => None,
+                },
+                "has" | "utf8_valid" => {
+                    for a in args {
+                        self.expr(a, None);
+                    }
+                    Some(ValueType::U1)
+                }
+                // ---- 数のメンバ関数（S-23）----
+                //
+                // **返す型は受け手と同じ。** ただし「数える」ものは個数なので `i64`。
+                // 引数も受け手と同じ型でなければならない（C-21：暗黙変換は無い）
+                "count_ones" | "leading_zeros" | "trailing_zeros" => {
+                    for a in args {
+                        self.expr(a, None);
+                    }
+                    Some(ValueType::I64)
+                }
+                // **桁数は別の型でよい**（C-21）
+                "rotate_left" | "rotate_right" => {
+                    for a in args {
+                        self.expect(a, &ValueType::I64);
+                    }
+                    bt.clone()
+                }
+                "abs" | "reverse_bits" | "swap_bytes" | "sqrt" | "floor" | "ceil"
+                | "trunc" | "round" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos"
+                | "tan" => {
+                    for a in args {
+                        self.expr(a, None);
+                    }
+                    bt.clone()
+                }
+                "min" | "max" | "copysign" | "pow" | "mul_add" | "saturating_add"
+                | "saturating_sub" | "saturating_mul" => {
+                    if let Some(t) = &bt {
+                        for a in args {
+                            self.expect(a, &t.clone());
+                        }
+                    } else {
+                        for a in args {
+                            self.expr(a, None);
+                        }
+                    }
+                    bt.clone()
+                }
+                "utf8_len" => Some(ValueType::I64),
+                "utf8_at" => {
+                    for a in args {
+                        self.expect(a, &ValueType::I64);
+                    }
+                    Some(ValueType::I32)
+                }
+                "keys" => match &bt {
+                    Some(ValueType::Map(k, _)) | Some(ValueType::Hash(k, _)) => {
+                        Some(ValueType::Array(k.clone()))
+                    }
+                    _ => None,
+                },
+                "remove" => match &bt {
+                    Some(ValueType::Array(el)) => {
+                        for a in args {
+                            self.expect(a, &ValueType::I64);
+                        }
+                        Some((**el).clone())
+                    }
+                    Some(ValueType::Map(k, v)) | Some(ValueType::Hash(k, v)) => {
+                        for a in args {
+                            self.expect(a, &k.clone());
+                        }
+                        Some((**v).clone())
+                    }
+                    _ => None,
+                },
                 _ => {
                     for a in args {
                         self.expr(a, None);
@@ -541,6 +697,16 @@ impl TypeChecker {
         let ExprKind::Name(name) = &callee.kind else { return None };
         if name == "getdepth" {
             return Some(ValueType::I64);
+        }
+        // **ホストが見せている呼べる名前**（S-11）
+        if let Some(sig) = self.host_fns.get(name).cloned() {
+            for (want, a) in sig.params.iter().zip(args) {
+                self.expect(a, want);
+            }
+            for a in args.iter().skip(sig.params.len()) {
+                self.expr(a, None);
+            }
+            return sig.ret;
         }
         let Some(f) = self.fns.get(name).cloned() else {
             for a in args {
@@ -574,6 +740,18 @@ impl TypeChecker {
                     }
                 }
             }
+            // `str` は `u8 array` を包んだ型。`new u8 array(s)` は
+            // 長さ一つの構築ではなく、包みを剥がす構築である（C-78）。
+            (ValueType::Array(el), CtorArgs::Positional(a))
+                if **el == ValueType::U8 && a.len() == 1 =>
+            {
+                let got = self.expr(&a[0], None);
+                if got.as_ref() != Some(&ValueType::Str) {
+                    if let Some(got) = got {
+                        self.unify(&ValueType::I64, &got, a[0].span);
+                    }
+                }
+            }
             (ValueType::Array(el), CtorArgs::Positional(a)) => {
                 if let Some(n) = a.first() {
                     self.expect(n, &ValueType::I64);
@@ -585,6 +763,13 @@ impl TypeChecker {
             (ValueType::Str, CtorArgs::Positional(a)) => {
                 for e in a {
                     self.expr(e, Some(&ValueType::Array(Box::new(ValueType::U8))));
+                }
+            }
+            // ラップ型（S-2）。包むのも剥がすのも `new`
+            (ValueType::Named(n), CtorArgs::Positional(a)) if self.wraps.contains_key(n) => {
+                let base = self.wraps[n].clone();
+                for e in a {
+                    self.expect(e, &base);
                 }
             }
             (ValueType::Named(n), CtorArgs::Positional(a)) if a.is_empty() => {
@@ -677,7 +862,7 @@ fn is_int(t: &ValueType) -> bool {
 }
 
 fn is_float(t: &ValueType) -> bool {
-    matches!(t, ValueType::F32 | ValueType::F64)
+    matches!(t, ValueType::F32 | ValueType::F64 | ValueType::F80)
 }
 
 fn is_num(t: &ValueType) -> bool {
@@ -694,10 +879,12 @@ pub fn show(t: &ValueType) -> String {
         I32 => "i32".into(),
         I64 => "i64".into(),
         F32 => "f32".into(),
+        F80 => "f80".into(),
         F64 => "f64".into(),
         Str => "str".into(),
         Array(i) => format!("{} array", show(i)),
         Map(k, v) => format!("{} {} map", show(k), show(v)),
+        Hash(k, v) => format!("{} {} hash", show(k), show(v)),
         Named(n) => n.clone(),
     }
 }

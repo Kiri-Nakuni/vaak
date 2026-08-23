@@ -6,8 +6,14 @@
 pub mod ast;
 pub mod lexer;
 pub mod check;
+pub mod host;
 pub mod interp;
 pub mod parser;
 pub mod span;
 pub mod types;
 pub mod value;
+pub mod vm;
+pub mod json;
+pub mod lsp;
+pub mod steel;
+pub mod portable;

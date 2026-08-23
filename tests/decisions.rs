@@ -87,6 +87,10 @@ fn c7_c77_str_はラップ型() {
     static_err(r#"var s : str := "a"; var b : u8 array := s;"#);
     // 包むのも剥がすのも new
     ok(r#"var b := new u8 array ( 3, 97 ); var s := new str ( b ); s.len();"#);
+    v(
+        r#"var s := "abc"; var b := new u8 array ( s ); b[1] -> i64"#,
+        "98",
+    );
 }
 
 // ---- C-10 if は演算子。分岐は被演算子位置 ----
