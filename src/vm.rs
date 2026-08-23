@@ -1113,6 +1113,21 @@ impl Compiler {
                     }
                 }
             }
+            // 組み込みの破壊的操作を名前へ掛けるなら、セルを直接変更できる。
+            // 引数はこれまでどおり左から右に評価し、変更はその後に行う。
+            if is_destructive(name) {
+                if let ExprKind::Name(v) = &base.kind {
+                    if let Some(slot) = self.lookup(v) {
+                        for a in args {
+                            self.expr(a)?;
+                            self.emit(Op::NeedValue(a.span));
+                        }
+                        let n = self.name_idx(name);
+                        self.emit(Op::MutMethod(slot, n, args.len() as u16, span));
+                        return Ok(());
+                    }
+                }
+            }
             self.expr(base)?;
             self.emit(Op::NeedValue(base.span));
             for a in args {
