@@ -1,0 +1,102 @@
+%{ 外向き WASM 車線の coarse bulk データ形を、現行 Vaak VM 上で模す比較 kernel。
+   これは実際の WASM module でも WASM timing でもない。
+   段落一つを一度の phase call で処理する。
+   node arena は kind/width/penalty の SoA snapshot として Vaak 側にある。
+   1 node あたり 21 個の論理 hook は消さず、通常の Vaak 関数呼び出しにする。 }%
+
+flow $return = $repeat(break, getdepth());
+
+struct Line {
+    let start : i64 := 0;
+    let end : i64 := 0;
+    let natural : i64 := 0;
+};
+
+struct Layout {
+    let lines : Line array := new Line array (0, new Line());
+    let hook_calls : i64 := 0;
+};
+
+%{ 実際の組版器なら 21 個の静的 policy/hook へ分かれる場所。
+   実験では直接呼ばれる一関数の hook_id dispatch とし、最初の三つが
+   node の測定値・種類・penalty を返す。残りも呼ばれるが既定値は 0。 }%
+fn policy_hook (hook_id : i64, kind : i64, width : i64, penalty : i64) {
+    if (hook_id == 0) width
+    elif (hook_id == 1) kind
+    elif (hook_id == 2) penalty
+    else 0
+    fi
+} -> i64;
+
+fn linebreak_phase (kinds : i64 array alias,
+                    widths : i64 array alias,
+                    penalties : i64 array alias,
+                    target_width : i64 alias) {
+    if (kinds.len() != widths.len() || kinds.len() != penalties.len()) $return; fi;
+    if (target_width <= 0) $return; fi;
+
+    var lines : Line array := new Line array (0, new Line());
+    var start := 0;
+    var used := 0;
+    var last_break := 0 - 1;
+    var width_at_break := 0;
+    var hook_calls := 0;
+
+    nfor (i, 0, kinds.len()) {
+        let raw_kind := kinds[i];
+        let raw_width := widths[i];
+        let raw_penalty := penalties[i];
+        var kind := 0;
+        var width := 0;
+        var penalty := 0;
+
+        % 21 個の論理 hook は probe VM 内で完結し、模擬した外側境界を越えない。
+        nfor (hook_id, 0, 21) {
+            let answer := policy_hook(hook_id, raw_kind, raw_width, raw_penalty);
+            if (hook_id == 0) width := answer;
+            elif (hook_id == 1) kind := answer;
+            elif (hook_id == 2) penalty := answer;
+            fi;
+            hook_calls += 1;
+        };
+
+        if ((kind != 0 && kind != 1) || width < 0) $return; fi;
+        used += width;
+
+        if (used > target_width) {
+            if (last_break <= start) $return; fi;
+            lines.push(new Line (
+                start := start,
+                end := last_break,
+                natural := width_at_break
+            ));
+            used := 0;
+            % nfor の第三項は終端でなく個数。
+            nfor (j, last_break, i + 1 - last_break) {
+                used += widths[j];
+            };
+            start := last_break;
+            last_break := 0 - 1;
+            width_at_break := 0;
+            if (used > target_width) $return; fi;
+        } fi;
+
+        % kind == 1 は glue。penalty 10000 以上ならここでは切れない。
+        if (kind == 1 && penalty < 10000) {
+            last_break := i + 1;
+            width_at_break := used;
+        } fi;
+    };
+
+    if (start < kinds.len()) {
+        lines.push(new Line (
+            start := start,
+            end := kinds.len(),
+            natural := used
+        ));
+    } fi;
+
+    new Layout (lines := lines, hook_calls := hook_calls)
+} -> Layout;
+
+linebreak_phase(node_kind, node_width, node_penalty, target_width)

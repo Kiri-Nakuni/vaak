@@ -1,0 +1,77 @@
+%{ 同一 process のネイティブ埋め込み向け比較。
+   制御 loop は Vaak、node arena は host の NodeOps にあり、21 hook/node を
+   node_hook HostFn として内部 API 経由で呼ぶ。WASM import にすると同じ回数だけ ABI を越える。 }%
+
+flow $return = $repeat(break, getdepth());
+
+struct Line {
+    let start : i64 := 0;
+    let end : i64 := 0;
+    let natural : i64 := 0;
+};
+
+struct Layout {
+    let lines : Line array := new Line array (0, new Line());
+    let hook_calls : i64 := 0;
+};
+
+fn linebreak_nodeops (node_count : i64 alias, target_width : i64 alias) {
+    if (node_count < 0 || target_width <= 0) $return; fi;
+    var lines : Line array := new Line array (0, new Line());
+    var start := 0;
+    var used := 0;
+    var last_break := 0 - 1;
+    var width_at_break := 0;
+    var hook_calls := 0;
+
+    nfor (i, 0, node_count) {
+        var kind := 0;
+        var width := 0;
+        var penalty := 0;
+
+        nfor (hook_id, 0, 21) {
+            let answer := node_hook(hook_id, i);
+            if (hook_id == 0) width := answer;
+            elif (hook_id == 1) kind := answer;
+            elif (hook_id == 2) penalty := answer;
+            fi;
+            hook_calls += 1;
+        };
+
+        if ((kind != 0 && kind != 1) || width < 0) $return; fi;
+        used += width;
+        if (used > target_width) {
+            if (last_break <= start) $return; fi;
+            lines.push(new Line (
+                start := start,
+                end := last_break,
+                natural := width_at_break
+            ));
+            used := 0;
+            % nfor の第三項は終端でなく個数。
+            nfor (j, last_break, i + 1 - last_break) {
+                used += node_hook(0, j);
+                hook_calls += 1;
+            };
+            start := last_break;
+            last_break := 0 - 1;
+            width_at_break := 0;
+            if (used > target_width) $return; fi;
+        } fi;
+        if (kind == 1 && penalty < 10000) {
+            last_break := i + 1;
+            width_at_break := used;
+        } fi;
+    };
+
+    if (start < node_count) {
+        lines.push(new Line (
+            start := start,
+            end := node_count,
+            natural := used
+        ));
+    } fi;
+    new Layout (lines := lines, hook_calls := hook_calls)
+} -> Layout;
+
+linebreak_nodeops(node_count, target_width)
