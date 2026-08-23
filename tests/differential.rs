@@ -736,10 +736,9 @@ fn 連想への複合代入() {
     同じ("var m : i64 i64 map := ( 1 => 5, 2 => 6 ); m[1] += 3; m.len() * 100 + m[1]");
 }
 
-/// `$repeat` の被演算子が作用素式のとき。
+/// `$repeat` の被演算子が作用素式のとき、**鎖として繋がる**（C-101）。
 ///
-/// **零段なら走り、一段以上なら捨てられる。** 参照実装がそうしている（S-5）。
-/// **不揃いに見える**ので、決定へ問いとして上げてある。
+/// `$repeat(break, 2) break 5` は `break break break 5` と同じである。
 #[test]
 fn repeat_の被演算子が作用素式() {
     同じ("fn f () { { $repeat(break, 0) break 5 } } -> i64; f() ?? 99");
@@ -748,4 +747,22 @@ fn repeat_の被演算子が作用素式() {
     同じ("fn f () { var n := 1; { $repeat(break, n) break 7 } } -> i64; f() ?? 99");
     同じ("var n := 0; { $repeat(break, n) break 7 } ?? 99");
     同じ("$repeat(break, 0) 5");
+}
+
+/// **畳んだものと並べたものが同じ意味になる**（C-101）。
+#[test]
+fn repeat_は並べたものと同じ() {
+    同じ("fn f () { { $repeat(break, 1) break 5 } } -> i64; f() ?? 99");
+    同じ("fn f () { { break break 5 } } -> i64; f() ?? 99");
+    同じ("fn f () { { { $repeat(break, 2) break 5 } ; 1 } } -> i64; f() ?? 99");
+    同じ("fn f () { { { break break break 5 } ; 1 } } -> i64; f() ?? 99");
+    同じ("fn f () { var n := 1; { $repeat(break, n) break 5 } } -> i64; f() ?? 99");
+    同じ("fn f () { var n := 2; { { $repeat(break, n) break 5 } ; 1 } } -> i64; f() ?? 99");
+    // 零回でも被演算子は残る
+    同じ("fn f () { { $repeat(break, 0) break 5 } } -> i64; f() ?? 99");
+    同じ("fn f () { var n := 0; { $repeat(break, n) break 5 } } -> i64; f() ?? 99");
+    同じ("fn f () { var n := 0 - 3; { $repeat(break, n) break 5 } } -> i64; f() ?? 99");
+    // 値の被演算子は今までどおり積み荷
+    同じ("fn f () { { $repeat(break, 2) 5 } } -> i64; f() ?? 99");
+    同じ("var n := 0; {{ $repeat(break, n) 5 }}");
 }

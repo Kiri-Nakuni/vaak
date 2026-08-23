@@ -626,11 +626,30 @@ impl Interp {
             }
             let mut x = base;
             x.stages = count as u32;
-            if let Some(Operand::Value(v)) = operand {
-                x.payload = match self.need_value(v)? {
-                    Ok(v) => Some(v),
-                    Err(e) => return Ok(Eval::Escape(e)),
-                };
+            match operand {
+                // 値なら積み荷。**即時に評価する**（C-73）
+                Some(Operand::Value(v)) => {
+                    x.payload = match self.need_value(v)? {
+                        Ok(v) => Some(v),
+                        Err(e) => return Ok(Eval::Escape(e)),
+                    };
+                }
+                // **作用素式なら鎖として繋ぐ**（C-101）。
+                //
+                // `$repeat(break, 2) break 5` は `break break break 5` と同じ——
+                // 畳んだものと並べたものが同じ意味になる
+                Some(Operand::Escape(i)) => {
+                    let Eval::Escape(rest) = self.make_escape(i)? else {
+                        return rt("脱出のはず", span);
+                    };
+                    // 左が先に起きるので、**内側の印は左の段数だけ後ろへずれる**
+                    x.outward |= rest.outward << x.stages;
+                    x.stages += rest.stages;
+                    x.kind = rest.kind;
+                    x.payload = rest.payload;
+                    x.deferred = rest.deferred;
+                }
+                None => {}
             }
             return Ok(Eval::Escape(x));
         }

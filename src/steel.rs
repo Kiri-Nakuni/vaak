@@ -2954,19 +2954,23 @@ impl Steel {
             return err("`$repeat` の回数が負", n.span);
         }
         let b = self.plan(op)?;
-        // **被演算子が作用素式なら積み荷にしない。**
-        // 一段以上のときは捨てられる（参照実装に揃える。S-5）
+        // **被演算子が作用素式なら鎖として繋ぐ**（C-101）。
+        // `$repeat(break, 2) break 5` は `break break break 5` と同じである
+        let chained = matches!(&x.operand, Some(Operand::Escape(_)));
         let o = match &x.operand {
-            Some(Operand::Escape(_)) => Plan::default(),
+            Some(Operand::Escape(i)) => self.plan(i)?,
             Some(Operand::Value(v)) => Plan { payload: Some(v.clone()), ..Plan::default() },
             None => Plan::default(),
         };
+        let left = b.depth * times as usize;
         Ok(Plan {
-            depth: b.depth * times as usize,
-            is_continue: b.is_continue,
+            depth: left + o.depth,
+            // 繋いだなら**内側が種類を決める**
+            is_continue: if chained { o.is_continue } else { b.is_continue },
             payload: o.payload,
-            deferred: b.deferred,
-            outward: b.outward,
+            deferred: if chained { o.deferred } else { b.deferred },
+            // **内側の印は左の段数だけ後ろへずれる**
+            outward: b.outward | (o.outward << left),
         })
     }
 
@@ -4531,19 +4535,26 @@ impl Steel {
         let Some(count) = count else { return err("`$repeat` の回数に値が無い", n.span) };
         let times = self.widen64(&count);
 
-        // 積み荷は**一度だけ**評価する（C-79）。
-        //
-        // **被演算子が作用素式なら、零段のときにだけ走る。**
-        // 一段以上のときは捨てられる——参照実装がそうしているので揃える（S-5）。
-        // **不揃いに見えるが、揃えないことの方が悪い。** 決定へ問いとして残した
-        let zero_escape = match &x.operand {
-            Some(Operand::Escape(i)) => Some((**i).clone()),
-            _ => None,
+        // **被演算子が作用素式なら鎖として繋ぐ**（C-101）。
+        // その分の段数は組み立て時に分かるので、回数へ足すだけである
+        let chained = matches!(&x.operand, Some(Operand::Escape(_)));
+        let tail = match &x.operand {
+            Some(Operand::Escape(i)) => self.plan(i)?,
+            _ => Plan::default(),
         };
+        let extra = tail.depth;
+        // 積み荷は**一度だけ**評価する（C-79）
         let payload = match &x.operand {
             Some(Operand::Value(v)) => self.expr(v)?,
-            _ => None,
+            _ => match &tail.payload {
+                Some(v) => {
+                    let v = v.clone();
+                    self.expr(&v)?
+                }
+                None => None,
+            },
         };
+        let is_continue = if chained { tail.is_continue } else { is_continue };
 
         let here = self.stages.len();
         let vty = payload.as_ref().map(|v| v.ty.clone()).unwrap_or(ValueType::I64);
@@ -4565,7 +4576,12 @@ impl Steel {
         let mut arms = Vec::new();
         let mut labels = Vec::new();
         for k in 1..=here {
-            if unit != 0 && k % unit != 0 {
+            // **合計は「回数 × 作用素の段数 ＋ 被演算子の段数」である**（C-101）
+            if k < extra {
+                continue;
+            }
+            let rest = k - extra;
+            if unit != 0 && rest % unit != 0 {
                 continue;
             }
             // **`continue` はループの段にしか掛からない。**
@@ -4574,19 +4590,25 @@ impl Steel {
                 continue;
             }
             let l = self.label("rep.k");
-            arms.push(format!("i64 {}, label %{l}", (k / unit.max(1)) as i64));
+            arms.push(format!("i64 {}, label %{l}", (rest / unit.max(1)) as i64));
             labels.push((k, l));
         }
-        // **零以下は一段も抜けない**（C-75 の 5）
-        let le0 = self.tmp();
-        self.emit(&format!("{le0} = icmp sle i64 {times}, 0"));
+        // **負は零として数える**（C-75 の 5：作用素を一つも重ねない）
+        let neg = self.tmp();
+        self.emit(&format!("{neg} = icmp slt i64 {times}, 0"));
+        let t = self.tmp();
+        self.emit(&format!("{t} = select i1 {neg}, i64 0, i64 {times}"));
+        // 合計が零なら一段も抜けない。**被演算子の分が残っていれば抜ける**（C-101）
+        let none = self.tmp();
+        if extra > 0 {
+            self.emit(&format!("{none} = icmp eq i1 true, false"));
+        } else {
+            self.emit(&format!("{none} = icmp eq i64 {t}, 0"));
+        }
         let pick = self.label("rep.pick");
-        self.cbr(&le0, &zero, &pick);
+        self.cbr(&none, &zero, &pick);
         self.place(&pick);
-        self.emit(&format!(
-            "switch i64 {times}, label %{over} [ {} ]",
-            arms.join(" ")
-        ));
+        self.emit(&format!("switch i64 {t}, label %{over} [ {} ]", arms.join(" ")));
         self.done = true;
 
         for (k, l) in labels {
@@ -4609,15 +4631,7 @@ impl Steel {
         self.done = true;
 
         self.place(&zero);
-        // **零段なら被演算子の作用素式が走る**（参照実装に揃える）
-        if let Some(z) = &zero_escape {
-            self.escape(z)?;
-            if !self.done {
-                self.br(&done);
-            }
-        } else {
-            self.br(&done);
-        }
+        self.br(&done);
         self.place(&done);
         let ok = self.tmp();
         self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));

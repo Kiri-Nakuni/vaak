@@ -116,8 +116,11 @@ pub enum Op {
     BreakDyn {
         payload: bool,
         resume: bool,
-        /// 零段のときに飛ぶ先。**被演算子が作用素式のときだけ**
-        zero_at: Option<u32>,
+        /// **被演算子の作用素式が足す段数**（C-101）
+        extra: u32,
+        extra_outward: u64,
+        /// 遅延した被演算子（C-73）
+        deferred: Option<u32>,
         op_span: Span,
         span: Span,
     },
@@ -1412,15 +1415,23 @@ impl Compiler {
                     }
                 }
             }
-            Shape::Dynamic { count, payload, kind, span: span_of_op, zero } => {
+            Shape::Dynamic {
+                count,
+                payload,
+                kind,
+                span: span_of_op,
+                extra,
+                extra_outward,
+                deferred,
+            } => {
                 if let Some(p) = &payload {
                     self.expr(p)?;
                     self.emit(Op::NeedValue(p.span));
                 }
                 self.expr(&count)?;
                 self.emit(Op::NeedValue(count.span));
-                // **零段のときの脱出を脇へ置く。** `Op::Continue` の遅延と同じ形
-                let z = match zero {
+                // 遅延した被演算子は**再開した本体の先頭**で走る（C-73）
+                let z = match deferred {
                     Some(inner) => {
                         let j = self.emit(Op::Jump(0));
                         let at = self.here();
@@ -1433,7 +1444,9 @@ impl Compiler {
                 self.emit(Op::BreakDyn {
                     payload: payload.is_some(),
                     resume: kind == EKind::Continue,
-                    zero_at: z,
+                    extra,
+                    extra_outward,
+                    deferred: z,
                     op_span: span_of_op,
                     span,
                 });
@@ -1500,17 +1513,32 @@ impl Compiler {
                         Shape::Static { kind, .. } => kind,
                         Shape::Dynamic { kind, .. } => kind,
                     };
-                    // **被演算子が作用素式なら、零段のときに走る**（参照実装に揃える）
-                    let zero = match &esc.operand {
-                        Some(Operand::Escape(i)) => Some((**i).clone()),
-                        _ => None,
-                    };
+                    // **被演算子が作用素式なら鎖として繋ぐ**（C-101）
+                    let (mut kind, mut payload) = (kind, payload);
+                    let (mut extra, mut extra_outward, mut deferred) = (0u32, 0u64, None);
+                    if let Some(Operand::Escape(i)) = &esc.operand {
+                        match self.shape(i)? {
+                            Shape::Static { stages, outward, kind: k, payload: pp, deferred: d } => {
+                                extra = stages;
+                                extra_outward = outward;
+                                kind = k;
+                                payload = pp;
+                                deferred = d;
+                            }
+                            Shape::Dynamic { .. } => {
+                                return self
+                                    .err("`$repeat` の被演算子に `$repeat` は書けない", esc.span)
+                            }
+                        }
+                    }
                     return Ok(Shape::Dynamic {
                         count: n.clone(),
                         payload,
                         kind,
                         span: op.span,
-                        zero,
+                        extra,
+                        extra_outward,
+                        deferred,
                     });
                 }
                 let Some(d) = self.flows.get(name).cloned() else {
@@ -1557,8 +1585,10 @@ enum Shape {
         payload: Option<Expr>,
         kind: EKind,
         span: Span,
-        /// **零段のときに走る脱出。** 参照実装は被演算子が作用素式でも受ける
-        zero: Option<Escape>,
+        /// **被演算子が作用素式なら、その分の段数を足す**（C-101）
+        extra: u32,
+        extra_outward: u64,
+        deferred: Option<Escape>,
     },
 }
 
@@ -2734,16 +2764,22 @@ impl<'a> Vm<'a> {
                     span,
                 }));
             }
-            Op::BreakDyn { payload, resume, zero_at, op_span: _, span } => {
+            Op::BreakDyn {
+                payload,
+                resume,
+                extra,
+                extra_outward,
+                deferred,
+                op_span: _,
+                span,
+            } => {
                 let n = self.pop().value(span)?.as_int().unwrap_or(0);
                 let p = if payload { Some(self.pop().value(span)?) } else { None };
-                // `n` が 0 以下なら作用素を一つも重ねない（C-75 の 5）
-                if n <= 0 {
-                    // **被演算子が作用素式なら、それが走る**（参照実装に揃える）
-                    if let Some(at) = zero_at {
-                        self.frames.last_mut().unwrap().pc = at as usize;
-                        return Ok(None);
-                    }
+                // `n` が 0 以下なら作用素を一つも重ねない（C-75 の 5）。
+                // **被演算子の分は残る**（C-101）
+                let times = n.max(0) as u32;
+                let stages = times + extra;
+                if stages == 0 {
                     self.stack.push(match p {
                         Some(v) => Slot::Value(v),
                         None => Slot::Paradox(span),
@@ -2752,10 +2788,11 @@ impl<'a> Vm<'a> {
                 }
                 return Ok(Some(Esc {
                     kind: if resume { EKind::Continue } else { EKind::Break },
-                    stages: n as u32,
-                    outward: 0,
+                    stages,
+                    // **内側の印は左の段数だけ後ろへずれる**（C-101）
+                    outward: extra_outward << times,
                     payload: p,
-                    deferred: None,
+                    deferred,
                     span,
                 }));
             }
