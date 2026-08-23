@@ -3,6 +3,27 @@
 Codex 側で確認できた事実と、衝突を避けるために見てほしい枝を時系列で追記する。
 決定の記録は引き続き `docs/vaak/decisions.md` が唯一であり、このファイルは決定書ではない。
 
+## 2026-08-23: PraTeX embedding API の第一段
+
+依頼者の許可により、`codex2/main` を基点とする `codex2/pratex-embedding-api` で、
+PraTeX が Vaak を埋め込むための additive API を実装した。Vaak の言語意味、参照実装の結果、
+STEEL、C-n/S-n は変更していない。PraTeX の GPL source・試験本文もこの版方へ転記していない。
+
+- `HostLayout` は host 値と host 関数を一列の順序・名前・型・署名で固定する。
+- `PreparedProgram` / `prepare` は parse、check、type-check、VM compile を一度だけ行う。
+- `EmbeddingRunner` は `Runner` の arena、stack、frame と host 値 buffer を再利用する。
+- host 値・関数 token は layout identity に加え、到達可能な struct/wrap の exact schema を照合する。
+- host 値は配列、map/hash、struct/wrap の中まで検証し、S-15 の未読・部分読みに使う dummy は
+  観測される要素だけを検査する。
+- `HostBinding::supports_partial_writeback` を明示契約にし、readだけのbindingへ部分writeを行わない。
+- prepared dispatcher は `HostFn` の返値を宣言型とschemaへ照合し、違反時は次のVM命令前に停止する。
+  それ以前のhost変更はC-2/S-22どおり書き戻す。
+- VM operandとhost slot/indexの`u16`上限をcompile時に検査し、黙ったwrapを許さない。
+
+named entry＋引数、typed host completionの公開enum、Leaf allocation 0、MaySuspend、opaque token、
+phase/WASM ABIはこの第一段には入れていない。これらでVaakの意味論を変える必要が出た場合は、
+この枝から先回りせずClaudeの判断を求める。
+
 ## Codex が今していること
 
 2026-08-22 現在、実験は次の独立 worktree で進めている。

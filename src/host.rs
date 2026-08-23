@@ -24,6 +24,8 @@ use crate::ast::{HostSig, ValueType};
 use crate::interp::{Eval, Interp};
 use crate::value::Value;
 
+pub(crate) const MAX_HOST_VALUE_NODES: usize = 1 << 20;
+
 /// ホストが見せるもの。**中身の実体は Vaak の外にある。**
 ///
 /// 実装するのは三つだけ:
@@ -37,7 +39,7 @@ use crate::value::Value;
 /// 写しを渡す形なので、**契約 1（走っている間は動かさない）は自動的に守られる**——
 /// Vaak が触るのは写しであり、ホストの実体ではない。
 pub trait HostBinding {
-    /// この名前の型。**検査器に渡す**ので、走る前に確定していなければならない。
+    /// この名前の型。**検査器に渡す**ので、走る前に確定し、run中は変えてはならない。
     fn type_of(&self) -> ValueType;
 
     /// 走る前に読む。Vaak はこの値の写しを持って走る。
@@ -61,6 +63,16 @@ pub trait HostBinding {
     ///
     /// `read_at` と対で使う。片方しか答えられないなら、両方使われない。
     fn write_at(&mut self, _i: usize, _v: &Value) -> bool {
+        false
+    }
+
+    /// 部分読みに対応する値を、[`write_at`](HostBinding::write_at)でも確実に
+    /// 書き戻せるか。
+    ///
+    /// 既定は`false`。`true`を返す実装は、`read_at`が成功した有効な添字と型なら
+    /// `write_at`も必ず`true`を返して反映する、と保証する。書き込みうる台本では
+    /// この保証が無い限り丸ごと読み、通常の[`write`](HostBinding::write)へ戻す。
+    fn supports_partial_writeback(&self) -> bool {
         false
     }
 
@@ -98,10 +110,14 @@ pub trait HostBinding {
 /// [`sig`](HostFn::sig) が引数と返り値の型を答えるので、
 /// **検査器は無改造で働く。**
 pub trait HostFn {
-    /// 引数と返り値の型。**走る前に確定していなければならない。**
+    /// 引数と返り値の型。**走る前に確定し、run中は変えてはならない。**
     fn sig(&self) -> HostSig;
 
     /// 呼ばれる。**返り値が `None` なら領域に値を置かない**（paradox）。
+    ///
+    /// `Some`を返すなら、`sig().ret`も`Some`であり、その型と名付き型schemaへ
+    /// 完全に適合する自己完結した値でなければならない。prepared embedding APIは
+    /// 違反をhost contract errorとして、次のVM命令より前に停止する。
     fn call(&mut self, args: &[Value]) -> Option<Value>;
 }
 
@@ -137,13 +153,20 @@ impl HostBinding for Cell {
 pub enum Outcome {
     Value(Value),
     /// 消費されなかった paradox。**発生点を受け取る**（C-46）。
-    Paradox { line: usize, col: usize },
+    Paradox {
+        line: usize,
+        col: usize,
+    },
     /// 何も残らなかった（内面が空のまま終わった）。
     Empty,
     /// 静的エラー。**走らせる前に分かる。**
     Static(Vec<String>),
     /// 実行時エラー。
-    Runtime { msg: String, line: usize, col: usize },
+    Runtime {
+        msg: String,
+        line: usize,
+        col: usize,
+    },
 }
 
 /// ホストへの問い合わせに答える側（S-11）。
@@ -177,7 +200,12 @@ pub struct Host {
 
 impl Host {
     pub fn new() -> Self {
-        Self { bindings: Vec::new(), fns: Default::default(), check: true, use_vm: false }
+        Self {
+            bindings: Vec::new(),
+            fns: Default::default(),
+            check: true,
+            use_vm: false,
+        }
     }
 
     /// 名前を見せる。**同じ名前なら差し替える。**
@@ -226,6 +254,9 @@ impl Host {
             Ok(p) => p,
             Err(e) => return Outcome::Static(vec![e.msg]),
         };
+        if self.fns.borrow().len() > u16::MAX as usize + 1 {
+            return Outcome::Static(vec!["ホスト関数は65536個までしか登録できない".into()]);
+        }
         let mut exposed: Vec<(String, crate::ast::HostItem)> = self
             .bindings
             .iter()
@@ -245,7 +276,9 @@ impl Host {
                 .map(|e| e.msg)
                 .collect();
             errs.extend(
-                crate::types::check_types_with_host(&prog, &exposed).into_iter().map(|e| e.msg),
+                crate::types::check_types_with_host(&prog, &exposed)
+                    .into_iter()
+                    .map(|e| e.msg),
             );
             if !errs.is_empty() {
                 return Outcome::Static(errs);
@@ -258,73 +291,30 @@ impl Host {
                 Ok(p) => p,
                 Err(e) => return Outcome::Static(vec![e.msg]),
             };
-            // **使わない名前は読まない。**
-            //
-            // rtex の `\count` のように束縛が何百もあるホストでは、
-            // 「全部読む」がそのまま起動費になる。組み立て済みの命令列を見れば、
-            // **どれが要るかは走らせる前に分かる**
-            let reads = p.host_reads();
-            let writes = p.host_writes();
-            // **触った添字だけを問える束縛はどれか**（S-15）。
-            // 定数の添字しか使っていなくて、ホストが要素で答えられるなら、
-            // 丸ごと写さない——rtex の `\count` なら 256 個ではなく触った分だけになる
-            let mut partial: Vec<Option<Vec<i128>>> = Vec::new();
-            let values: Vec<Value> = self
-                .bindings
-                .iter()
-                .filter(|(_, _, live)| *live)
-                .enumerate()
-                .map(|(i, (_, b, _))| {
-                    // **書き戻すかもしれないなら読む。** 比べる相手が要るからである。
-                    // 一度も触れていない名前だけを飛ばす
-                    let need = reads.get(i).copied().unwrap_or(true)
-                        || writes.get(i).copied().unwrap_or(true);
-                    if !need {
-                        partial.push(None);
-                        // 触れないなら、型に合う空の値を置く。**書き戻しもしない**
-                        return empty_of(&b.type_of());
-                    }
-                    if let Some(idx) = p.host_touched(i) {
-                        if let Some(v) = element_view(b.as_ref(), &idx) {
-                            partial.push(Some(idx));
-                            return v;
-                        }
-                    }
-                    partial.push(None);
-                    b.read()
-                })
-                .collect();
-            let mut answer = Answer { fns: self.fns.clone() };
-            let before = values.clone();
+            let mut answer = Answer {
+                fns: self.fns.clone(),
+            };
+            let (values, state) = vm_binding_values(
+                &p,
+                self.bindings
+                    .iter()
+                    .filter_map(|(_, binding, live)| live.then_some(binding.as_ref())),
+            );
             let (result, after) =
                 crate::vm::run_program_with_fns_writeback(&p, values, &mut answer);
-            let mut it = after.into_iter();
-            let mut was = before.into_iter();
-            let mut k = 0usize;
-            for (_, b, live) in self.bindings.iter_mut() {
-                if *live {
-                    let old = was.next();
-                    let touched = writes.get(k).copied().unwrap_or(true);
-                    k += 1;
-                    let part = partial.get(k - 1).cloned().flatten();
-                    if let Some(v) = it.next() {
-                        if !touched {
-                            // **触れていないなら比べもしない**
-                        } else if let Some(idx) = part {
-                            // **触った要素だけ書き戻す。** 丸ごと書けば、
-                            // 渡していない要素を零で潰してしまう
-                            write_elements(b.as_mut(), &idx, &v, old.as_ref());
-                        } else if old.as_ref() != Some(&v) {
-                            // **同じなら書かない**（`HostBinding::write` の契約）。
-                            // ホストによっては書き戻しが高い——rtex なら save stack が動く
-                            b.write(&v);
-                        }
-                    }
-                }
-            }
+            vm_binding_writeback(
+                self.bindings
+                    .iter_mut()
+                    .filter_map(|(_, binding, live)| live.then_some(binding.as_mut())),
+                after,
+                state,
+            );
             match result {
                 Ok(ev) => Ok(ev),
-                Err(e) => Err(crate::interp::RuntimeError { msg: e.msg, span: e.span }),
+                Err(e) => Err(crate::interp::RuntimeError {
+                    msg: e.msg,
+                    span: e.span,
+                }),
             }
         } else {
             let mut it = Interp::new();
@@ -342,7 +332,9 @@ impl Host {
             for (i, (name, _)) in self.fns.borrow().iter().enumerate() {
                 it.expose_fn(name, i as u16);
             }
-            let answer = Box::new(Answer { fns: self.fns.clone() });
+            let answer = Box::new(Answer {
+                fns: self.fns.clone(),
+            });
             let r = it.run_with(&prog, answer);
             // 走り終わってから書き戻す。**同じなら書かない**（契約）
             for ((name, b, live), old) in self.bindings.iter_mut().zip(before) {
@@ -366,11 +358,19 @@ impl Host {
             Ok(Eval::Akasha) => Outcome::Empty,
             Ok(Eval::Escape(x)) => {
                 let (line, col) = crate::span::line_col(src, x.span.start);
-                Outcome::Runtime { msg: "フレームを越える脱出".into(), line, col }
+                Outcome::Runtime {
+                    msg: "フレームを越える脱出".into(),
+                    line,
+                    col,
+                }
             }
             Err(e) => {
                 let (line, col) = crate::span::line_col(src, e.span.start);
-                Outcome::Runtime { msg: e.msg, line, col }
+                Outcome::Runtime {
+                    msg: e.msg,
+                    line,
+                    col,
+                }
             }
         }
     }
@@ -379,6 +379,158 @@ impl Host {
 impl Default for Host {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// VMへ値を渡した時点の記録。
+///
+/// `Host::run` とprepared埋め込み経路が、S-15/S-22の読み書き規則を
+/// **同じ一箇所**から使うための内部型である。
+pub(crate) struct VmBindingState {
+    before: Vec<Option<Value>>,
+    partial_before: Vec<Option<Vec<(usize, Value)>>>,
+    partial: Vec<Option<Vec<i128>>>,
+    writes: Vec<bool>,
+    materialized: Vec<bool>,
+}
+
+impl VmBindingState {
+    /// `false`なら値はVMが観測しない型付きdummyである。
+    pub(crate) fn materialized(&self, index: usize) -> bool {
+        self.materialized.get(index).copied().unwrap_or(true)
+    }
+
+    /// 要素ごと読んだ場合に、実値を入れた添字だけを返す。
+    pub(crate) fn partial_indices(&self, index: usize) -> Option<&[i128]> {
+        self.partial.get(index).and_then(Option::as_deref)
+    }
+
+    /// 検証を終えた値だけを書き戻し比較用に複製する。
+    pub(crate) fn capture_before(&mut self, values: &[Value]) {
+        self.before = Vec::with_capacity(values.len());
+        self.partial_before = Vec::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            if !self.writes.get(index).copied().unwrap_or(true) {
+                self.before.push(None);
+                self.partial_before.push(None);
+                continue;
+            }
+            if let (Some(indices), Value::Array(array)) = (self.partial_indices(index), value) {
+                let snapshot = indices
+                    .iter()
+                    .filter_map(|&index| {
+                        let index = usize::try_from(index).ok()?;
+                        array.items.get(index).cloned().map(|value| (index, value))
+                    })
+                    .collect();
+                self.before.push(None);
+                self.partial_before.push(Some(snapshot));
+            } else {
+                self.before.push(Some(value.clone()));
+                self.partial_before.push(None);
+            }
+        }
+    }
+}
+
+/// VMへ渡すhost値を作る（S-15/S-22）。
+///
+/// - 使わない名前は読まない
+/// - 定数添字だけなら、答えられる束縛から要素だけを読む
+/// - 書き戻す可能性があれば、比較用の現在値を読む
+pub(crate) fn vm_binding_values<'borrow, 'object, I>(
+    program: &crate::vm::Program2,
+    bindings: I,
+) -> (Vec<Value>, VmBindingState)
+where
+    I: IntoIterator<Item = &'borrow (dyn HostBinding + 'object)>,
+    'object: 'borrow,
+{
+    let (values, mut state) = vm_binding_values_uncloned(program, bindings);
+    state.capture_before(&values);
+    (values, state)
+}
+
+/// Prepared embeddingがhost値を検証する前の、比較用cloneを持たない読み取り。
+pub(crate) fn vm_binding_values_uncloned<'borrow, 'object, I>(
+    program: &crate::vm::Program2,
+    bindings: I,
+) -> (Vec<Value>, VmBindingState)
+where
+    I: IntoIterator<Item = &'borrow (dyn HostBinding + 'object)>,
+    'object: 'borrow,
+{
+    let reads = program.host_reads();
+    let writes = program.host_writes();
+    let bindings = bindings.into_iter();
+    let mut partial: Vec<Option<Vec<i128>>> = Vec::with_capacity(bindings.size_hint().0);
+    let mut materialized = Vec::with_capacity(bindings.size_hint().0);
+    let values: Vec<Value> = bindings
+        .enumerate()
+        .map(|(i, binding)| {
+            // **書き戻すかもしれないなら読む。** 比べる相手が要るからである。
+            let need =
+                reads.get(i).copied().unwrap_or(true) || writes.get(i).copied().unwrap_or(true);
+            if !need {
+                partial.push(None);
+                materialized.push(false);
+                // 触れない枠の値は観測されず、書き戻しもしない。
+                return empty_of(&binding.type_of());
+            }
+            materialized.push(true);
+            let may_write = writes.get(i).copied().unwrap_or(true);
+            if !may_write || binding.supports_partial_writeback() {
+                if let Some(idx) = program.host_touched(i) {
+                    if let Some(v) = element_view(binding, &idx) {
+                        partial.push(Some(idx));
+                        return v;
+                    }
+                }
+            }
+            partial.push(None);
+            binding.read()
+        })
+        .collect();
+    (
+        values,
+        VmBindingState {
+            before: Vec::new(),
+            partial_before: Vec::new(),
+            partial,
+            writes,
+            materialized,
+        },
+    )
+}
+
+/// VMが返したhost値を書き戻す（S-15/S-22）。
+///
+/// 実行時エラーの有無にかかわらず呼ぶ。**同じ値は書かず**、部分読みを使った
+/// 束縛は触った要素だけを書く。
+pub(crate) fn vm_binding_writeback<'borrow, 'object, I>(
+    bindings: I,
+    after: Vec<Value>,
+    state: VmBindingState,
+) where
+    I: IntoIterator<Item = &'borrow mut (dyn HostBinding + 'object)>,
+    'object: 'borrow,
+{
+    for (i, (binding, value)) in bindings.into_iter().zip(after).enumerate() {
+        if !state.writes.get(i).copied().unwrap_or(true) {
+            continue;
+        }
+        if let Some(idx) = state.partial.get(i).and_then(Option::as_deref) {
+            // 丸ごと書けば、渡していない要素を零で潰してしまう。
+            write_elements(
+                binding,
+                idx,
+                &value,
+                state.partial_before.get(i).and_then(Option::as_deref),
+            );
+        } else if state.before.get(i).and_then(Option::as_ref) != Some(&value) {
+            // ホストによっては書き戻しが高い——TeXならsave stackが動く。
+            binding.write(&value);
+        }
     }
 }
 
@@ -398,9 +550,11 @@ fn empty_of(t: &ValueType) -> Value {
         Str => Value::str(Vec::new()),
         Array(e) => Value::array((**e).clone(), Vec::new()),
         Map(k, v) => Value::map((**k).clone(), (**v).clone(), Default::default()),
-        Hash(k, v) => {
-            Value::Hash(Box::new(crate::value::HashVal::new((**k).clone(), (**v).clone())))
-        }
+        Hash(k, v) => Value::Hash(Box::new(crate::value::HashVal::new(
+            (**k).clone(),
+            (**v).clone(),
+        ))),
+        Named(name) => Value::strukt(name.clone(), Vec::new()),
         _ => Value::I64(0),
     }
 }
@@ -412,9 +566,18 @@ fn empty_of(t: &ValueType) -> Value {
 ///
 /// ホストが要素で答えられないなら `None`。**そのときは丸ごと読む。**
 fn element_view(b: &dyn HostBinding, idx: &[i128]) -> Option<Value> {
-    let ValueType::Array(el) = b.type_of() else { return None };
+    let ValueType::Array(el) = b.type_of() else {
+        return None;
+    };
     let n = b.len()?;
-    let mut items = vec![zero_of(&el); n];
+    if n > MAX_HOST_VALUE_NODES {
+        // 部分読みによるdummy materializationもhost値検査と同じ上限へ収める。
+        return None;
+    }
+    // 未接触要素はhost_touchedの保証で観測されない。型付き零を深くcloneせず、
+    // 一語のsentinelで長さだけを保つ。
+    let mut items = Vec::with_capacity(n);
+    items.resize_with(n, || Value::I64(0));
     for &i in idx {
         // 枠の外の添字は paradox になるので、埋めなくてよい
         let Ok(u) = usize::try_from(i) else { continue };
@@ -427,26 +590,31 @@ fn element_view(b: &dyn HostBinding, idx: &[i128]) -> Option<Value> {
 }
 
 /// 触った添字だけ書き戻す。
-fn write_elements(b: &mut dyn HostBinding, idx: &[i128], now: &Value, was: Option<&Value>) {
+fn write_elements(
+    b: &mut dyn HostBinding,
+    idx: &[i128],
+    now: &Value,
+    was: Option<&[(usize, Value)]>,
+) {
     let Value::Array(a) = now else { return };
-    let old = match was {
-        Some(Value::Array(o)) => Some(o),
-        _ => None,
-    };
+    let old = was.unwrap_or(&[]);
+    let mut old_position = 0usize;
     for &i in idx {
         let Ok(u) = usize::try_from(i) else { continue };
         let Some(v) = a.items.get(u) else { continue };
-        // **同じなら書かない**（契約）
-        if let Some(o) = old {
-            if o.items.get(u) == Some(v) {
-                continue;
-            }
+        while old_position < old.len() && old[old_position].0 < u {
+            old_position += 1;
         }
-        b.write_at(u, v);
+        // **同じなら書かない**（契約）
+        if old
+            .get(old_position)
+            .is_some_and(|(index, old)| *index == u && old == v)
+        {
+            continue;
+        }
+        assert!(
+            b.write_at(u, v),
+            "HostBinding::supports_partial_writebackの保証に反してwrite_atが失敗した"
+        );
     }
-}
-
-/// 型に合う零。**触らない要素の場所を埋める**ためだけに使う。
-fn zero_of(t: &ValueType) -> Value {
-    empty_of(t)
 }

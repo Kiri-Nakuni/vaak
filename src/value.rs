@@ -18,6 +18,14 @@ use std::collections::{BTreeMap, HashMap};
 /// 呼べること自体には要らない。**再入が要るようになったら中断へ移す。**
 pub trait HostFns {
     fn call(&mut self, index: u16, args: &[Value]) -> Option<Value>;
+
+    /// 直前の[`call`](HostFns::call)でhost契約違反を検出した場合に取り出す。
+    ///
+    /// 既存dispatcherは既定の`None`のままでよい。検査済みembedding dispatcherは、
+    /// 返値の宣言型・schema違反をここへ置き、VMが後続命令を走らせる前に止める。
+    fn take_contract_error(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// 呼べる名前を持たないホスト。

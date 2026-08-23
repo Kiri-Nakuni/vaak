@@ -83,6 +83,30 @@ fn 受けなければ落ちる() {
     }
 }
 
+struct 呼ばれない関数;
+
+impl HostFn for 呼ばれない関数 {
+    fn sig(&self) -> HostSig {
+        HostSig {
+            params: Vec::new(),
+            ret: None,
+        }
+    }
+
+    fn call(&mut self, _args: &[Value]) -> Option<Value> {
+        panic!("表現範囲を越えた関数は呼ばない")
+    }
+}
+
+#[test]
+fn 参照実装もhost関数indexが折り返す前に拒む() {
+    let mut host = Host::new();
+    for index in 0..u16::MAX as usize + 2 {
+        host.expose_fn(&format!("f{index}"), Box::new(呼ばれない関数));
+    }
+    assert!(matches!(host.run("0"), Outcome::Static(errors) if errors.iter().any(|error| error.contains("65536"))));
+}
+
 #[test]
 fn ループの中から何度でも呼べる() {
     for vm in [false, true] {

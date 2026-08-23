@@ -366,6 +366,9 @@ impl vaak::host::HostBinding for Regs {
             _ => false,
         }
     }
+    fn supports_partial_writeback(&self) -> bool {
+        true
+    }
     fn len(&self) -> Option<usize> {
         Some(self.v.len())
     }
@@ -465,4 +468,154 @@ fn 長さを見るなら本物の長さが要る() {
         }),
     );
     assert!(matches!(h.run("count.len()"), vaak::host::Outcome::Value(v) if v.as_int() == Some(256)));
+}
+
+// ── S-15：片側だけの部分accessは書き込みへ使わない ─────────────
+
+struct ReadAtOnly {
+    values: std::rc::Rc<std::cell::RefCell<Vec<i64>>>,
+    whole_reads: std::rc::Rc<std::cell::Cell<u32>>,
+    element_reads: std::rc::Rc<std::cell::Cell<u32>>,
+    whole_writes: std::rc::Rc<std::cell::Cell<u32>>,
+}
+
+impl vaak::host::HostBinding for ReadAtOnly {
+    fn type_of(&self) -> vaak::ast::ValueType {
+        vaak::ast::ValueType::Array(Box::new(vaak::ast::ValueType::I64))
+    }
+
+    fn read(&self) -> vaak::value::Value {
+        self.whole_reads.set(self.whole_reads.get() + 1);
+        vaak::value::Value::array(
+            vaak::ast::ValueType::I64,
+            self.values
+                .borrow()
+                .iter()
+                .copied()
+                .map(vaak::value::Value::I64)
+                .collect(),
+        )
+    }
+
+    fn write(&mut self, value: &vaak::value::Value) {
+        self.whole_writes.set(self.whole_writes.get() + 1);
+        let vaak::value::Value::Array(array) = value else {
+            return;
+        };
+        *self.values.borrow_mut() = array
+            .items
+            .iter()
+            .map(|value| value.as_int().unwrap_or(0) as i64)
+            .collect();
+    }
+
+    fn read_at(&self, index: usize) -> Option<vaak::value::Value> {
+        self.element_reads.set(self.element_reads.get() + 1);
+        self.values
+            .borrow()
+            .get(index)
+            .copied()
+            .map(vaak::value::Value::I64)
+    }
+
+    fn len(&self) -> Option<usize> {
+        Some(self.values.borrow().len())
+    }
+}
+
+fn read_at_only_host(
+) -> (
+    vaak::host::Host,
+    std::rc::Rc<std::cell::RefCell<Vec<i64>>>,
+    std::rc::Rc<std::cell::Cell<u32>>,
+    std::rc::Rc<std::cell::Cell<u32>>,
+    std::rc::Rc<std::cell::Cell<u32>>,
+) {
+    let values = std::rc::Rc::new(std::cell::RefCell::new(vec![0, 1, 2, 3]));
+    let whole_reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let element_reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let whole_writes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut host = vaak::host::Host::new();
+    host.use_vm = true;
+    host.expose(
+        "count",
+        Box::new(ReadAtOnly {
+            values: values.clone(),
+            whole_reads: whole_reads.clone(),
+            element_reads: element_reads.clone(),
+            whole_writes: whole_writes.clone(),
+        }),
+    );
+    (host, values, whole_reads, element_reads, whole_writes)
+}
+
+#[test]
+fn read_atだけでも読むだけなら一要素に絞れる() {
+    let (mut host, _, whole_reads, element_reads, whole_writes) = read_at_only_host();
+    assert!(matches!(host.run("count[2]"), Outcome::Value(v) if v.as_int() == Some(2)));
+    assert_eq!(whole_reads.get(), 0);
+    assert_eq!(element_reads.get(), 1);
+    assert_eq!(whole_writes.get(), 0);
+}
+
+#[test]
+fn read_atだけの束縛へ書くなら丸ごと経路へ戻す() {
+    let (mut host, values, whole_reads, element_reads, whole_writes) = read_at_only_host();
+    let _ = host.run("count[2] += 10; 0");
+    assert_eq!(&*values.borrow(), &[0, 1, 12, 3]);
+    assert_eq!(whole_reads.get(), 1);
+    assert_eq!(element_reads.get(), 0);
+    assert_eq!(whole_writes.get(), 1);
+}
+
+fn host_touched_for(source: &str) -> Option<Vec<i128>> {
+    let syntax = vaak::parser::parse(source).expect("構文");
+    let layout = vec![(
+        "count".to_string(),
+        vaak::ast::HostItem::Value(vaak::ast::ValueType::Array(Box::new(
+            vaak::ast::ValueType::I64,
+        ))),
+    )];
+    vaak::vm::compile_with_host(&syntax, &layout)
+        .expect("VM組み立て")
+        .host_touched(0)
+}
+
+#[test]
+fn alias引数はhost値を丸ごと要求する() {
+    assert_eq!(
+        host_touched_for(
+            "fn f (var c : i64 array alias) { c[2] += 1; }; f(count); 0"
+        ),
+        None
+    );
+}
+
+#[test]
+fn alias経由の変更も実行時errorで丸ごと書き戻す() {
+    let (mut host, values, whole_reads, element_reads, whole_writes) = read_at_only_host();
+    let outcome = host.run(
+        "fn f (var c : i64 array alias) { c[2] += 10; }; f(count); var x := 1 / 0; x",
+    );
+    assert!(matches!(outcome, Outcome::Runtime { .. }), "{outcome:?}");
+    assert_eq!(&*values.borrow(), &[0, 1, 12, 3]);
+    assert_eq!(whole_reads.get(), 1);
+    assert_eq!(element_reads.get(), 0);
+    assert_eq!(whole_writes.get(), 1);
+}
+
+#[test]
+fn 破壊的methodはhost値を丸ごと要求する() {
+    assert_eq!(host_touched_for("count.push(9); 0"), None);
+}
+
+#[test]
+fn 破壊的method後の実行時errorでも丸ごと書き戻す() {
+    let (mut host, values, whole_reads, element_reads, whole_writes) = read_at_only_host();
+    let outcome = host.run("count.push(9); var x := 1 / 0; x");
+    assert!(matches!(outcome, Outcome::Runtime { .. }), "{outcome:?}");
+    assert_eq!(&*values.borrow(), &[0, 1, 2, 3, 9]);
+    assert_eq!(whole_reads.get(), 1);
+    assert_eq!(element_reads.get(), 0);
+    assert_eq!(whole_writes.get(), 1);
 }

@@ -1,24 +1,30 @@
 # 作業の分担
 
-**この版方は二人以上の担い手で進めている。** 衝突しないように、まず担当を確かめること。
+**この版方は二人以上の担い手で進めている。** 衝突しないように、まず担当と意味論の
+所有者を確かめること。
 
 | | 担当 | 触る場所 |
 |---|---|---|
-| **Claude** | **この版方（Vaak／mydsl）** | `src/` `docs/` `examples/` `editors/` |
-| Codex | [rtex](https://git.trap.jp/Suima/vaak-rtex)（別版方） | rtex の中だけ |
+| **Claude** | Vaak の言語意味論、決定記録、STEEL | `src/` `docs/` `examples/` `editors/` |
+| **Codex** | PraTeX 埋め込みの additive API | `src/embedding.rs`、対応する試験と引き継ぎ文書。必要な支援変更だけ |
+| **Codex** | [PraTeX](https://git.trap.jp/Suima/vaak-rtex)（別版方） | PraTeX の中だけ |
 
-**枝は `speculative`。**
+Codex の枝は **`codex2/pratex-embedding-api`**（基点 `codex2/main`）。以後も
+`codex2/` 以下で作業する。Claude の枝と優先順位をこの枝から書き換えない。
 
-rtex 側は Codex が持っている——pdfTeX・e-upTeX・kpathsea 相当が残っており、
-**そちらの方が重い。**
+PraTeX 埋め込みのための追加 API は進めてよい。ただし、既存の Vaak プログラムの意味、
+参照実装・VM・STEEL の結果、C-n/S-n の解釈を変える必要が出たら実装を止め、Claude に
+判断を求める。合意前に新しい S-n を作らない。
 
-## rtex 側から来る依頼
+## PraTeX 側から来る依頼
 
-`src/vaak.rs`（rtex 側）が Vaak の API を使っている。
-**API を変えたら rtex 側に知らせること。**
+`src/vaak.rs`（PraTeX 側）が Vaak の API を使っている。
+**API を変えたら PraTeX 側に知らせること。**
 
-そして **S-11**（ホストが呼べる名前も見せられる）は Vaak 側の実装が要る。
-rtex が `tex.print` を欲しがっている——`\directvaak` がレジスタしか触れないため。
+**S-11** の呼べるホスト名（`HostItem::Fn` / `HostFn`）と、**S-15/S-22** の部分読み書き・
+実行時エラー時の writeback は実装済みである。今回必要なのは、parse/check/type-check/compile
+を一度だけ行い、順序と型を固定した host layout と再利用可能な `Runner` を一つの公開契約で
+包むこと。`tex.print` の意味は Vaak に埋め込まず、PraTeX が host function として供給する。
 
 ---
 
@@ -60,7 +66,9 @@ src/steel.rs    ← LLVM IR。同上
 - 試験の名前は**日本語**。何を確かめているかを書く（`fn 分岐が空になっても高さが揃う()`）
 - **例は試験である。** `examples/vaak/` の五本は `tests/examples.rs` が
   参照実装と VM の両方で走らせている
-- `cargo test --release` が全部通ること（いま **289 通過**）
+- `cargo test --release --locked --no-fail-fast` が全部通ること（変更前 baseline は
+  **612 passed、0 failed**、2026-08-23）。prepared embedding checkpoint は同日
+  **679 passed、0 failed**。
 
 ### コミットの書き方
 
@@ -80,67 +88,22 @@ VM は else の無い側にだけ Paradox を積んでいた。
 
 ## いま積んでいること
 
-**上から順に。** 判断が要るものは `S-n` に書いて枝を切る。
+### Codex の PraTeX 埋め込み枝
 
-**0. S-11（ホスト関数）** — rtex が待っている。方針は決着済み:
-言語の表面はホスト関数、界面の実装は中断・再開。最初は `tex.print`。
+1. `HostLayout` を順序・名前・型まで含む不変な descriptor にする。
+2. `PreparedProgram` が parse/check/type-check/VM compile を一度だけ行った結果を所有する。
+3. `EmbeddingRunner` が既存 `vm::Runner` を再利用し、host 値の個数・型と host function の
+   layout 不一致を実行前に拒否する。
+4. 参照実装と既存 VM API の意味を変えない回帰試験を置く。
+5. Vaak 側を独立 commit・push してから、PraTeX 側を別 commit で新 API へ移す。
 
-### 1. STEEL 第四段（`src/steel.rs`）
+この slice に named entry point、中断・再開、phase ABI、WASM ABI、`tex.print` の TeX 意味論は
+入れない。それらは host layout の上に後から足す。
 
-S-19 で配列と `str` まで入った。**まだ無いもの**:
+### Claude の意味論・STEEL 枝
 
-| | 難しさ |
-|---|---|
-| **写像（`map`）** | **大。** 実行時の道具が要る（連想の表）。要素の型ごとに比較を出す |
-| **構造体（`struct`）** | 中。LLVM の構造体型に落ちる。欄の位置は静的に決まる |
-| **入れ子の集合体**（`i64 array array`） | 中。**深い複製が再帰する。** 型ごとに写す関数を出す |
-| `alias` の局所束縛（`&=`） | 中 |
-| `outward` | 大。フレームを越える脱出。関数の返り方が変わる |
-| 動く段数の `$repeat` | 中 |
-
-**先に入れ子の集合体を薦める。** 深い複製の再帰が要るので、写像と構造体の土台にもなる。
-
-#### 場の解放（S-19 の残り）
-
-いま**関数の境でだけ**印を戻している。関数の中のループが場を伸ばす:
-
-```
-nfor (i, 0, 1000000) { let a := new i64 array(10, 0); };   ← 尽きる（終了コード 70）
-```
-
-ループ本体で戻すには**逃げ出す値の解析**が要る。
-**C-14 が「領域は高々一つの値」と決めているので、代入だけが逃げ道である**——
-外の名前への代入を見れば済む。
-
-### 2. `read_at` / `write_at`（`src/host.rs`、S-15）
-
-ホストの集合体を**丸ごと写さずに要素だけ問う道**。
-
-```rust
-pub trait HostBinding {
-    fn type_of(&self) -> ValueType;
-    fn read(&self) -> Value;
-    fn write(&mut self, v: &Value);
-
-    // 足すもの。**既定は丸ごと読んでから取り出す**ので、
-    // 答えられないホストは何もしなくてよい
-    fn read_at(&self, i: usize) -> Option<Value> { … }
-    fn write_at(&mut self, i: usize, v: &Value) -> bool { … }
-}
-```
-
-**動く添字が 1340 ns 掛かっている**（S-15 で測った）。静的な添字は 22 ns なので、
-そこだけが高い。`Program2::host_touched` が `None` を返す場合に効く。
-
-### 3. 人間向けのリファレンスと付録（`docs/` に新規、最低優先度）
-
-依頼者の指定:
-
-- 本文は <https://doc.rust-jp.rs/book-ja/> を参考に、**より簡潔に**
-- **付録**で `Akasha` という名称・`vaak` の語源・メンタルモデルに触れる
-- 日本語
-
-**`decisions.md` を読んでから書くこと。** 理由が全部そこにある。
+進行中の優先順位は `claude_memo.md` と `docs/vaak/decisions.md` を一次資料とする。Codex の
+埋め込み枝から STEEL の残件や言語仕様を先回りして変えない。
 
 ---
 
@@ -162,7 +125,7 @@ pub trait HostBinding {
 ## 建て方
 
 ```bash
-cargo test --release          # 全部（289 通過）
+cargo test --release --locked --no-fail-fast   # 全部（prepared embedding checkpoint 679通過）
 cargo build --release         # vaak / vaak-lsp / steel / portable
 ./target/release/steel examples/vaak/01-探索.vaak   # LLVM IR 経由で実行ファイル
 ```

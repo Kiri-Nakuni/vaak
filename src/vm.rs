@@ -207,6 +207,32 @@ pub fn compile_with_host(
     prog: &Program,
     host: &[(String, HostItem)],
 ) -> Result<Program2, CompileError> {
+    if host.iter().any(|(_, item)| host_item_contains_f80(item)) {
+        return Err(CompileError {
+            msg: "VMのhost layoutにはF80を置けない".into(),
+            span: Span::NONE,
+        });
+    }
+    let host_function_count = host
+        .iter()
+        .filter(|(_, item)| matches!(item, HostItem::Fn(_)))
+        .count();
+    if host_function_count > u16::MAX as usize + 1 {
+        return Err(CompileError {
+            msg: "ホスト関数は65536個までしか登録できない".into(),
+            span: Span::NONE,
+        });
+    }
+    let host_value_count = host
+        .iter()
+        .filter(|(_, item)| matches!(item, HostItem::Value(_)))
+        .count();
+    if host_value_count > u16::MAX as usize {
+        return Err(CompileError {
+            msg: "ホスト値は65535個までしか登録できない".into(),
+            span: Span::NONE,
+        });
+    }
     let mut c = Compiler {
         out: Program2::default(),
         chunk: Chunk::default(),
@@ -264,7 +290,7 @@ pub fn compile_with_host(
     // ホストの名前を先に枠へ。**スクリプトからは最初から見えている**
     for (n, item) in host {
         if let HostItem::Value(ty) = item {
-            let slot = c.slot(n);
+            let slot = c.slot(n, Span::NONE)?;
             c.note_type(n, Some(ty.clone()));
             c.chunk.host_slots.push(slot);
         }
@@ -274,6 +300,27 @@ pub fn compile_with_host(
     c.out.chunks[0] = std::mem::take(&mut c.chunk);
     c.out.top = 0;
     Ok(c.out)
+}
+
+fn host_item_contains_f80(item: &HostItem) -> bool {
+    match item {
+        HostItem::Value(ty) => value_type_contains_f80(ty),
+        HostItem::Fn(signature) => {
+            signature.params.iter().any(value_type_contains_f80)
+                || signature.ret.as_ref().is_some_and(value_type_contains_f80)
+        }
+    }
+}
+
+fn value_type_contains_f80(ty: &ValueType) -> bool {
+    match ty {
+        ValueType::F80 => true,
+        ValueType::Array(element) => value_type_contains_f80(element),
+        ValueType::Map(key, value) | ValueType::Hash(key, value) => {
+            value_type_contains_f80(key) || value_type_contains_f80(value)
+        }
+        _ => false,
+    }
 }
 
 fn collect_fns(body: &[Expr]) -> Vec<FnDecl> {
@@ -415,14 +462,33 @@ impl Compiler {
         }
     }
 
-    fn slot(&mut self, n: &str) -> u16 {
+    fn slot(&mut self, n: &str, span: Span) -> Result<u16, CompileError> {
         if let Some(s) = self.lookup(n) {
-            return s;
+            return Ok(s);
+        }
+        if self.chunk.nslots == u16::MAX {
+            return self.err("一つのframeには65535個までしか値slotを置けない", span);
         }
         let s = self.chunk.nslots;
         self.chunk.nslots += 1;
         self.scopes.last_mut().unwrap().insert(n.to_string(), (s, None));
-        s
+        Ok(s)
+    }
+
+    fn operand_count(&self, len: usize, what: &str, span: Span) -> Result<u16, CompileError> {
+        match u16::try_from(len) {
+            Ok(count) => Ok(count),
+            Err(_) => self.err(format!("{what}は65535個までしか置けない"), span),
+        }
+    }
+
+    fn array_literal_count(&self, len: usize, span: Span) -> Result<u16, CompileError> {
+        // `u16::MAX` は`new T array(count, value)`の命令用sentinelなので、
+        // literalの個数としては使わない。
+        if len >= u16::MAX as usize {
+            return self.err("配列literalの要素は65534個までしか置けない", span);
+        }
+        Ok(len as u16)
     }
 
     /// 名前に注釈の型を覚えさせる。**枠は既にある。**
@@ -461,7 +527,7 @@ impl Compiler {
         self.chunk.span = f.span;
 
         for p in &f.params {
-            let s = self.slot(&p.name);
+            let s = self.slot(&p.name, p.span)?;
             self.note_type(&p.name, Some(p.ty.value.clone()));
             self.chunk.params.push((s, p.ty.is_alias));
             // `const` の別名引数は呼び出し元のセル自体を凍らせる。
@@ -646,6 +712,7 @@ impl Compiler {
             ExprKind::Call { callee, args } => self.call(callee, args, e.span)?,
 
             ExprKind::ArrayLit(items) => {
+                let count = self.array_literal_count(items.len(), e.span)?;
                 // **注釈が言う要素の型が届く**（C-100）
                 let el = match &want {
                     Some(ValueType::Array(x)) => Some((**x).clone()),
@@ -657,16 +724,17 @@ impl Compiler {
                     self.expr(it)?;
                     self.emit(Op::NeedValue(it.span));
                 }
-                self.emit(Op::MakeArray(items.len() as u16));
+                self.emit(Op::MakeArray(count));
             }
             ExprKind::MapLit(pairs) => {
+                let count = self.operand_count(pairs.len(), "map literalの組", e.span)?;
                 for (k, v) in pairs {
                     self.expr(k)?;
                     self.emit(Op::NeedValue(k.span));
                     self.expr(v)?;
                     self.emit(Op::NeedValue(v.span));
                 }
-                self.emit(Op::MakeMap(pairs.len() as u16));
+                self.emit(Op::MakeMap(count));
             }
             ExprKind::Construct { ty, args } => self.construct(ty, args, e.span)?,
 
@@ -788,7 +856,7 @@ impl Compiler {
                         let ti = self.type_idx(t);
                         self.emit(Op::Coerce(ti));
                     }
-                    let s = self.slot(&b.name);
+                    let s = self.slot(&b.name, b.span)?;
                     self.note_type(&b.name, b.ty.as_ref().map(|t| t.value.clone()));
                     self.emit(Op::Declare(s));
                 }
@@ -796,7 +864,7 @@ impl Compiler {
                     let Some(src) = self.lookup(t) else {
                         return self.err(format!("知らない名前 `{t}`"), b.span);
                     };
-                    let dst = self.slot(&b.name);
+                    let dst = self.slot(&b.name, b.span)?;
                     if d.kind == BindKind::Const {
                         // `const` は経路ではなくセルの性質。
                         // 元の名前からの書き込みも同じ間は禁じる（C-35）。
@@ -1012,6 +1080,7 @@ impl Compiler {
 
 impl Compiler {
     fn call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Result<(), CompileError> {
+        let argc = self.operand_count(args.len(), "関数引数", span)?;
         // メンバ関数。レシーバは経路でよい（C-64）
         if let ExprKind::Field { base, name } = &callee.kind {
             // `x.len()` は長さだけ要る。**集合体を写さない**
@@ -1039,7 +1108,7 @@ impl Compiler {
                             self.emit(Op::NeedValue(a.span));
                         }
                         let n = self.name_idx(name);
-                        self.emit(Op::MutMethod(slot, n, args.len() as u16, span));
+                        self.emit(Op::MutMethod(slot, n, argc, span));
                         return Ok(());
                     }
                 }
@@ -1062,7 +1131,7 @@ impl Compiler {
                 self.emit(Op::NeedValue(a.span));
             }
             let n = self.name_idx(name);
-            self.emit(Op::Method(n, args.len() as u16, span));
+            self.emit(Op::Method(n, argc, span));
             // 破壊的なら書き戻す。上には結果が、その下にレシーバが残る
             if is_destructive(name) || self.user_destructive(name) {
                 self.store_back(base)?;
@@ -1083,7 +1152,7 @@ impl Compiler {
                 self.expr(a)?;
                 self.emit(Op::NeedValue(a.span));
             }
-            self.emit(Op::HostCall(hi, args.len() as u16, span));
+            self.emit(Op::HostCall(hi, argc, span));
             return Ok(());
         }
         let Some(idx) = self.out.fn_index.get(name).copied() else {
@@ -1096,7 +1165,7 @@ impl Compiler {
             self.want = ptys.get(i).cloned();
             self.argument(a, aliases.get(i).copied().unwrap_or(false))?;
         }
-        self.emit(Op::Call(idx, args.len() as u16, span));
+        self.emit(Op::Call(idx, argc, span));
         Ok(())
     }
 
@@ -1125,6 +1194,7 @@ impl Compiler {
                 let Some(s) = self.out.structs.get(n).cloned() else {
                     return self.err(format!("知らない型 `{n}`"), span);
                 };
+                let field_count = self.operand_count(s.fields.len(), "構造体の欄", span)?;
                 for f in &s.fields {
                     // **欄の型が式の中まで届く**（C-100）
                     let fty = Some(f.ty.value.clone());
@@ -1146,12 +1216,13 @@ impl Compiler {
                     self.emit(Op::Coerce(ti));
                 }
                 let ni = self.name_idx(n);
-                self.emit(Op::MakeStruct(ni, s.fields.len() as u16));
+                self.emit(Op::MakeStruct(ni, field_count));
             }
             (ValueType::Named(n), CtorArgs::Positional(a))
                 if a.is_empty() && self.out.structs.contains_key(n) =>
             {
                 let s = self.out.structs[n].clone();
+                let field_count = self.operand_count(s.fields.len(), "構造体の欄", span)?;
                 for f in &s.fields {
                     // **欄の型が既定の式の中まで届く**（C-100）
                     self.want = Some(f.ty.value.clone());
@@ -1164,7 +1235,7 @@ impl Compiler {
                     self.emit(Op::Coerce(ti));
                 }
                 let ni = self.name_idx(n);
-                self.emit(Op::MakeStruct(ni, s.fields.len() as u16));
+                self.emit(Op::MakeStruct(ni, field_count));
             }
             // ラップ型（S-2）
             (ValueType::Named(n), CtorArgs::Positional(a))
@@ -1325,7 +1396,7 @@ impl Compiler {
         self.expr(count)?;
         self.emit(Op::NeedValue(count.span));
         self.scopes.push(HashMap::new());
-        let s = self.slot(name);
+        let s = self.slot(name, span)?;
         self.emit(Op::NForBegin(s, span));
         let top = self.here();
         self.collect(items);
@@ -1837,12 +1908,13 @@ impl Vm<'_> {
     fn run_top(
         &mut self,
         p: &Program2,
-        host: Vec<Value>,
+        mut host: Vec<Value>,
     ) -> (Result<crate::interp::Eval, RtErr>, Vec<Value>) {
         // ホストの値をセルに置き、最上位の枠へ結び付ける
         let base = self.arena.mark();
         let n = host.len();
-        for v in host {
+        // 元のVecを空にして保持する。終了時のwritebackを同じbufferへ戻す。
+        for v in host.drain(..) {
             self.arena.alloc(Some(v));
         }
         self.push_frame(p.top, Vec::new(), 1);
@@ -1856,9 +1928,10 @@ impl Vm<'_> {
         }
         let out = self.run();
         // 走り終わってから**取り出す**。写さない——セルはもう要らない
-        let after: Vec<Value> = (0..n)
-            .map(|i| self.arena.take(CellId((base + i) as u32)).unwrap_or(Value::I64(0)))
-            .collect();
+        host.extend(
+            (0..n)
+                .map(|i| self.arena.take(CellId((base + i) as u32)).unwrap_or(Value::I64(0))),
+        );
         let ev = match out {
             Ok(Slot::Value(v)) => Ok(crate::interp::Eval::Value(v)),
             Ok(Slot::Paradox(sp)) => Ok(crate::interp::Eval::Paradox(sp)),
@@ -1872,7 +1945,7 @@ impl Vm<'_> {
             }),
             Err(e) => Err(e),
         };
-        (ev, after)
+        (ev, host)
     }
 }
 
@@ -1946,11 +2019,14 @@ impl Program2 {
                 }
                 // 丸ごと読む・書く・別名にする → 全部要る
                 Op::Load(x)
+                | Op::Ref(x)
                 | Op::Store(x)
                 | Op::Update(x, _, _)
                 | Op::StoreExact(x)
+                | Op::Freeze(x)
                 | Op::Declare(x)
                     if *x == slot => return None,
+                Op::MutMethod(x, _, _, _) if *x == slot => return None,
                 Op::LoadField(x, _, _) if *x == slot => return None,
                 Op::Alias(a, b) if *a == slot || *b == slot => return None,
                 _ => {}
@@ -2289,7 +2365,11 @@ impl<'a> Vm<'a> {
                     args.push(self.pop().value(sp)?);
                 }
                 args.reverse();
-                match self.hosts.call(hi, &args) {
+                let answer = self.hosts.call(hi, &args);
+                if let Some(message) = self.hosts.take_contract_error() {
+                    return self.err(message, sp);
+                }
+                match answer {
                     Some(v) => self.stack.push(Slot::Value(v)),
                     None => self.stack.push(Slot::Paradox(sp)),
                 }
