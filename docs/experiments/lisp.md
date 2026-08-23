@@ -4,6 +4,9 @@ Vaak 自身で小さな S 式インタープリターを書き、木を辿る参
 同じソースを通した記録です。実装は
 [examples/vaak/06-LISP.vaak](../../examples/vaak/06-LISP.vaak) にあります。
 
+`codex/wrap-lisp-probe` 枝では token の位置を `TokenPos` で包んだ対照版に置き換えている。
+書く量と実行費用は [LISP の token 位置を `wrap` する](wrap-lisp.md) に分けて記録した。
+
 これは Common Lisp や Scheme の実装ではありません。整数を値に持つ、小さな式言語です。
 それでも、字句分割、入れ子になった式、名前の探索、字句的な束縛、遅延する条件分岐までを含みます。
 
@@ -50,7 +53,7 @@ struct Node { var children : Node array; };  // 型依存が循環する
 struct Step {
     let ok : u1 := false;
     let value : i64 := 0;
-    let next : i64 := 0;
+    let next : TokenPos := new TokenPos(0);
 };
 ```
 
@@ -99,7 +102,7 @@ values.pop();
 読み取り専用で共有する大きな値は、関数の署名に `alias` を書いて渡しています。
 
 ```vaak
-fn eval (tokens : str array alias, pos : i64,
+fn eval (tokens : str array alias, pos : TokenPos,
          names : str array alias, values : i64 array alias) { ... } -> Step;
 ```
 
