@@ -1,0 +1,48 @@
+%{ i64 加算の Fenwick tree を、生の i64 array 一本で表す対照実装。
+
+   `FenwickI64` 構造体版と同じ演算だが、hot path の左辺を
+   data[i] に留め、入れ子の tree.data[i] を避ける。公開関数は
+   fenwick_i64_flat_ で始まる。 }%
+
+flow $fenwick_i64_flat_return = $repeat(break, getdepth());
+
+% n < 0 は paradox。n == 0 は空の木。%
+fn fenwick_i64_flat_new (n : i64) {
+    if (n < 0) $fenwick_i64_flat_return; fi;
+    new i64 array(n, 0)
+} -> i64 array;
+
+% 範囲外は paradox、成功は true。%
+fn fenwick_i64_flat_add (var data : i64 array alias, index : i64, delta : i64) {
+    if (index < 0 || index >= data.len()) $fenwick_i64_flat_return; fi;
+    var i := index + 1;
+    while (i <= data.len()) {
+        data[i - 1] += delta;
+        i += i & (0 - i);
+    };
+    true
+} -> u1;
+
+% [0, last) の和。last == 0 は 0。範囲外は paradox。%
+fn fenwick_i64_flat_prefix_sum (data : i64 array alias, last : i64) {
+    if (last < 0 || last > data.len()) $fenwick_i64_flat_return; fi;
+    var total := 0;
+    var i := last;
+    while (i > 0) {
+        total += data[i - 1] ?? $fenwick_i64_flat_return;
+        i -= i & (0 - i);
+    };
+    total
+} -> i64;
+
+% [first, last) の和。空区間は 0。範囲外は paradox。%
+fn fenwick_i64_flat_range_sum (data : i64 array alias, first : i64, last : i64) {
+    if (first < 0 || first > last || last > data.len()) $fenwick_i64_flat_return; fi;
+    let right := fenwick_i64_flat_prefix_sum(data, last) ?? $fenwick_i64_flat_return;
+    let left := fenwick_i64_flat_prefix_sum(data, first) ?? $fenwick_i64_flat_return;
+    right - left
+} -> i64;
+
+fn fenwick_i64_flat_get (data : i64 array alias, index : i64) {
+    fenwick_i64_flat_range_sum(data, index, index + 1)
+} -> i64;

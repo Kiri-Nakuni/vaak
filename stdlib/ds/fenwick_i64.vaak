@@ -1,0 +1,56 @@
+%{ i64 加算の Fenwick tree。
+
+   point add と prefix/range sum に演算を固定し、callback は使わない。
+   和は i64 の規則どおり折り返す。公開型・関数は
+   FenwickI64 / fenwick_i64_ で始まる。 }%
+
+flow $fenwick_i64_return = $repeat(break, getdepth());
+
+struct FenwickI64 {
+    var data : i64 array;
+};
+
+% n < 0 は paradox。n == 0 は空の木。%
+fn fenwick_i64_new (n : i64) {
+    if (n < 0) $fenwick_i64_return; fi;
+    new FenwickI64 ( data := new i64 array(n, 0) )
+} -> FenwickI64;
+
+fn fenwick_i64_len (tree : FenwickI64 alias) {
+    tree.data.len()
+} -> i64;
+
+% 範囲外は paradox、成功は true。%
+fn fenwick_i64_add (var tree : FenwickI64 alias, index : i64, delta : i64) {
+    if (index < 0 || index >= tree.data.len()) $fenwick_i64_return; fi;
+    var i := index + 1;
+    while (i <= tree.data.len()) {
+        tree.data[i - 1] += delta;
+        i += i & (0 - i);
+    };
+    true
+} -> u1;
+
+% [0, last) の和。last == 0 は 0。範囲外は paradox。%
+fn fenwick_i64_prefix_sum (tree : FenwickI64 alias, last : i64) {
+    if (last < 0 || last > tree.data.len()) $fenwick_i64_return; fi;
+    var total := 0;
+    var i := last;
+    while (i > 0) {
+        total += tree.data[i - 1] ?? $fenwick_i64_return;
+        i -= i & (0 - i);
+    };
+    total
+} -> i64;
+
+% [first, last) の和。空区間は 0。範囲外は paradox。%
+fn fenwick_i64_range_sum (tree : FenwickI64 alias, first : i64, last : i64) {
+    if (first < 0 || first > last || last > tree.data.len()) $fenwick_i64_return; fi;
+    let right := fenwick_i64_prefix_sum(tree, last) ?? $fenwick_i64_return;
+    let left := fenwick_i64_prefix_sum(tree, first) ?? $fenwick_i64_return;
+    right - left
+} -> i64;
+
+fn fenwick_i64_get (tree : FenwickI64 alias, index : i64) {
+    fenwick_i64_range_sum(tree, index, index + 1)
+} -> i64;

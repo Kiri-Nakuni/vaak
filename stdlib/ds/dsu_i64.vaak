@@ -1,0 +1,75 @@
+%{ i64 添字の素集合データ構造（DSU）。
+
+   union by size と path compression を使う。要素は 0 以上 len 未満。
+   公開型・関数は DsuI64 / dsu_i64_ で始まる。 }%
+
+flow $dsu_i64_return = $repeat(break, getdepth());
+
+struct DsuI64 {
+    var parent_or_size : i64 array;
+};
+
+% n < 0 は paradox。n == 0 は空の DSU。%
+fn dsu_i64_new (n : i64) {
+    if (n < 0) $dsu_i64_return; fi;
+    new DsuI64 ( parent_or_size := new i64 array(n, 0 - 1) )
+} -> DsuI64;
+
+fn dsu_i64_len (dsu : DsuI64 alias) {
+    dsu.parent_or_size.len()
+} -> i64;
+
+% 範囲外は paradox。経路を圧縮するため var alias で受ける。%
+fn dsu_i64_leader (var dsu : DsuI64 alias, a : i64) {
+    if (a < 0 || a >= dsu.parent_or_size.len()) $dsu_i64_return; fi;
+    var root := a;
+    var parent := dsu.parent_or_size[root] ?? $dsu_i64_return;
+    while (parent >= 0) {
+        root := parent;
+        parent := dsu.parent_or_size[root] ?? $dsu_i64_return;
+    };
+
+    var node := a;
+    while (node != root) {
+        let next := dsu.parent_or_size[node] ?? $dsu_i64_return;
+        dsu.parent_or_size[node] := root;
+        node := next;
+    };
+    root
+} -> i64;
+
+% 範囲外は paradox。同じ集合なら既存の leader を返す。%
+fn dsu_i64_merge (var dsu : DsuI64 alias, a : i64, b : i64) {
+    var x := dsu_i64_leader(dsu, a) ?? $dsu_i64_return;
+    var y := dsu_i64_leader(dsu, b) ?? $dsu_i64_return;
+    if (x == y) $dsu_i64_return x; fi;
+
+    % parent_or_size[root] は負の大きさ。より小さい値が大きい木。%
+    if ((dsu.parent_or_size[x] ?? $dsu_i64_return) > (dsu.parent_or_size[y] ?? $dsu_i64_return)) {
+        let saved := x;
+        x := y;
+        y := saved;
+    } fi;
+    dsu.parent_or_size[x] += dsu.parent_or_size[y] ?? $dsu_i64_return;
+    dsu.parent_or_size[y] := x;
+    x
+} -> i64;
+
+fn dsu_i64_same (var dsu : DsuI64 alias, a : i64, b : i64) {
+    let x := dsu_i64_leader(dsu, a) ?? $dsu_i64_return;
+    let y := dsu_i64_leader(dsu, b) ?? $dsu_i64_return;
+    x == y
+} -> u1;
+
+fn dsu_i64_size (var dsu : DsuI64 alias, a : i64) {
+    let root := dsu_i64_leader(dsu, a) ?? $dsu_i64_return;
+    0 - (dsu.parent_or_size[root] ?? $dsu_i64_return)
+} -> i64;
+
+fn dsu_i64_group_count (dsu : DsuI64 alias) {
+    var count := 0;
+    nfor (i, 0, dsu.parent_or_size.len()) {
+        if ((dsu.parent_or_size[i] ?? $dsu_i64_return) < 0) count += 1; fi;
+    };
+    count
+} -> i64;

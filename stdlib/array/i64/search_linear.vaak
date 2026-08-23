@@ -1,0 +1,57 @@
+%{ i64 配列の線形探索。
+
+   読み取り元は深く複製しないよう alias で受ける。範囲は常に
+   [first, last)。公開関数は array_i64_ で始まる。 }%
+
+flow $array_i64_linear_return = $repeat(break, getdepth());
+
+% 見つかれば最初の添字。不正範囲または見つからなければ paradox。%
+fn array_i64_find_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_linear_return; fi;
+    nfor (offset, 0, last - first) {
+        let i := first + offset;
+        if ((xs[i] ?? $array_i64_linear_return) == value) $array_i64_linear_return i; fi;
+    };
+} -> i64;
+
+fn array_i64_find (xs : i64 array alias, value : i64) {
+    array_i64_find_range(xs, value, 0, xs.len())
+} -> i64;
+
+% 見つかれば最後の添字。不正範囲または見つからなければ paradox。%
+fn array_i64_rfind_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_linear_return; fi;
+    nfor (offset, 0, last - first) {
+        let i := last - 1 - offset;
+        if ((xs[i] ?? $array_i64_linear_return) == value) $array_i64_linear_return i; fi;
+    };
+} -> i64;
+
+fn array_i64_rfind (xs : i64 array alias, value : i64) {
+    array_i64_rfind_range(xs, value, 0, xs.len())
+} -> i64;
+
+% 有効な空区間は false。不正範囲は paradox。%
+fn array_i64_contains_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_linear_return; fi;
+    let found := array_i64_find_range(xs, value, first, last) ?? 0 - 1;
+    found >= 0
+} -> u1;
+
+fn array_i64_contains (xs : i64 array alias, value : i64) {
+    array_i64_contains_range(xs, value, 0, xs.len())
+} -> u1;
+
+% 有効な空区間は 0。不正範囲は paradox。%
+fn array_i64_count_range (xs : i64 array alias, value : i64, first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) $array_i64_linear_return; fi;
+    var count := 0;
+    nfor (offset, 0, last - first) {
+        if ((xs[first + offset] ?? $array_i64_linear_return) == value) count += 1; fi;
+    };
+    count
+} -> i64;
+
+fn array_i64_count (xs : i64 array alias, value : i64) {
+    array_i64_count_range(xs, value, 0, xs.len())
+} -> i64;
