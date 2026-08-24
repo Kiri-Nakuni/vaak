@@ -1,4 +1,4 @@
-%{ i64 添字の有向 CSR、反復 SCC、2-SAT。
+%{ i64 添字の有向 CSR、反復 SCC/BFS、安定topological sort、2-SAT。
 
    module/import と generic callback を先取りせず、この一ファイルだけを前置きして使う。
    頂点と変数の添字は 0 以上個数未満。不正な添字・壊れた公開欄は paradox。
@@ -6,7 +6,8 @@
 
    CSR は頂点ごとに辺の追加順を保つ。SCC は再帰を使わない Kosaraju 法で、異なる
    成分を結ぶ辺 u -> v には group_of[u] < group_of[v] となる番号を決定的に付ける。
-   CSR 構築と SCC は O(V + E)、2-SAT は O(variables + clauses)。 }%
+   CSR 構築、SCC、BFSは O(V + E)、topological sortはO(E + V log V)、
+   2-SAT は O(variables + clauses)。 }%
 
 flow $graph_i64_return = $repeat(break, getdepth());
 
@@ -24,6 +25,16 @@ struct CsrI64 {
 struct SccResultI64 {
     var group_count : i64;
     var group_of : i64 array;
+};
+
+struct BfsResultI64 {
+    var distance : i64 array;
+    var parent : i64 array;
+};
+
+struct TopologicalResultI64 {
+    var acyclic : u1;
+    var order : i64 array;
 };
 
 struct TwoSatI64 {
@@ -273,6 +284,121 @@ fn scc_i64_same (result : SccResultI64 alias, a : i64, b : i64) {
         group_b < 0 || group_b >= result.group_count) $graph_i64_return; fi;
     group_a == group_b
 } -> u1;
+
+%{ 単一始点の有向BFS。未到達のdistance/parentは-1、始点のparentは始点自身。
+   CSRの辺順で最初に発見した親を保つ。O(V + E)、追加領域O(V)。 }%
+fn bfs_i64 (graph : CsrI64 alias, source : i64) {
+    if (! csr_i64_is_valid(graph)) $graph_i64_return; fi;
+    let vertex_count := graph.start.len() - 1;
+    if (source < 0 || source >= vertex_count) $graph_i64_return; fi;
+    var distance : i64 array := new i64 array(vertex_count, 0 - 1);
+    var parent : i64 array := new i64 array(vertex_count, 0 - 1);
+    var queue : i64 array := new i64 array(vertex_count, 0);
+    var head := 0;
+    var tail := 1;
+    distance[source] := 0;
+    parent[source] := source;
+    queue[0] := source;
+    while (head < tail) {
+        let vertex := queue[head] ?? $graph_i64_return;
+        head += 1;
+        let begin := graph.start[vertex] ?? $graph_i64_return;
+        let end := graph.start[vertex + 1] ?? $graph_i64_return;
+        nfor (edge, begin, end - begin) {
+            let to := graph.to[edge] ?? $graph_i64_return;
+            if ((distance[to] ?? $graph_i64_return) < 0) {
+                distance[to] := (distance[vertex] ?? $graph_i64_return) + 1;
+                parent[to] := vertex;
+                queue[tail] := to;
+                tail += 1;
+            } fi;
+        };
+    };
+    new BfsResultI64 ( distance := distance, parent := parent )
+} -> BfsResultI64;
+
+% topological sort内部だけで使う固定i64 min heap。%
+fn graph_i64__min_heap_push (var heap : i64 array alias, value : i64) {
+    heap.push(value);
+    var child := heap.len() - 1;
+    while (child > 0) {
+        let parent := (child - 1) / 2;
+        let parent_value := heap[parent] ?? $graph_i64_return;
+        let child_value := heap[child] ?? $graph_i64_return;
+        if (parent_value <= child_value) break; fi;
+        heap[parent] := child_value;
+        heap[child] := parent_value;
+        child := parent;
+    };
+    true
+} -> u1;
+
+fn graph_i64__min_heap_pop (var heap : i64 array alias) {
+    let minimum := heap[0] ?? $graph_i64_return;
+    let last := heap.pop() ?? $graph_i64_return;
+    if (heap.len() > 0) {
+        heap[0] := last;
+        var root := 0;
+        loop {
+            let left := root * 2 + 1;
+            if (left >= heap.len()) break; fi;
+            var child := left;
+            let right := left + 1;
+            if (right < heap.len() &&
+                (heap[right] ?? $graph_i64_return) <
+                (heap[left] ?? $graph_i64_return)) child := right; fi;
+            let root_value := heap[root] ?? $graph_i64_return;
+            let child_value := heap[child] ?? $graph_i64_return;
+            if (root_value <= child_value) break; fi;
+            heap[root] := child_value;
+            heap[child] := root_value;
+            root := child;
+        };
+    } fi;
+    minimum
+} -> i64;
+
+%{ Kahn法で辞書順最小のtopological orderを返す。
+   cycleがあればparadoxではなくacyclic=falseと空order。空graphはacyclic。
+   O(E + V log V)、追加領域O(V)。 }%
+fn topological_sort_i64 (graph : CsrI64 alias) {
+    if (! csr_i64_is_valid(graph)) $graph_i64_return; fi;
+    let vertex_count := graph.start.len() - 1;
+    var indegree : i64 array := new i64 array(vertex_count, 0);
+    nfor (edge, 0, graph.to.len()) {
+        let to := graph.to[edge] ?? $graph_i64_return;
+        if ((indegree[to] ?? $graph_i64_return) == 9223372036854775807) {
+            $graph_i64_return;
+        } fi;
+        indegree[to] += 1;
+    };
+
+    var ready : i64 array := new i64 array(0, 0);
+    nfor (vertex, 0, vertex_count) {
+        if ((indegree[vertex] ?? $graph_i64_return) == 0) {
+            graph_i64__min_heap_push(ready, vertex) ?? $graph_i64_return;
+        } fi;
+    };
+    var order : i64 array := new i64 array(0, 0);
+    while (ready.len() > 0) {
+        let vertex := graph_i64__min_heap_pop(ready) ?? $graph_i64_return;
+        order.push(vertex);
+        let begin := graph.start[vertex] ?? $graph_i64_return;
+        let end := graph.start[vertex + 1] ?? $graph_i64_return;
+        nfor (edge, begin, end - begin) {
+            let to := graph.to[edge] ?? $graph_i64_return;
+            indegree[to] -= 1;
+            if ((indegree[to] ?? $graph_i64_return) == 0) {
+                graph_i64__min_heap_push(ready, to) ?? $graph_i64_return;
+            } fi;
+        };
+    };
+    if (order.len() != vertex_count) $graph_i64_return new TopologicalResultI64 (
+        acyclic := false,
+        order := new i64 array(0, 0)
+    ); fi;
+    new TopologicalResultI64 ( acyclic := true, order := order )
+} -> TopologicalResultI64;
 
 fn two_sat_i64_new (variable_count : i64) {
     if (variable_count < 0 ||

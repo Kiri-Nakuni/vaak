@@ -1,5 +1,6 @@
-//! pure Vaak CSR/SCC/2-SATの参照実装・VM・STEEL差分試験。
+//! pure Vaak CSR/SCC/BFS/topological/2-SATの参照実装・VM・STEEL差分試験。
 
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -162,6 +163,71 @@ fn 反復sccは切断成分と位相順の番号を返す() {
 }
 
 #[test]
+fn bfsはcsr辺順の親と未到達の負一を返す() {
+    let body = r#"
+        var builder := csr_i64_builder_new(7) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);
+        csr_i64_builder_add_directed(builder, 0, 0) ?? false;
+        csr_i64_builder_add_directed(builder, 0, 2) ?? false;
+        csr_i64_builder_add_directed(builder, 0, 1) ?? false;
+        csr_i64_builder_add_directed(builder, 0, 2) ?? false;
+        csr_i64_builder_add_directed(builder, 2, 3) ?? false;
+        csr_i64_builder_add_directed(builder, 1, 3) ?? false;
+        csr_i64_builder_add_directed(builder, 3, 4) ?? false;
+        csr_i64_builder_add_directed(builder, 5, 6) ?? false;
+        let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);
+        let result := bfs_i64(graph, 0) ?? new BfsResultI64(distance := [], parent := []);
+        if (result.distance.len() == 7 && result.parent.len() == 7 &&
+            result.distance[0] == 0 && result.parent[0] == 0 &&
+            result.distance[1] == 1 && result.parent[1] == 0 &&
+            result.distance[2] == 1 && result.parent[2] == 0 &&
+            result.distance[3] == 2 && result.parent[3] == 2 &&
+            result.distance[4] == 3 && result.parent[4] == 3 &&
+            result.distance[5] == -1 && result.parent[5] == -1 &&
+            result.distance[6] == -1 && result.parent[6] == -1) 42 else 0 fi
+    "#;
+    reference_and_vm(body, "値 42");
+    steel_native(body, 42);
+    reference_and_vm(
+        "let graph := new CsrI64(start := [0], to := []); bfs_i64(graph, 0)",
+        "paradox",
+    );
+    reference_and_vm(
+        "let graph := new CsrI64(start := [0, 0], to := []); bfs_i64(graph, -1)",
+        "paradox",
+    );
+}
+
+#[test]
+fn topological_sortは辞書順最小でcycleを通常結果にする() {
+    let body = r#"
+        var builder := csr_i64_builder_new(4) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);
+        csr_i64_builder_add_directed(builder, 0, 1) ?? false;
+        csr_i64_builder_add_directed(builder, 0, 1) ?? false;
+        let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);
+        let result := topological_sort_i64(graph) ?? new TopologicalResultI64(acyclic := false, order := []);
+        let empty_graph := new CsrI64(start := [0], to := []);
+        let empty := topological_sort_i64(empty_graph) ?? new TopologicalResultI64(acyclic := false, order := [9]);
+        if (result.acyclic && result.order.len() == 4 &&
+            result.order[0] == 0 && result.order[1] == 1 &&
+            result.order[2] == 2 && result.order[3] == 3 &&
+            empty.acyclic && empty.order.len() == 0) 42 else 0 fi
+    "#;
+    reference_and_vm(body, "値 42");
+    steel_native(body, 42);
+
+    reference_and_vm(
+        r#"var builder := csr_i64_builder_new(3) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);
+           csr_i64_builder_add_directed(builder, 0, 1) ?? false;
+           csr_i64_builder_add_directed(builder, 1, 0) ?? false;
+           csr_i64_builder_add_directed(builder, 2, 2) ?? false;
+           let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);
+           let result := topological_sort_i64(graph) ?? new TopologicalResultI64(acyclic := true, order := [9]);
+           if (! result.acyclic && result.order.len() == 0) 42 else 0 fi"#,
+        "値 42",
+    );
+}
+
+#[test]
 fn two_satは充足不能をparadoxと区別する() {
     let satisfiable = r#"
         var solver := two_sat_i64_new(3) ?? new TwoSatI64(variable_count := 0, from := [], to := []);
@@ -232,6 +298,60 @@ fn reachability(vertex_count: usize, edges: &[(usize, usize)]) -> Vec<Vec<bool>>
     reachable
 }
 
+fn bfs_oracle(
+    vertex_count: usize,
+    edges: &[(usize, usize)],
+    source: usize,
+) -> (Vec<i64>, Vec<i64>) {
+    let mut adjacency = vec![Vec::new(); vertex_count];
+    for &(from, to) in edges {
+        adjacency[from].push(to);
+    }
+    let mut distance = vec![-1; vertex_count];
+    let mut parent = vec![-1; vertex_count];
+    let mut queue = VecDeque::new();
+    distance[source] = 0;
+    parent[source] = source as i64;
+    queue.push_back(source);
+    while let Some(vertex) = queue.pop_front() {
+        for &to in &adjacency[vertex] {
+            if distance[to] < 0 {
+                distance[to] = distance[vertex] + 1;
+                parent[to] = vertex as i64;
+                queue.push_back(to);
+            }
+        }
+    }
+    (distance, parent)
+}
+
+fn topological_oracle(vertex_count: usize, edges: &[(usize, usize)]) -> Option<Vec<usize>> {
+    let mut adjacency = vec![Vec::new(); vertex_count];
+    let mut indegree = vec![0usize; vertex_count];
+    for &(from, to) in edges {
+        adjacency[from].push(to);
+        indegree[to] += 1;
+    }
+    let mut ready = BTreeSet::new();
+    for (vertex, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            ready.insert(vertex);
+        }
+    }
+    let mut order = Vec::new();
+    while let Some(vertex) = ready.iter().next().copied() {
+        ready.remove(&vertex);
+        order.push(vertex);
+        for &to in &adjacency[vertex] {
+            indegree[to] -= 1;
+            if indegree[to] == 0 {
+                ready.insert(to);
+            }
+        }
+    }
+    (order.len() == vertex_count).then_some(order)
+}
+
 #[test]
 fn sccの決定的ランダムグラフを到達可能性oracleと三backendで照合する() {
     let vertex_count = 10usize;
@@ -274,6 +394,96 @@ fn sccの決定的ランダムグラフを到達可能性oracleと三backendで�
         writeln!(
             body,
             "if (! scc_i64_same(result, {from}, {to}) && result.group_of[{from}] >= result.group_of[{to}]) ok := false; fi;"
+        )
+        .unwrap();
+    }
+    body.push_str("if (ok) 42 else 0 fi");
+    reference_and_vm(&body, "値 42");
+    steel_native(&body, 42);
+}
+
+#[test]
+fn bfsの決定的ランダムグラフをrust_oracleと三backendで照合する() {
+    let vertex_count = 11usize;
+    let source_vertex = 4usize;
+    let mut random = Deterministic(0x5641_414b_4246_5321);
+    let mut edges = Vec::new();
+    for _ in 0..60 {
+        let bits = random.next();
+        edges.push((
+            (bits % vertex_count as u64) as usize,
+            ((bits >> 32) % vertex_count as u64) as usize,
+        ));
+    }
+    let (distance, parent) = bfs_oracle(vertex_count, &edges, source_vertex);
+    let mut body = format!(
+        "var builder := csr_i64_builder_new({vertex_count}) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);\n"
+    );
+    for &(from, to) in &edges {
+        writeln!(
+            body,
+            "csr_i64_builder_add_directed(builder, {from}, {to}) ?? false;"
+        )
+        .unwrap();
+    }
+    writeln!(
+        body,
+        "let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);\n\
+         let result := bfs_i64(graph, {source_vertex}) ?? new BfsResultI64(distance := [], parent := []);\n\
+         var ok := result.distance.len() == {vertex_count} && result.parent.len() == {vertex_count};"
+    )
+    .unwrap();
+    for vertex in 0..vertex_count {
+        writeln!(
+            body,
+            "if (result.distance[{vertex}] != {} || result.parent[{vertex}] != {}) ok := false; fi;",
+            distance[vertex], parent[vertex]
+        )
+        .unwrap();
+    }
+    body.push_str("if (ok) 42 else 0 fi");
+    reference_and_vm(&body, "値 42");
+    steel_native(&body, 42);
+}
+
+#[test]
+fn topological_sortの決定的dagをrust_oracleと三backendで照合する() {
+    let vertex_count = 13usize;
+    let mut random = Deterministic(0x5641_414b_544f_504f);
+    let mut edges = Vec::new();
+    for _ in 0..64 {
+        let bits = random.next();
+        let a = (bits % vertex_count as u64) as usize;
+        let b = ((bits >> 32) % vertex_count as u64) as usize;
+        if a != b {
+            edges.push((a.min(b), a.max(b)));
+        }
+    }
+    let expected = topological_oracle(vertex_count, &edges).expect("番号増加方向だけなのでDAG");
+    let mut body = format!(
+        "var builder := csr_i64_builder_new({vertex_count}) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);\n"
+    );
+    for &(from, to) in &edges {
+        writeln!(
+            body,
+            "csr_i64_builder_add_directed(builder, {from}, {to}) ?? false;"
+        )
+        .unwrap();
+    }
+    body.push_str(
+        "let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);\n\
+         let result := topological_sort_i64(graph) ?? new TopologicalResultI64(acyclic := false, order := []);\n\
+         var ok := result.acyclic;\n",
+    );
+    writeln!(
+        body,
+        "if (result.order.len() != {vertex_count}) ok := false; fi;"
+    )
+    .unwrap();
+    for (position, vertex) in expected.iter().enumerate() {
+        writeln!(
+            body,
+            "if (result.order[{position}] != {vertex}) ok := false; fi;"
         )
         .unwrap();
     }
@@ -355,14 +565,20 @@ fn two_satの決定的ランダム節を全割当oracleと三backendで照合す
 }
 
 #[test]
-fn 長い有向路のsccはvaak再帰上限に依存しない() {
+fn 長い有向路の探索はvaak再帰上限に依存しない() {
     let body = r#"
         let n := 4096;
         var builder := csr_i64_builder_new(n) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);
         nfor (i, 0, n - 1) { csr_i64_builder_add_directed(builder, i, i + 1) ?? false; };
         let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);
-        let result := scc_i64(graph) ?? new SccResultI64(group_count := -1, group_of := []);
-        if (result.group_count == n && result.group_of[0] == 0 && result.group_of[n - 1] == n - 1) 42 else 0 fi
+        let components := scc_i64(graph) ?? new SccResultI64(group_count := -1, group_of := []);
+        let breadth := bfs_i64(graph, 0) ?? new BfsResultI64(distance := [], parent := []);
+        let topology := topological_sort_i64(graph) ?? new TopologicalResultI64(acyclic := false, order := []);
+        if (components.group_count == n && components.group_of[0] == 0 &&
+            components.group_of[n - 1] == n - 1 &&
+            breadth.distance[n - 1] == n - 1 && breadth.parent[n - 1] == n - 2 &&
+            topology.acyclic && topology.order.len() == n &&
+            topology.order[0] == 0 && topology.order[n - 1] == n - 1) 42 else 0 fi
     "#;
     reference_and_vm(body, "値 42");
     steel_native(body, 42);

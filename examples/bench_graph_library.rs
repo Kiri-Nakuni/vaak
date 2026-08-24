@@ -91,6 +91,37 @@ fn main() {
             "#,
         },
         Case {
+            name: "1024頂点の有向路BFS",
+            library: GRAPH,
+            body: r#"
+                let n := 1024;
+                var builder := csr_i64_builder_new(n) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);
+                nfor (i, 0, n - 1) {
+                    csr_i64_builder_add_directed(builder, i, i + 1) ?? false;
+                };
+                let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);
+                let result := bfs_i64(graph, 0) ?? new BfsResultI64(distance := [], parent := []);
+                result.distance[n - 1] ?? -1
+            "#,
+        },
+        Case {
+            name: "1024頂点の安定topological",
+            library: GRAPH,
+            body: r#"
+                let n := 1024;
+                var builder := csr_i64_builder_new(n) ?? new CsrBuilderI64(vertex_count := 0, from := [], to := []);
+                nfor (i, 0, n - 1) {
+                    csr_i64_builder_add_directed(builder, i, i + 1) ?? false;
+                };
+                nfor (i, 0, n - 2) {
+                    csr_i64_builder_add_directed(builder, i, i + 2) ?? false;
+                };
+                let graph := csr_i64_build(builder) ?? new CsrI64(start := [0], to := []);
+                let result := topological_sort_i64(graph) ?? new TopologicalResultI64(acyclic := false, order := []);
+                if (result.acyclic) result.order.len() else -1 fi
+            "#,
+        },
+        Case {
             name: "CsrI64.to複合place更新",
             // graph全関数の実行時束縛費用を混ぜず、実際と同じstruct形だけを前置きする。
             library: CSR_SHAPE,

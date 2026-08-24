@@ -115,7 +115,7 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/fenwick_i64_flat.vaak` | `fenwick_i64_flat_*` | 生の配列一本を受ける性能対照。入れ子の左辺を作らない |
 | `ds/heap_i64.vaak` | `MinHeapI64`, `MaxHeapI64`, `min_heap_i64_*`, `max_heap_i64_*` | 固定比較の二分heap。heapify、push/pop/peek/replace |
 | `ds/deque_i64.vaak` | `DequeI64`, `deque_i64_*` | 容量倍増ring buffer。両端push/popは償却O(1) |
-| `graph/csr_scc_two_sat_i64.vaak` | `CsrBuilderI64`, `CsrI64`, `SccResultI64`, `TwoSatI64` | 安定順序CSR、再帰なしSCC、2-SAT。添字はi64固定 |
+| `graph/csr_scc_two_sat_i64.vaak` | `CsrBuilderI64`, `CsrI64`, `SccResultI64`, `BfsResultI64`, `TopologicalResultI64`, `TwoSatI64` | 安定順序CSR、再帰なしSCC/BFS、辞書順topological、2-SAT。添字はi64固定 |
 | `io/ascii_i64.vaak` | `io_ascii_i64_*` | hostが一括で渡す`str`の整数scannerと返却用`str` formatter。stdin/stdout自体は持たない |
 
 配列を値引数で受けると深い複製になるため、読み取りは `alias`、破壊は
@@ -140,7 +140,9 @@ cursorを明示して読む。出力は`str`へ追記し、最上位の値とし
 buffer flushは未決であり、このsourceはそれらを暗黙に導入しない。
 
 graph sourceは各頂点内で辺の追加順を保つCSRを一度構築し、そのflat表現を反復Kosaraju SCCと
-2-SATで共有する。SCCの成分番号は異なる成分間の辺`u -> v`に対して`group_of[u] < group_of[v]`と
+BFS、topological sort、2-SATで共有する。BFSの未到達距離・親は`-1`、始点の親は始点自身で、同距離の
+親はCSR内で最初に発見したものを保つ。topological sortは利用可能な頂点番号が小さい順の辞書順最小で、
+cycleは`TopologicalResultI64(false, [])`という通常値にする。SCCの成分番号は異なる成分間の辺`u -> v`に対して`group_of[u] < group_of[v]`と
 なる位相順である。空graph、self-loop、parallel edge、切断graphを通常入力として扱う。2-SATの
 充足不能は`TwoSatResultI64(satisfiable := false, assignment := [])`であり、不正添字のparadoxと分ける。
 

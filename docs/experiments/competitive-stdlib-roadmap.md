@@ -98,6 +98,8 @@ resource failureであり、このlibraryは新しい回復意味論を定めな
 | builder | `csr_i64_builder_new`, `add_directed`, `add_undirected`, `build` | 頂点内で追加順を保持。無向self-loopは同じ向きの二辺 |
 | CSR | `CsrI64(start, to)`、個数・degree・neighbor・reverse | `start`はV+1、`to`はEのflat配列。不正公開欄はparadox |
 | SCC | `scc_i64`, `scc_i64_same` | 反復Kosaraju。`group_count`とV長の`group_of` |
+| BFS | `bfs_i64` | 単一始点。V長の`distance`/`parent`、未到達は-1 |
+| topological | `topological_sort_i64` | 辞書順最小。cycleは`acyclic=false`と空order |
 | 2-SAT | `two_sat_i64_add_clause`, `set_value`, `solve` | literal graphをCSR/SCCへ渡す。充足不能は通常結果 |
 
 CSR構築、SCC、2-SATはいずれもO(V+E)である。`add_*`のhot pathは既存辺を毎回再走査せずO(1)、公開欄を
@@ -109,6 +111,12 @@ SCCはvertex昇順とCSR内の辺順をtie-breakに使い、異なる成分を�
 通常入力として扱う。再帰は使わず、4096頂点の有向路を参照実装・VM・STEEL IRで通したため、現行の
 評価深さ上限へDFS深さを重ねない。
 
+BFSも再帰せず、V要素を一度だけ入れるflat queueでO(V+E)とする。未到達の`distance`/`parent`は-1、
+始点のparentは始点自身である。同じ最短距離の親候補はCSRの辺順で最初に発見したものを保つ。
+topological sortはKahn法のready集合を固定i64 min-heapにし、利用可能な頂点番号が小さい順、すなわち
+辞書順最小のorderをO(E+V log V)で返す。cycleは不正入力ではないためparadoxにせず、partial prefixも
+公開せず`TopologicalResultI64(false, [])`へ原子的に畳む。parallel edgeはindegreeを辺ごとに数える。
+
 2-SATは`(x_i == value_i) OR (x_j == value_j)`を直接追加する。充足不能は
 `TwoSatResultI64(false, [])`であり、不正入力のparadoxではない。充足可能ならV長のbool assignmentを返す。
 固定seed graphはRustの推移閉包による相互到達性、固定seed clauseはRustの全割当列挙を独立oracleにし、
@@ -117,6 +125,21 @@ SCCはvertex昇順とCSR内の辺順をtie-breakに使い、異なる成分を�
 `stdlib/examples/graph_scc_io.vaak`は既存`io/ascii_i64.vaak`とgraph sourceを前置きし、hostが一括で渡す
 `str`から`n m`とm辺を読み、成分数とV個のgroup番号を一括`str`で返す。これはpure層と競技I/O層の
 接続例であり、stdin/stdout、標準host名、streaming、callbackを新設しない。
+
+### 5.1 既存DSU/FenwickとのAPI差分
+
+このbranchはbase `54e05ab`に既に含まれる`DsuI64`/`FenwickI64`をそのまま参照し、別branchのmergeや
+core変更はしていない。三者は同じi64 indexでも状態契約が異なる。
+
+| API | 状態 | 結果 | graphとの関係 |
+|---|---|---|---|
+| `DsuI64` | merge/経路圧縮でmutable | leader、size、group数。全頂点label配列は返さない | 無向辺を逐次処理。CSRや辺順を要求しない |
+| `FenwickI64` | point addでmutable | i64のprefix/半開区間sum | 頂点・辺ではなく数列index。overflowはVaak i64の折返し |
+| `CsrI64` + BFS/SCC/topological | build後はread-onlyとして利用 | V長flat配列またはorder | 有向辺順と全graph検証を共有 |
+
+将来の連結成分・Kruskal fixtureは、CSRをDSU内部へ埋めたり`DsuI64`の永続APIを変えたりせず、辺列を
+順に`dsu_i64_merge`へ渡す利用例として始める。Fenwickを距離queueやpriority queueへ流用せず、用途の
+違いを維持する。
 
 ## 6. 標準入力・scanner・outputの現状
 
@@ -193,7 +216,7 @@ AC Libraryのsegtree/lazysegtreeはmonoid/action callbackをtemplate parameter�
 - 実装済み: CSR builderとvertex/edge範囲検査
 - 実装済み: SCCの`group_count` + `group_of : i64 array`
 - 実装済み: SCC上のliteral/implication配置を使う2-SAT
-- 次checkpoint: CSRを共有するBFSと決定的topological sort
+- 実装済み: CSRを共有する単一始点BFSと辞書順最小topological sort
 - 次checkpoint: 既存`DsuI64`と無向辺を組み合わせる連結成分・Kruskal用fixture
 - その次: 非負i64距離のDijkstra、0/1重み固定の0-1 BFS
 - 後続: LCA/HLD。maxflow/min-cost flowはPhase Dで状態契約を別に固定
