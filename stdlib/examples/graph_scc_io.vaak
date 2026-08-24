@@ -1,6 +1,8 @@
 %{ stdlib/io/ascii_i64.vaak と stdlib/graph/csr_scc_two_sat_i64.vaak を
    この順序に依存せず前置きして使う例。
 
+   依存: stdlib/io/ascii_i64.vaak, stdlib/graph/csr_scc_two_sat_i64.vaak
+
    hostが競技入力全体をstrで渡し、Vaakが「n m、続いてm本の有向辺」を読み、
    「成分数、続いて各頂点の成分番号」をstrで一括返す。stdin/stdoutの名前や
    streamingをこの例で新設しない。 }%
