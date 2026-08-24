@@ -4,7 +4,7 @@
 > 外部実装をvendorする許可にもならない。
 
 - 調査日: 2026-08-24〜2026-08-25
-- 対象branch: `codex3/stdlib-ordering`（旧structure / graph checkpointを統合）
+- 対象branch: `codex3/stdlib-sparse-table`（ordering / structure / graph checkpointを統合）
 - Vaak本体のlicense: [`docs/LICENSING.md`](../LICENSING.md)のとおりMIT
 - 規律: 公式仕様から契約・分類・計算量だけを調べ、source、test、解説文を転写・翻訳しない
 
@@ -43,6 +43,18 @@ Rust側の`Vec`/graph/snapshot modelはtest oracleに限定し、配布APIやVaa
 2026-08-25のordering実装では外部repository、競プロblog、snippet、生成済みcodeを入力にしていない。
 Rust標準ライブラリの結果は`tests/array_ordering.rs`内のoracleに限り、Vaak側のalgorithm、API名、文書へ
 転写していない。既存のACL参照記録も今回のsort / unique / coordinate compression契約の由来とは扱わない。
+
+## static sparse table checkpointで独立に定義したもの
+
+| Vaak source | 外部実装の入力 | 独立性を固定する試験 |
+|---|---|---|
+| `ds/sparse_table_i64.vaak` | なし | 固定seedの半開区間をRust sliceの`min` / `max`へ照合 |
+| `ds/disjoint_sparse_table_i64.vaak` | なし | 同じ区間をRust `i64::wrapping_add` foldへ照合 |
+
+min/maxの重なる2冪区間と、sumの中央suffix/prefixは既知の分類から独立に記述し、外部repository、解説code、
+test vectorを入力にしていない。Rust側は結果oracleだけで、Vaakのflat layout、API、empty/paradox、
+capacity overflow、公開欄検査はこのrepository内の既存stdlib規律から定めた。ACLにsparse table APIがあるとは
+記録せず、ACL-1のsource/testも参照していない。
 
 ## 今後の追記規則
 

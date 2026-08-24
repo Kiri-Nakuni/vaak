@@ -1,0 +1,178 @@
+%{ 固定 i64 折返し和の disjoint sparse table。
+
+   各levelでblock中央から左suffix・右prefixを作る。
+   構築 O(n log n)、半開区間 query O(1)、領域 O(n log n)。
+   空区間の和は0。不正範囲はparadox。 }%
+
+flow $disjoint_sparse_sum_i64_return = $repeat(break, getdepth());
+
+struct DisjointSparseSumI64 {
+    var length : i64;
+    var levels : i64;
+    var data : i64 array;
+};
+
+fn disjoint_sparse_sum_i64_from (values : i64 array alias) {
+    let length := values.len();
+    var levels := 0;
+    if (length > 0) {
+        levels := 64 - (length - 1).leading_zeros();
+        if (levels == 0) levels := 1; fi;
+    } fi;
+    if (levels > 0) {
+        if (length > 9223372036854775807 / levels) {
+            $disjoint_sparse_sum_i64_return;
+        } fi;
+    } fi;
+
+    var data : i64 array := new i64 array(length * levels, 0);
+    var level := 0;
+    var half := 1;
+    while (level < levels) {
+        let span := half * 2;
+        let base := level * length;
+        var block := 0;
+        while (block < length) {
+            var middle := block + half;
+            if (middle > length) middle := length; fi;
+            var end := block + span;
+            if (end > length) end := length; fi;
+
+            if (middle > block) {
+                var at := middle - 1;
+                data[base + at] := values[at] ?? $disjoint_sparse_sum_i64_return;
+                while (at > block) {
+                    at -= 1;
+                    data[base + at] :=
+                        (values[at] ?? $disjoint_sparse_sum_i64_return) +
+                        (data[base + at + 1] ?? $disjoint_sparse_sum_i64_return);
+                };
+            } fi;
+            if (middle < end) {
+                var at := middle;
+                data[base + at] := values[at] ?? $disjoint_sparse_sum_i64_return;
+                at += 1;
+                while (at < end) {
+                    data[base + at] :=
+                        (data[base + at - 1] ?? $disjoint_sparse_sum_i64_return) +
+                        (values[at] ?? $disjoint_sparse_sum_i64_return);
+                    at += 1;
+                };
+            } fi;
+            block += span;
+        };
+        level += 1;
+        if (level < levels) half *= 2; fi;
+    };
+    new DisjointSparseSumI64(length := length, levels := levels, data := data)
+} -> DisjointSparseSumI64;
+
+fn disjoint_sparse_sum_i64_len (table : DisjointSparseSumI64 alias) {
+    table.length
+} -> i64;
+
+fn disjoint_sparse_sum_i64_get (table : DisjointSparseSumI64 alias,
+                                index : i64) {
+    if (index < 0 || index >= table.length) {
+        $disjoint_sparse_sum_i64_return;
+    } fi;
+    table.data[index]
+} -> i64;
+
+fn disjoint_sparse_sum_i64_prod (table : DisjointSparseSumI64 alias,
+                                 first : i64, last : i64) {
+    if (first < 0 || first > last || last > table.length) {
+        $disjoint_sparse_sum_i64_return;
+    } fi;
+    let count := last - first;
+    if (count == 0) $disjoint_sparse_sum_i64_return 0; fi;
+    if (count == 1) {
+        $disjoint_sparse_sum_i64_return (
+            table.data[first] ?? $disjoint_sparse_sum_i64_return
+        );
+    } fi;
+
+    let different := first ^ (last - 1);
+    let level := 63 - different.leading_zeros();
+    let base := level * table.length;
+    (table.data[base + first] ?? $disjoint_sparse_sum_i64_return) +
+    (table.data[base + last - 1] ?? $disjoint_sparse_sum_i64_return)
+} -> i64;
+
+fn disjoint_sparse_sum_i64_all_prod (table : DisjointSparseSumI64 alias) {
+    disjoint_sparse_sum_i64_prod(table, 0, table.length)
+} -> i64;
+
+fn disjoint_sparse_sum_i64_is_valid (table : DisjointSparseSumI64 alias) {
+    if (table.length < 0 || table.levels < 0) {
+        $disjoint_sparse_sum_i64_return false;
+    } fi;
+    var expected_levels := 0;
+    if (table.length > 0) {
+        expected_levels := 64 - (table.length - 1).leading_zeros();
+        if (expected_levels == 0) expected_levels := 1; fi;
+    } fi;
+    if (table.levels != expected_levels) $disjoint_sparse_sum_i64_return false; fi;
+    if (table.levels > 0) {
+        if (table.length > 9223372036854775807 / table.levels) {
+            $disjoint_sparse_sum_i64_return false;
+        } fi;
+    } fi;
+    if (table.data.len() != table.length * table.levels) {
+        $disjoint_sparse_sum_i64_return false;
+    } fi;
+    if (table.length == 0) $disjoint_sparse_sum_i64_return true; fi;
+
+    var level := 0;
+    var half := 1;
+    while (level < table.levels) {
+        let span := half * 2;
+        let base := level * table.length;
+        var block := 0;
+        while (block < table.length) {
+            var middle := block + half;
+            if (middle > table.length) middle := table.length; fi;
+            var end := block + span;
+            if (end > table.length) end := table.length; fi;
+
+            if (middle > block) {
+                var at := middle - 1;
+                if ((table.data[base + at] ?? $disjoint_sparse_sum_i64_return) !=
+                    (table.data[at] ?? $disjoint_sparse_sum_i64_return)) {
+                    $disjoint_sparse_sum_i64_return false;
+                } fi;
+                while (at > block) {
+                    at -= 1;
+                    let expected :=
+                        (table.data[at] ?? $disjoint_sparse_sum_i64_return) +
+                        (table.data[base + at + 1] ?? $disjoint_sparse_sum_i64_return);
+                    if ((table.data[base + at] ?? $disjoint_sparse_sum_i64_return) !=
+                        expected) {
+                        $disjoint_sparse_sum_i64_return false;
+                    } fi;
+                };
+            } fi;
+            if (middle < end) {
+                if ((table.data[base + middle] ?? $disjoint_sparse_sum_i64_return) !=
+                    (table.data[middle] ?? $disjoint_sparse_sum_i64_return)) {
+                    $disjoint_sparse_sum_i64_return false;
+                } fi;
+                var at := middle + 1;
+                while (at < end) {
+                    let expected :=
+                        (table.data[base + at - 1] ?? $disjoint_sparse_sum_i64_return) +
+                        (table.data[at] ?? $disjoint_sparse_sum_i64_return);
+                    if ((table.data[base + at] ?? $disjoint_sparse_sum_i64_return) !=
+                        expected) {
+                        $disjoint_sparse_sum_i64_return false;
+                    } fi;
+                    at += 1;
+                };
+            } fi;
+            block += span;
+        };
+        level += 1;
+        if (level < table.levels) half *= 2; fi;
+    };
+    true
+} -> u1;

@@ -125,6 +125,8 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/deque_i64.vaak` | `DequeI64`, `deque_i64_*` | 容量倍増ring buffer。両端push/popは償却O(1) |
 | `ds/segtree_i64.vaak` | `SumSegtreeI64`, `MinSegtreeI64`, `MaxSegtreeI64`と各prefix API | O(n) build、point set/get、半開区間prod/all_prod。空区間は各identity |
 | `ds/lazy_segtree_i64.vaak` | `RangeAddSumSegtreeI64`, `range_add_sum_segtree_i64_*` | i64折返し加算上のrange add/range sum。build O(n)、更新・query O(log n) |
+| `ds/sparse_table_i64.vaak` | `SparseMinI64`, `SparseMaxI64`, `sparse_min_i64_*`, `sparse_max_i64_*` | immutableな固定min/max。build O(n log n)、半開区間query O(1) |
+| `ds/disjoint_sparse_table_i64.vaak` | `DisjointSparseSumI64`, `disjoint_sparse_sum_i64_*` | immutableなi64折返し和。build O(n log n)、半開区間query O(1) |
 | `graph/csr_scc_two_sat_i64.vaak` | `CsrBuilderI64`, `CsrI64`, `SccResultI64`, `BfsResultI64`, `TopologicalResultI64`, `TwoSatI64` | 安定順序CSR、再帰なしSCC/BFS、辞書順topological、2-SAT。添字はi64固定 |
 | `io/ascii_i64.vaak` | `io_ascii_i64_*` | hostが一括で渡す`str`の整数scannerと返却用`str` formatter。stdin/stdout自体は持たない |
 
@@ -179,6 +181,15 @@ range addとsumは2の冪を法とする加算monoid上でも自然に合成で�
 overflowだけ別にparadoxへ変える契約も導入していない。range assign、任意predicateの`max_right` /
 `min_left`、generic actionはAPI候補のままにし、callback/module specializationと現行の複合place費用を
 測る前に固定variantを増やさない。
+
+`SparseMinI64` / `SparseMaxI64`は更新しない配列をO(n log n)でflat tableへ展開し、idempotentな
+min/maxを重なる二区間からO(1)で返す。`DisjointSparseSumI64`は各block中央から左suffix・右prefixを作り、
+端点の最高相違bitに対応する二集約をi64の折返し加算で結ぶ。三者とも有効な空区間を許し、minは
+`i64::MAX`、maxは`i64::MIN`、sumは0を返す。範囲外・逆転はparadoxである。
+
+sparse tableはstatic query用で、point/range更新後も使える構造を装わない。公開欄を直接変更した値は
+契約対象外だが、`*_is_valid`はflat shapeと構築済み集約をO(n log n)で再検査できる。generic idempotent演算や
+任意monoid callbackを先取りせず、min/max/sumの固定三演算だけを別APIにした。
 
 `io/ascii_i64.vaak`はS-4のhost境界を変えない。hostがstdin等を一括で`str`として渡し、Vaakは
 cursorを明示して読む。出力は`str`へ追記し、最上位の値としてhostへ返す。標準host名、streaming、

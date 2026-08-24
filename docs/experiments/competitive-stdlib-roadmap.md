@@ -5,7 +5,8 @@
 > [`modules-and-library.md`](modules-and-library.md)を変更するものでもない。
 
 - 調査・実測日: 2026-08-24〜2026-08-25
-- branch: `codex3/stdlib-ordering`
+- branch: `codex3/stdlib-sparse-table`
+- integrated ordering checkpoint: `codex3/stdlib-ordering` = `0f22c4899d2692fe785a8f0de8f8652bb8cc3006`
 - integrated structure checkpoint: `codex2/stdlib-heap-deque` = `4a31a5fb4810e67a37e82c658cfd913a0446c0e2`
 - integrated graph checkpoint: `codex2/stdlib-graph` = `e8c2f93aeddd6394ef77342543a7a09637de8057`
 - inherited base: `origin/codex2/full` = `7c5ccd706e4dc466dad45baf275c0b550c8bc777`
@@ -179,6 +180,30 @@ SCC I/Oとtopological sort二件がsignal終了、旧`tests/heap_deque.rs`の長
 各testのreference / VMは一致する。このP1ではcore・STEEL・旧sourceを変更せず、継承baselineとして残して
 意味論所有者の領域へ先回りしない。
 
+### 4.4 P1第二checkpoint: static sparse table
+
+更新の無いrange queryを、固定演算ごとに二sourceへ分けた。
+
+| source / 型 | build | query | 空区間identity | 追加領域 |
+|---|---:|---:|---|---:|
+| `sparse_table_i64.vaak` / `SparseMinI64` | O(n log n) | min O(1) | `i64::MAX` | O(n log n) |
+| 同 / `SparseMaxI64` | O(n log n) | max O(1) | `i64::MIN` | O(n log n) |
+| `disjoint_sparse_table_i64.vaak` / `DisjointSparseSumI64` | O(n log n) | sum O(1) | 0 | O(n log n) |
+
+min/maxはidempotentなので、区間長以下の最大2冪を両端から取った重なる二区間を比較する。sumは重複できない
+ため、各levelのblock中央から左suffixと右prefixを構築し、`first`と`last - 1`の最高相違bitに対応する二値を
+折返し加算する。どちらも整数`leading_zeros`とbit演算だけを使い、query loopやcallbackを持たない。
+有効な空・一要素区間を通常結果にし、負数、逆転、末尾越えはparadoxへ分ける。
+
+`tests/sparse_table_i64.rs`は非2冪長、空、i64両端、折返し和、公開欄破損と固定seedのrange列をRustの
+slice min/max・`wrapping_add` oracleへ照合する。2026-08-25のfocused gateはreference / VM / STEEL nativeで
+6 passed、0 failed、inventoryは12 passed、0 failed。`examples/bench_sparse_table.rs`は同じ512要素・
+4096 queryを64幅の線形走査とpairedにし、raw値を`stdlib/BENCHMARK.md`へ残した。
+全release gateは782 passed、6 failed、1 ignoredで、失敗6件は4.3に列挙した未変更のnative baselineと同じ。
+
+`gcd`版は`i64::MIN`を含む非負化、符号、identityの契約を数値checkpointで先に定める。任意idempotent演算や
+monoid callback、更新可能なsparse tableはこのsourceから推測させず、generic/module所有者へ残す。
+
 ## 5. flat graph checkpoint
 
 `stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
@@ -287,7 +312,7 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 | 順位 | まとまり | 具体的な順序 | 先に満たすgate |
 |---:|---|---|---|
 | P0 済 | 基準構造 | 通常/rollback/weighted DSU、通常/count Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 第三checkpointまでの差分試験とbench |
-| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress済** → sparse/disjoint sparse table → 圧縮済みordered multiset → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
+| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress・sparse/disjoint済** → 圧縮済みordered multiset → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
 | P2 | byte string・trie・基礎数値 | Z/prefix/KMP → flat byte trie → Aho-Corasick/Manacher → gcd/extgcd/isqrt/sieve/factorization →安全なmod算術 | `str`はbyte列、i64中間幅、allocation測定 |
 | P3 | flat graph | CSR → BFS/DFS/topological sort → SCC → 2-SAT → Dijkstra → LCA/HLD | graph/resultをflat化、決定的tie-break |
 | P4 | 高級構造・flow | wavelet matrix、persistent/rollback構造、Li Chao、maxflow、min-cost flow | memory上限、再帰深さ、overflow、backend差 |
@@ -296,8 +321,8 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 P1内では次の小checkpoint順にする。
 
 1. 完了: `array/i64`のinsertion/heap/merge sort、sorted unique、座標圧縮。
-2. `SparseMinI64` / `SparseMaxI64`のidempotent O(1) queryと、固定sum用disjoint sparse tableを比較する。
-   `gcd`版は`i64::MIN`の符号・identity契約を先に決める。
+2. 完了: `SparseMinI64` / `SparseMaxI64`のidempotent O(1) queryと、固定sum用disjoint sparse table。
+   `gcd`版は`i64::MIN`の符号・identity契約を先に決めるため保留。
 3. sorted uniqueなuniverseを構築時に受ける`OrderedMultisetI64`候補を、Fenwickのprefix countとk-th探索で作る。
    `insert`、一個erase、count、`order_of_key`、k-thを対象にし、universe外keyと空eraseのstatus/paradoxを
    試験で決める。任意keyをonline追加するbalanced treeや乱数priorityは別候補とする。
@@ -334,7 +359,7 @@ paradoxとstatusをAPIごとに明記する。
 
 - `segtree/i64/sum|min|max`（第二checkpoint済み）、`gcd`（候補）
 - `lazy_segtree/i64/range_add_sum`（第二checkpoint済み）、`range_add_min|max`と`range_assign_*`（候補）
-- sparse/disjoint sparse table
+- 実装済み: fixed i64 min/max sparse table、sum disjoint sparse table
 - sliding min/max、Dijkstra、LCA、heavy-light decomposition
 
 AC Libraryのsegtree/lazysegtreeはmonoid/action callbackをtemplate parameterにする。Vaakではgeneric/callbackが

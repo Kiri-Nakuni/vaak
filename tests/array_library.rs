@@ -23,6 +23,8 @@ const HEAP: &str = include_str!("../stdlib/ds/heap_i64.vaak");
 const DEQUE: &str = include_str!("../stdlib/ds/deque_i64.vaak");
 const SEGTREE: &str = include_str!("../stdlib/ds/segtree_i64.vaak");
 const LAZY_SEGTREE: &str = include_str!("../stdlib/ds/lazy_segtree_i64.vaak");
+const SPARSE_TABLE: &str = include_str!("../stdlib/ds/sparse_table_i64.vaak");
+const DISJOINT_SPARSE_TABLE: &str = include_str!("../stdlib/ds/disjoint_sparse_table_i64.vaak");
 const ASCII_I64: &str = include_str!("../stdlib/io/ascii_i64.vaak");
 
 fn source(parts: &[&str], body: &str) -> String {
@@ -172,6 +174,16 @@ fn 各ソースは単独または明示した依存だけで前置きできる()
         "値 9",
     );
     both(
+        &[SPARSE_TABLE],
+        "let xs := [4, 2, 7]; let t := sparse_min_i64_from(xs) ?? new SparseMinI64(length := 0, levels := 0, data := []); sparse_min_i64_prod(t, 0, 3)",
+        "値 2",
+    );
+    both(
+        &[DISJOINT_SPARSE_TABLE],
+        "let xs := [4, 2, 7]; let t := disjoint_sparse_sum_i64_from(xs) ?? new DisjointSparseSumI64(length := 0, levels := 0, data := []); disjoint_sparse_sum_i64_prod(t, 0, 3)",
+        "値 13",
+    );
+    both(
         &[ASCII_I64],
         r#"let input := "  -42 "; var at := 0; io_ascii_i64_read(input, at)"#,
         "値 -42",
@@ -249,6 +261,14 @@ fn 各ソースはsteelにも単独で前置きできる() {
             "let xs := [1, 2]; var t := range_add_sum_segtree_i64_from(xs) ?? new RangeAddSumSegtreeI64(length := 0, size := 1, data := [0, 0], lazy := [0, 0]); range_add_sum_segtree_i64_range_add(t, 0, 1, 4) ?? false; range_add_sum_segtree_i64_all_prod(t)",
         ),
         (
+            SPARSE_TABLE,
+            "let xs := [4, 2, 7]; let t := sparse_max_i64_from(xs) ?? new SparseMaxI64(length := 0, levels := 0, data := []); sparse_max_i64_prod(t, 0, 3)",
+        ),
+        (
+            DISJOINT_SPARSE_TABLE,
+            "let xs := [4, 2, 7]; let t := disjoint_sparse_sum_i64_from(xs) ?? new DisjointSparseSumI64(length := 0, levels := 0, data := []); disjoint_sparse_sum_i64_prod(t, 0, 3)",
+        ),
+        (
             ASCII_I64,
             r#"let input := "42"; var at := 0; io_ascii_i64_read(input, at)"#,
         ),
@@ -287,6 +307,8 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         DEQUE,
         SEGTREE,
         LAZY_SEGTREE,
+        SPARSE_TABLE,
+        DISJOINT_SPARSE_TABLE,
         ASCII_I64,
     ];
     both(&libraries, "42", "値 42");

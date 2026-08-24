@@ -136,3 +136,22 @@ parse、静的検査、VM compileは計測外である。三種のsortは同じ2
 この規模と分布ではmerge sortが三種で最短だったが、allocationを含む一標本であり、crossoverや永続的な
 性能保証ではない。insertion sortはO(n²)、heap/mergeはO(n log n)で、heapだけ追加領域O(1)、mergeと
 座標圧縮はO(n)の作業配列を持つ。要素数、既整列率、重複率を変えたpaired測定を次の判断材料にする。
+
+## static sparse table checkpoint
+
+2026-08-25、同じLinux x86_64環境で
+`ROUNDS=3 cargo run --release --locked --example bench_sparse_table`を実行した。一度暖機後の3回平均で、
+parse、静的検査、VM compileは計測外。全caseが同じ512要素を生成し、4096本の64幅rangeを読む。
+table caseは各実行の先頭でO(n log n) buildを一度行い、その費用も含む。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| 64幅minを線形走査 | 310.738 ms | 239.097 ms | 233 |
+| `SparseMinI64`で同じmin | **288.312 ms** | **30.142 ms** | 233 |
+| 64幅sumを線形走査 | **245.277 ms** | 234.269 ms | 86 |
+| `DisjointSparseSumI64`で同じsum | 285.548 ms | **33.435 ms** | 86 |
+
+VMではbuild込みでもminが約7.9倍、sumが約7.0倍速かった。木を辿る実装ではminが約1.08倍速い一方、sumは
+約1.16倍遅く、O(1) queryでもnamed function枠と`table.data[index]`の複合読み取り費用が残る。
+これはstatic tableの計算量試験を否定しないが、単一規模での採否やcrossoverを保証しない。query本数、幅、
+要素数、buildを償却する回数を変え、flat引数版やcompound place fast path後とpairedにする。

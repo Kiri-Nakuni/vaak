@@ -1,0 +1,227 @@
+%{ 固定 i64 の idempotent min/max sparse table。
+
+   構築 O(n log n)、半開区間 query O(1)、領域 O(n log n)。
+   空区間は min が i64::MAX、max が i64::MIN。不正範囲は paradox。
+   generic演算やcallbackを使わず、重なる二区間を直接比較する。 }%
+
+flow $sparse_table_i64_return = $repeat(break, getdepth());
+
+struct SparseMinI64 {
+    var length : i64;
+    var levels : i64;
+    var data : i64 array;
+};
+
+struct SparseMaxI64 {
+    var length : i64;
+    var levels : i64;
+    var data : i64 array;
+};
+
+fn sparse_min_i64_from (values : i64 array alias) {
+    let length := values.len();
+    var levels := 0;
+    if (length > 0) levels := 64 - length.leading_zeros(); fi;
+    if (levels > 0) {
+        if (length > 9223372036854775807 / levels) {
+            $sparse_table_i64_return;
+        } fi;
+    } fi;
+
+    var data : i64 array := new i64 array(length * levels, 9223372036854775807);
+    nfor (i, 0, length) {
+        data[i] := values[i] ?? $sparse_table_i64_return;
+    };
+
+    var level := 1;
+    var half := 1;
+    while (level < levels) {
+        let span := half * 2;
+        let base := level * length;
+        let previous := (level - 1) * length;
+        var first := 0;
+        while (first <= length - span) {
+            let left := data[previous + first] ?? $sparse_table_i64_return;
+            let right := data[previous + first + half] ?? $sparse_table_i64_return;
+            if (left <= right) data[base + first] := left;
+            else data[base + first] := right;
+            fi;
+            first += 1;
+        };
+        level += 1;
+        if (level < levels) half *= 2; fi;
+    };
+    new SparseMinI64(length := length, levels := levels, data := data)
+} -> SparseMinI64;
+
+fn sparse_max_i64_from (values : i64 array alias) {
+    let length := values.len();
+    var levels := 0;
+    if (length > 0) levels := 64 - length.leading_zeros(); fi;
+    if (levels > 0) {
+        if (length > 9223372036854775807 / levels) {
+            $sparse_table_i64_return;
+        } fi;
+    } fi;
+
+    var data : i64 array := new i64 array(
+        length * levels,
+        0 - 9223372036854775807 - 1
+    );
+    nfor (i, 0, length) {
+        data[i] := values[i] ?? $sparse_table_i64_return;
+    };
+
+    var level := 1;
+    var half := 1;
+    while (level < levels) {
+        let span := half * 2;
+        let base := level * length;
+        let previous := (level - 1) * length;
+        var first := 0;
+        while (first <= length - span) {
+            let left := data[previous + first] ?? $sparse_table_i64_return;
+            let right := data[previous + first + half] ?? $sparse_table_i64_return;
+            if (left >= right) data[base + first] := left;
+            else data[base + first] := right;
+            fi;
+            first += 1;
+        };
+        level += 1;
+        if (level < levels) half *= 2; fi;
+    };
+    new SparseMaxI64(length := length, levels := levels, data := data)
+} -> SparseMaxI64;
+
+fn sparse_min_i64_len (table : SparseMinI64 alias) {
+    table.length
+} -> i64;
+
+fn sparse_max_i64_len (table : SparseMaxI64 alias) {
+    table.length
+} -> i64;
+
+fn sparse_min_i64_get (table : SparseMinI64 alias, index : i64) {
+    if (index < 0 || index >= table.length) $sparse_table_i64_return; fi;
+    table.data[index]
+} -> i64;
+
+fn sparse_max_i64_get (table : SparseMaxI64 alias, index : i64) {
+    if (index < 0 || index >= table.length) $sparse_table_i64_return; fi;
+    table.data[index]
+} -> i64;
+
+fn sparse_min_i64_prod (table : SparseMinI64 alias,
+                        first : i64, last : i64) {
+    if (first < 0 || first > last || last > table.length) {
+        $sparse_table_i64_return;
+    } fi;
+    let count := last - first;
+    if (count == 0) $sparse_table_i64_return 9223372036854775807; fi;
+    let level := 63 - count.leading_zeros();
+    let span := 1 << level;
+    let base := level * table.length;
+    let left := table.data[base + first] ?? $sparse_table_i64_return;
+    let right := table.data[base + last - span] ?? $sparse_table_i64_return;
+    if (left <= right) left else right fi
+} -> i64;
+
+fn sparse_max_i64_prod (table : SparseMaxI64 alias,
+                        first : i64, last : i64) {
+    if (first < 0 || first > last || last > table.length) {
+        $sparse_table_i64_return;
+    } fi;
+    let count := last - first;
+    if (count == 0) {
+        let identity := 0 - 9223372036854775807 - 1;
+        $sparse_table_i64_return identity;
+    } fi;
+    let level := 63 - count.leading_zeros();
+    let span := 1 << level;
+    let base := level * table.length;
+    let left := table.data[base + first] ?? $sparse_table_i64_return;
+    let right := table.data[base + last - span] ?? $sparse_table_i64_return;
+    if (left >= right) left else right fi
+} -> i64;
+
+fn sparse_min_i64_all_prod (table : SparseMinI64 alias) {
+    sparse_min_i64_prod(table, 0, table.length)
+} -> i64;
+
+fn sparse_max_i64_all_prod (table : SparseMaxI64 alias) {
+    sparse_max_i64_prod(table, 0, table.length)
+} -> i64;
+
+fn sparse_min_i64_is_valid (table : SparseMinI64 alias) {
+    if (table.length < 0 || table.levels < 0) $sparse_table_i64_return false; fi;
+    var expected_levels := 0;
+    if (table.length > 0) expected_levels := 64 - table.length.leading_zeros(); fi;
+    if (table.levels != expected_levels) $sparse_table_i64_return false; fi;
+    if (table.levels > 0) {
+        if (table.length > 9223372036854775807 / table.levels) {
+            $sparse_table_i64_return false;
+        } fi;
+    } fi;
+    if (table.data.len() != table.length * table.levels) {
+        $sparse_table_i64_return false;
+    } fi;
+
+    var level := 1;
+    var half := 1;
+    while (level < table.levels) {
+        let span := half * 2;
+        let base := level * table.length;
+        let previous := (level - 1) * table.length;
+        var first := 0;
+        while (first <= table.length - span) {
+            let left := table.data[previous + first] ?? $sparse_table_i64_return;
+            let right := table.data[previous + first + half] ?? $sparse_table_i64_return;
+            let actual := table.data[base + first] ?? $sparse_table_i64_return;
+            if ((left <= right && actual != left) ||
+                (left > right && actual != right)) {
+                $sparse_table_i64_return false;
+            } fi;
+            first += 1;
+        };
+        level += 1;
+        if (level < table.levels) half *= 2; fi;
+    };
+    true
+} -> u1;
+
+fn sparse_max_i64_is_valid (table : SparseMaxI64 alias) {
+    if (table.length < 0 || table.levels < 0) $sparse_table_i64_return false; fi;
+    var expected_levels := 0;
+    if (table.length > 0) expected_levels := 64 - table.length.leading_zeros(); fi;
+    if (table.levels != expected_levels) $sparse_table_i64_return false; fi;
+    if (table.levels > 0) {
+        if (table.length > 9223372036854775807 / table.levels) {
+            $sparse_table_i64_return false;
+        } fi;
+    } fi;
+    if (table.data.len() != table.length * table.levels) {
+        $sparse_table_i64_return false;
+    } fi;
+
+    var level := 1;
+    var half := 1;
+    while (level < table.levels) {
+        let span := half * 2;
+        let base := level * table.length;
+        let previous := (level - 1) * table.length;
+        var first := 0;
+        while (first <= table.length - span) {
+            let left := table.data[previous + first] ?? $sparse_table_i64_return;
+            let right := table.data[previous + first + half] ?? $sparse_table_i64_return;
+            let actual := table.data[base + first] ?? $sparse_table_i64_return;
+            if ((left >= right && actual != left) ||
+                (left < right && actual != right)) {
+                $sparse_table_i64_return false;
+            } fi;
+            first += 1;
+        };
+        level += 1;
+        if (level < table.levels) half *= 2; fi;
+    };
+    true
+} -> u1;
