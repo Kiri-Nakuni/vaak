@@ -28,6 +28,9 @@ const SPARSE_TABLE: &str = include_str!("../stdlib/ds/sparse_table_i64.vaak");
 const DISJOINT_SPARSE_TABLE: &str = include_str!("../stdlib/ds/disjoint_sparse_table_i64.vaak");
 const ORDERED_MULTISET: &str = include_str!("../stdlib/ds/ordered_multiset_i64.vaak");
 const ASCII_I64: &str = include_str!("../stdlib/io/ascii_i64.vaak");
+const STRING: &str = vaak::stdlib::STRING;
+const JSON_UTF8: &str = vaak::stdlib::JSON_UTF8;
+const JSONL_UTF8: &str = vaak::stdlib::JSONL_UTF8;
 
 fn source(parts: &[&str], body: &str) -> String {
     let mut src = String::new();
@@ -200,6 +203,16 @@ fn 各ソースは単独または明示した依存だけで前置きできる()
         r#"let input := "  -42 "; var at := 0; io_ascii_i64_read(input, at)"#,
         "値 -42",
     );
+    both(
+        &[STRING, JSON_UTF8],
+        r#"let input := "null"; let limits := json_utf8_limits_default(); let parsed := json_utf8_parse(input, limits); if (parsed.ok) 42 else 0 fi"#,
+        "値 42",
+    );
+    both(
+        &[STRING, JSON_UTF8, JSONL_UTF8],
+        r#"let limits := jsonl_utf8_limits_default(); var reader := jsonl_utf8_reader_new(); let input := "1\n"; jsonl_utf8_feed(reader, input, limits); let item := jsonl_utf8_next(reader, limits); let document := item.document; if ((json_utf8_number_i64(document, item.root) ?? 0) == 1) 42 else 0 fi"#,
+        "値 42",
+    );
 }
 
 #[test]
@@ -302,6 +315,22 @@ fn 各ソースはsteelにも単独で前置きできる() {
     let src = checked(&[BINARY, MERGE_SORT, SORTED_UNIQUE, COMPRESS], body);
     let prog = vaak::parser::parse(&src).expect("構文");
     vaak::steel::compile(&prog).unwrap_or_else(|e| panic!("座標圧縮: STEEL: {}", e.msg));
+    for (libraries, body, name) in [
+        (
+            &[STRING, JSON_UTF8][..],
+            r#"let input := "null"; let limits := json_utf8_limits_default(); let parsed := json_utf8_parse(input, limits); if (parsed.ok) 42 else 0 fi"#,
+            "JSON",
+        ),
+        (
+            &[STRING, JSON_UTF8, JSONL_UTF8][..],
+            r#"let limits := jsonl_utf8_limits_default(); var reader := jsonl_utf8_reader_new(); let input := "1\n"; jsonl_utf8_feed(reader, input, limits); let item := jsonl_utf8_next(reader, limits); if (item.status == jsonl_utf8_status_value()) 42 else 0 fi"#,
+            "JSONL",
+        ),
+    ] {
+        let src = checked(libraries, body);
+        let prog = vaak::parser::parse(&src).expect("構文");
+        vaak::steel::compile(&prog).unwrap_or_else(|e| panic!("{name}: STEEL: {}", e.msg));
+    }
 }
 
 #[test]
@@ -332,6 +361,9 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         DISJOINT_SPARSE_TABLE,
         ORDERED_MULTISET,
         ASCII_I64,
+        STRING,
+        JSON_UTF8,
+        JSONL_UTF8,
     ];
     both(&libraries, "42", "値 42");
     let src = checked(&libraries, "42");

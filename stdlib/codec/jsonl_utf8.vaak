@@ -1,0 +1,449 @@
+%{ UTF-8 JSON Lines codec。
+
+   依存: stdlib/string.vaak, stdlib/codec/json_utf8.vaak
+
+   readerはbyte chunkを所有bufferへ取り込み、完全なrecordだけをJSON codecへ渡す。
+   chunk境界はUTF-8 scalar、JSON escape、numberの途中に置いてよい。fileやsocketの
+   capabilityは持たず、入力chunkと出力strだけを扱う。 }%
+
+flow $jsonl_utf8_return = $repeat(break, getdepth());
+
+struct JsonlUtf8Limits {
+    var json : JsonUtf8Limits;
+    var max_record_bytes : i64;
+    var max_total_bytes : i64;
+    var max_buffer_bytes : i64;
+};
+
+%{ JSON errorのcategory/code/offset/line/columnを保存し、JSONL上のrecord番号と
+   絶対位置を足す。recordとrecord_startは0-based、offsetはrecord内byte offset。 }%
+struct JsonlUtf8Error {
+    var category : i64;
+    var code : i64;
+    var record : i64;
+    var record_start : i64;
+    var offset : i64;
+    var absolute_offset : i64;
+    var line : i64;
+    var column : i64;
+};
+
+struct JsonlUtf8Reader {
+    var buffer : str;
+    var buffer_start : i64;
+    var buffer_head : i64;
+    var buffer_scan : i64;
+    var next_record : i64;
+    var total_bytes : i64;
+    var finished : u1;
+    var failed : u1;
+    var terminal_error : JsonlUtf8Error;
+};
+
+struct JsonlUtf8FeedResult {
+    var ok : u1;
+    var error : JsonlUtf8Error;
+};
+
+struct JsonlUtf8ReadResult {
+    var status : u8;
+    var document : JsonUtf8Document;
+    var root : i64;
+    var record : i64;
+    var record_start : i64;
+    var error : JsonlUtf8Error;
+};
+
+struct JsonlUtf8WriteResult {
+    var ok : u1;
+    var bytes : str;
+    var error : JsonlUtf8Error;
+};
+
+fn jsonl_utf8_status_need_more () { 0 } -> u8;
+fn jsonl_utf8_status_value () { 1 } -> u8;
+fn jsonl_utf8_status_end () { 2 } -> u8;
+fn jsonl_utf8_status_error () { 3 } -> u8;
+
+fn jsonl_utf8_limits_default () {
+    new JsonlUtf8Limits(
+        json := json_utf8_limits_default(),
+        max_record_bytes := 16777216,
+        max_total_bytes := 1073741824,
+        max_buffer_bytes := 33554432
+    )
+} -> JsonlUtf8Limits;
+
+fn jsonl_utf8_error_none () {
+    new JsonlUtf8Error(
+        category := 0,
+        code := 0,
+        record := -1,
+        record_start := -1,
+        offset := -1,
+        absolute_offset := -1,
+        line := -1,
+        column := -1
+    )
+} -> JsonlUtf8Error;
+
+fn jsonl_utf8__limits_valid (limits : JsonlUtf8Limits alias) {
+    let json_limits := limits.json;
+    json_utf8__limits_valid(json_limits) &&
+    limits.max_record_bytes >= 0 && limits.max_total_bytes >= 0 &&
+    limits.max_buffer_bytes >= 0
+} -> u1;
+
+fn jsonl_utf8__error (
+    code : i64,
+    record : i64,
+    record_start : i64,
+    offset : i64,
+    line : i64,
+    column : i64
+) {
+    let absolute := if (record_start >= 0 && offset >= 0) record_start + offset else -1 fi;
+    new JsonlUtf8Error(
+        category := code / 100,
+        code := code,
+        record := record,
+        record_start := record_start,
+        offset := offset,
+        absolute_offset := absolute,
+        line := line,
+        column := column
+    )
+} -> JsonlUtf8Error;
+
+fn jsonl_utf8__json_error (
+    error : JsonUtf8Error,
+    record : i64,
+    record_start : i64
+) {
+    new JsonlUtf8Error(
+        category := error.category,
+        code := error.code,
+        record := record,
+        record_start := record_start,
+        offset := error.offset,
+        absolute_offset := if (error.offset >= 0 && record_start >= 0)
+            record_start + error.offset
+        else -1 fi,
+        line := error.line,
+        column := error.column
+    )
+} -> JsonlUtf8Error;
+
+fn jsonl_utf8_reader_new () {
+    new JsonlUtf8Reader(
+        buffer := "",
+        buffer_start := 0,
+        buffer_head := 0,
+        buffer_scan := 0,
+        next_record := 0,
+        total_bytes := 0,
+        finished := false,
+        failed := false,
+        terminal_error := jsonl_utf8_error_none()
+    )
+} -> JsonlUtf8Reader;
+
+fn jsonl_utf8__reader_valid (reader : JsonlUtf8Reader alias) {
+    reader.buffer_start >= 0 && reader.buffer_head >= 0 &&
+    reader.buffer_scan >= reader.buffer_head &&
+    reader.buffer_scan <= reader.buffer.len() && reader.next_record >= 0 &&
+    reader.total_bytes >= reader.buffer_start &&
+    reader.buffer.len() == reader.total_bytes - reader.buffer_start &&
+    ((! reader.failed && reader.terminal_error.code == 0) ||
+     (reader.failed && reader.terminal_error.code != 0))
+} -> u1;
+
+fn jsonl_utf8_buffered_bytes (reader : JsonlUtf8Reader alias) {
+    if (! jsonl_utf8__reader_valid(reader)) $jsonl_utf8_return; fi;
+    reader.buffer.len() - reader.buffer_head
+} -> i64;
+
+fn jsonl_utf8__compact (var reader : JsonlUtf8Reader alias) {
+    if (reader.buffer_head == 0) $jsonl_utf8_return true; fi;
+    let current := reader.buffer;
+    let rest := jsonl_utf8__copy_range(current, reader.buffer_head, current.len());
+    reader.buffer_scan -= reader.buffer_head;
+    reader.buffer_start += reader.buffer_head;
+    reader.buffer_head := 0;
+    reader.buffer := rest;
+    true
+} -> u1;
+
+fn jsonl_utf8__fail_reader (
+    var reader : JsonlUtf8Reader alias,
+    error : JsonlUtf8Error
+) {
+    reader.failed := true;
+    reader.terminal_error := error;
+    new JsonlUtf8FeedResult(ok := false, error := error)
+} -> JsonlUtf8FeedResult;
+
+fn jsonl_utf8_feed (
+    var reader : JsonlUtf8Reader alias,
+    chunk : str alias,
+    limits : JsonlUtf8Limits alias
+) {
+    if (reader.failed) {
+        $jsonl_utf8_return new JsonlUtf8FeedResult(
+            ok := false,
+            error := reader.terminal_error
+        );
+    } fi;
+    if (! jsonl_utf8__reader_valid(reader)) {
+        let error := jsonl_utf8__error(403, -1, -1, -1, -1, -1);
+        $jsonl_utf8_return jsonl_utf8__fail_reader(reader, error);
+    } fi;
+    let record_start := reader.buffer_start + reader.buffer_head;
+    let buffered := reader.buffer.len() - reader.buffer_head;
+    if (! jsonl_utf8__limits_valid(limits)) {
+        let error := jsonl_utf8__error(
+            405, reader.next_record, record_start, 0, -1, -1
+        );
+        $jsonl_utf8_return jsonl_utf8__fail_reader(reader, error);
+    } fi;
+    if (reader.finished) {
+        let error := jsonl_utf8__error(
+            403, reader.next_record, record_start, buffered, -1, -1
+        );
+        $jsonl_utf8_return jsonl_utf8__fail_reader(reader, error);
+    } fi;
+    if (chunk.len() > limits.max_total_bytes - reader.total_bytes) {
+        let error := jsonl_utf8__error(
+            402, reader.next_record, record_start, buffered, -1, -1
+        );
+        $jsonl_utf8_return jsonl_utf8__fail_reader(reader, error);
+    } fi;
+    if (chunk.len() > limits.max_buffer_bytes - buffered) {
+        let error := jsonl_utf8__error(
+            404, reader.next_record, record_start, buffered, -1, -1
+        );
+        $jsonl_utf8_return jsonl_utf8__fail_reader(reader, error);
+    } fi;
+
+    if (reader.buffer.len() > limits.max_buffer_bytes - chunk.len()) {
+        jsonl_utf8__compact(reader);
+    } fi;
+
+    nfor (i, 0, chunk.len()) {
+        reader.buffer.push(chunk[i] ?? 0);
+    };
+    reader.total_bytes += chunk.len();
+    new JsonlUtf8FeedResult(ok := true, error := jsonl_utf8_error_none())
+} -> JsonlUtf8FeedResult;
+
+% finishは冪等。以後feedはstate errorだが、nextは残った最終recordを読める。%
+fn jsonl_utf8_finish (
+    var reader : JsonlUtf8Reader alias,
+    limits : JsonlUtf8Limits alias
+) {
+    if (reader.failed) {
+        $jsonl_utf8_return new JsonlUtf8FeedResult(
+            ok := false,
+            error := reader.terminal_error
+        );
+    } fi;
+    if (! jsonl_utf8__reader_valid(reader)) {
+        let error := jsonl_utf8__error(403, -1, -1, -1, -1, -1);
+        $jsonl_utf8_return jsonl_utf8__fail_reader(reader, error);
+    } fi;
+    if (! jsonl_utf8__limits_valid(limits)) {
+        let record_start := reader.buffer_start + reader.buffer_head;
+        let error := jsonl_utf8__error(
+            405, reader.next_record, record_start, 0, -1, -1
+        );
+        $jsonl_utf8_return jsonl_utf8__fail_reader(reader, error);
+    } fi;
+    reader.finished := true;
+    new JsonlUtf8FeedResult(ok := true, error := jsonl_utf8_error_none())
+} -> JsonlUtf8FeedResult;
+
+fn jsonl_utf8__empty_read (status : u8, error : JsonlUtf8Error) {
+    new JsonlUtf8ReadResult(
+        status := status,
+        document := json_utf8_document_new(),
+        root := -1,
+        record := error.record,
+        record_start := error.record_start,
+        error := error
+    )
+} -> JsonlUtf8ReadResult;
+
+fn jsonl_utf8__read_error (
+    var reader : JsonlUtf8Reader alias,
+    error : JsonlUtf8Error
+) {
+    reader.failed := true;
+    reader.terminal_error := error;
+    jsonl_utf8__empty_read(jsonl_utf8_status_error(), error)
+} -> JsonlUtf8ReadResult;
+
+fn jsonl_utf8__copy_range (source : str alias, first : i64, last : i64) {
+    var output := "";
+    nfor (i, first, last - first) {
+        output.push(source[i] ?? 0);
+    };
+    output
+} -> str;
+
+fn jsonl_utf8__blank (source : str alias) {
+    nfor (i, 0, source.len()) {
+        if (! json_utf8__is_whitespace(source[i] ?? 0)) $jsonl_utf8_return false; fi;
+    };
+    true
+} -> u1;
+
+fn jsonl_utf8_next (
+    var reader : JsonlUtf8Reader alias,
+    limits : JsonlUtf8Limits alias
+) {
+    if (reader.failed) {
+        $jsonl_utf8_return jsonl_utf8__empty_read(
+            jsonl_utf8_status_error(), reader.terminal_error
+        );
+    } fi;
+    if (! jsonl_utf8__reader_valid(reader)) {
+        let error := jsonl_utf8__error(403, -1, -1, -1, -1, -1);
+        $jsonl_utf8_return jsonl_utf8__read_error(reader, error);
+    } fi;
+    let record_start := reader.buffer_start + reader.buffer_head;
+    let buffered := reader.buffer.len() - reader.buffer_head;
+    if (! jsonl_utf8__limits_valid(limits)) {
+        let error := jsonl_utf8__error(
+            405, reader.next_record, record_start, 0, -1, -1
+        );
+        $jsonl_utf8_return jsonl_utf8__read_error(reader, error);
+    } fi;
+
+    var newline := -1;
+    var scan := reader.buffer_scan;
+    while (scan < reader.buffer.len() && newline < 0) {
+        if ((reader.buffer[scan] ?? 0) == 0x0a) newline := scan; fi;
+        scan += 1;
+    };
+
+    if (newline < 0 && ! reader.finished) {
+        var definitely_too_long := false;
+        if (buffered > limits.max_record_bytes) {
+            let excess := buffered - limits.max_record_bytes;
+            if (excess > 1 || (reader.buffer[reader.buffer.len() - 1] ?? 0) != 0x0d) {
+                definitely_too_long := true;
+            } fi;
+        } fi;
+        if (definitely_too_long) {
+            let error := jsonl_utf8__error(
+                401,
+                reader.next_record,
+                record_start,
+                limits.max_record_bytes,
+                -1,
+                -1
+            );
+            $jsonl_utf8_return jsonl_utf8__read_error(reader, error);
+        } fi;
+        reader.buffer_scan := reader.buffer.len();
+        $jsonl_utf8_return jsonl_utf8__empty_read(
+            jsonl_utf8_status_need_more(), jsonl_utf8_error_none()
+        );
+    } fi;
+
+    if (newline < 0 && buffered == 0) {
+        $jsonl_utf8_return jsonl_utf8__empty_read(
+            jsonl_utf8_status_end(), jsonl_utf8_error_none()
+        );
+    } fi;
+
+    let physical_end := if (newline >= 0) newline else reader.buffer.len() fi;
+    var content_end := physical_end;
+    if (newline >= 0 && content_end > 0 &&
+        (reader.buffer[content_end - 1] ?? 0) == 0x0d) {
+        content_end -= 1;
+    } fi;
+    let consumed_end := if (newline >= 0) newline + 1 else physical_end fi;
+    let record := reader.next_record;
+
+    if (content_end - reader.buffer_head > limits.max_record_bytes) {
+        let error := jsonl_utf8__error(
+            401, record, record_start, limits.max_record_bytes, -1, -1
+        );
+        $jsonl_utf8_return jsonl_utf8__read_error(reader, error);
+    } fi;
+
+    let current_buffer := reader.buffer;
+    let payload := jsonl_utf8__copy_range(
+        current_buffer, reader.buffer_head, content_end
+    );
+    if (jsonl_utf8__blank(payload)) {
+        let error := jsonl_utf8__error(400, record, record_start, 0, 1, 1);
+        $jsonl_utf8_return jsonl_utf8__read_error(reader, error);
+    } fi;
+
+    let json_limits := limits.json;
+    let parsed := json_utf8_parse(payload, json_limits);
+    if (! parsed.ok) {
+        let error := jsonl_utf8__json_error(parsed.error, record, record_start);
+        $jsonl_utf8_return jsonl_utf8__read_error(reader, error);
+    } fi;
+
+    reader.buffer_head := consumed_end;
+    reader.buffer_scan := consumed_end;
+    reader.next_record += 1;
+    let remaining := reader.buffer.len() - reader.buffer_head;
+    if (reader.buffer_head >= remaining) jsonl_utf8__compact(reader); fi;
+    new JsonlUtf8ReadResult(
+        status := jsonl_utf8_status_value(),
+        document := parsed.document,
+        root := parsed.root,
+        record := record,
+        record_start := record_start,
+        error := jsonl_utf8_error_none()
+    )
+} -> JsonlUtf8ReadResult;
+
+% compact JSONの後ろへLFを一つだけ足す。失敗時のbytesは常に空。%
+fn jsonl_utf8_serialize_line (
+    document : JsonUtf8Document alias,
+    root : i64,
+    limits : JsonlUtf8Limits alias
+) {
+    var empty := "";
+    if (! jsonl_utf8__limits_valid(limits)) {
+        let error := jsonl_utf8__error(405, -1, -1, -1, -1, -1);
+        $jsonl_utf8_return new JsonlUtf8WriteResult(
+            ok := false, bytes := empty, error := error
+        );
+    } fi;
+    let json_limits := limits.json;
+    let serialized := json_utf8_serialize(document, root, json_limits);
+    if (! serialized.ok) {
+        let error := jsonl_utf8__json_error(serialized.error, -1, -1);
+        $jsonl_utf8_return new JsonlUtf8WriteResult(
+            ok := false, bytes := empty, error := error
+        );
+    } fi;
+    if (serialized.bytes.len() > limits.max_record_bytes) {
+        let error := jsonl_utf8__error(401, -1, -1, limits.max_record_bytes, -1, -1);
+        $jsonl_utf8_return new JsonlUtf8WriteResult(
+            ok := false, bytes := empty, error := error
+        );
+    } fi;
+    if (serialized.bytes.len() + 1 > limits.max_total_bytes) {
+        let error := jsonl_utf8__error(402, -1, -1, serialized.bytes.len(), -1, -1);
+        $jsonl_utf8_return new JsonlUtf8WriteResult(
+            ok := false, bytes := empty, error := error
+        );
+    } fi;
+    if (serialized.bytes.len() + 1 > limits.max_buffer_bytes) {
+        let error := jsonl_utf8__error(404, -1, -1, serialized.bytes.len(), -1, -1);
+        $jsonl_utf8_return new JsonlUtf8WriteResult(
+            ok := false, bytes := empty, error := error
+        );
+    } fi;
+    var output := serialized.bytes;
+    output.push(0x0a);
+    new JsonlUtf8WriteResult(ok := true, bytes := output, error := jsonl_utf8_error_none())
+} -> JsonlUtf8WriteResult;

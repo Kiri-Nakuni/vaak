@@ -4,7 +4,7 @@
 > 外部実装をvendorする許可にもならない。
 
 - 調査日: 2026-08-24〜2026-08-25
-- 対象branch: `codex3/stdlib-bulk-io`（P1 ordering / range / I/Oとstructure / graph checkpointを統合）
+- 対象branch: `codex3/stdlib-json-jsonl`（P1 checkpointsを統合し、pure codecを追加）
 - Vaak本体のlicense: [`docs/LICENSING.md`](../LICENSING.md)のとおりMIT
 - 規律: 公式仕様から契約・分類・計算量だけを調べ、source、test、解説文を転写・翻訳しない
 
@@ -88,6 +88,25 @@ range違反時の更新前拒否はこのrepositoryの既存stdlib契約へ揃�
 符号、i64境界をbulk loopにも適用し、random oracleと固定fixtureで両APIを照合した。成功prefixだけを確定する
 失敗契約、caller-owned配列範囲、20-byte scratch一回、ASCII separator、値間だけの区切りは独立に定めた。
 stdin/stdout、host名、streaming、reserve、zero-copy viewの資料・実装はこのcheckpointへ持ち込んでいない。
+
+## UTF-8 JSON / JSON Lines checkpointで独立に定義したもの
+
+| Vaak source | 外部仕様・要求の入力 | 読まない範囲 / 独立性を固定する試験 |
+|---|---|---|
+| `codec/json_utf8.vaak` | [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)のJSON token、escape、UTF-8相互運用要件と、既存MIT `string.vaak`のRFC 3629妥当性契約 | 外部parser/serializer source、test vector、snippetを使わない。flat node/edge表、i64限定number、stable error/budget code、duplicate拒否、順序保存を独立fixtureでreference/VMへ照合 |
+| `codec/jsonl_utf8.vaak` | PraTeX担当者が`rtex/docs/validation/AUTOCHECKDATABASE/to-vaak/20260825-010859-utf8-jsonl-standard-library-request.md`へ置いた受入要件だけ | GPL-3.0のrtex source、codec実装、schemaを一行も読まず転写しない。LF/CRLF/終端LFなし、chunk分割、record位置、上限、原子性を独立fixtureで照合 |
+
+RFC本文の文言や例を文書・試験へ転写せず、wire grammarの必要条件だけを実装した。PraTeX側から運んだのも
+invalid UTF-8/escape/surrogate/trailing、位置、budget、決定的出力、chunk分割、codec/capability分離という
+設計要求だけである。PraTeX固有build manifest schema、file I/O、GPL sourceはVaakへ持ち込んでいない。
+
+JSON numberは外部libraryの表現を採らず、現行Vaakが正確に持つi64だけを初版値域にした。小数・指数を
+unsupported codeへ分け、f64丸めやdecimal文字列表現を新しい一般則にしない。Rust側の試験は期待byte列と
+error位置を直接構成するだけで、別JSON実装の出力をVaak sourceへ転写していない。
+
+JSONLの毎record suffix copy案とbuffer-head案、毎chunk再探索案とscan cursor案は同じrepository内benchmarkで
+比較し、suffix copyと再探索を棄却した。測定値は`stdlib/BENCHMARK.md`へ残し、外部実装のbenchmarkや
+algorithmを入力にしていない。
 
 ## 今後の追記規則
 

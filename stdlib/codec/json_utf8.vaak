@@ -1,0 +1,1179 @@
+%{ UTF-8 JSON codec。
+
+   依存: stdlib/string.vaak
+
+   再帰型を要求せず、値をnode表とedge表へ平坦化する。JSON numberの初版は
+   i64整数だけを保持し、正しい小数・指数表記はunsupported number errorにする。
+   object keyは入力・追加順を保存し、duplicate keyを拒む。 }%
+
+flow $json_utf8_return = $repeat(break, getdepth());
+
+% kind: 0 null, 1 boolean, 2 i64 number, 3 string, 4 array, 5 object。%
+struct JsonUtf8Document {
+    var kinds : u8 array;
+    var scalars : i64 array;
+    var texts : str array;
+    var child_starts : i64 array;
+    var child_counts : i64 array;
+    var children : i64 array;
+    var keys : str array;
+};
+
+struct JsonUtf8Limits {
+    var max_bytes : i64;
+    var max_depth : i64;
+    var max_nodes : i64;
+    var max_string_bytes : i64;
+    var max_edges : i64;
+};
+
+% category: 0 none, 1 syntax/input, 2 budget, 3 document/output, 4 JSONL。%
+struct JsonUtf8Error {
+    var category : i64;
+    var code : i64;
+    var offset : i64;
+    var line : i64;
+    var column : i64;
+};
+
+struct JsonUtf8ParseResult {
+    var ok : u1;
+    var document : JsonUtf8Document;
+    var root : i64;
+    var error : JsonUtf8Error;
+};
+
+struct JsonUtf8SerializeResult {
+    var ok : u1;
+    var bytes : str;
+    var error : JsonUtf8Error;
+};
+
+fn json_utf8_document_new () {
+    new JsonUtf8Document(
+        kinds := new u8 array(0, 0),
+        scalars := new i64 array(0, 0),
+        texts := new str array(0, ""),
+        child_starts := new i64 array(0, 0),
+        child_counts := new i64 array(0, 0),
+        children := new i64 array(0, 0),
+        keys := new str array(0, "")
+    )
+} -> JsonUtf8Document;
+
+fn json_utf8_limits_default () {
+    new JsonUtf8Limits(
+        max_bytes := 16777216,
+        max_depth := 64,
+        max_nodes := 1048576,
+        max_string_bytes := 16777216,
+        max_edges := 1048576
+    )
+} -> JsonUtf8Limits;
+
+fn json_utf8_error_none () {
+    new JsonUtf8Error(category := 0, code := 0, offset := -1, line := -1, column := -1)
+} -> JsonUtf8Error;
+
+fn json_utf8_kind_null () { 0 } -> u8;
+fn json_utf8_kind_boolean () { 1 } -> u8;
+fn json_utf8_kind_number () { 2 } -> u8;
+fn json_utf8_kind_string () { 3 } -> u8;
+fn json_utf8_kind_array () { 4 } -> u8;
+fn json_utf8_kind_object () { 5 } -> u8;
+
+fn json_utf8__limits_valid (limits : JsonUtf8Limits alias) {
+    limits.max_bytes >= 0 && limits.max_depth >= 0 && limits.max_nodes >= 0 &&
+    limits.max_string_bytes >= 0 && limits.max_edges >= 0
+} -> u1;
+
+fn json_utf8__aligned (document : JsonUtf8Document alias) {
+    document.kinds.len() == document.scalars.len() &&
+    document.kinds.len() == document.texts.len() &&
+    document.kinds.len() == document.child_starts.len() &&
+    document.kinds.len() == document.child_counts.len() &&
+    document.children.len() == document.keys.len()
+} -> u1;
+
+fn json_utf8__bytes_equal (left : str alias, right : str alias) {
+    if (left.len() != right.len()) $json_utf8_return false; fi;
+    nfor (i, 0, left.len()) {
+        if (left[i] != right[i]) $json_utf8_return false; fi;
+    };
+    true
+} -> u1;
+
+fn json_utf8__error_at (
+    source : str alias,
+    var error : JsonUtf8Error alias,
+    code : i64,
+    offset : i64
+) {
+    if (error.code != 0) $json_utf8_return false; fi;
+    var at := offset;
+    if (at < 0) at := 0; fi;
+    if (at > source.len()) at := source.len(); fi;
+    var line := 1;
+    var column := 1;
+    var i := 0;
+    while (i < at) {
+        let byte := source[i] ?? 0;
+        if (byte == 0x0d) {
+            if (i + 1 < at && source[i + 1] == 0x0a) i += 1; fi;
+            line += 1;
+            column := 1;
+        } elif (byte == 0x0a) {
+            line += 1;
+            column := 1;
+        } else {
+            column += 1;
+        } fi;
+        i += 1;
+    };
+    error.category := code / 100;
+    error.code := code;
+    error.offset := at;
+    error.line := line;
+    error.column := column;
+    false
+} -> u1;
+
+fn json_utf8__output_error (
+    var error : JsonUtf8Error alias,
+    code : i64,
+    offset : i64
+) {
+    if (error.code != 0) $json_utf8_return false; fi;
+    error.category := code / 100;
+    error.code := code;
+    error.offset := offset;
+    error.line := -1;
+    error.column := -1;
+    false
+} -> u1;
+
+fn json_utf8__is_whitespace (byte : u8) {
+    byte == 0x20 || byte == 0x09 || byte == 0x0a || byte == 0x0d
+} -> u1;
+
+fn json_utf8__skip_whitespace (source : str alias, var cursor : i64 alias) {
+    while (cursor < source.len() &&
+           json_utf8__is_whitespace(source[cursor] ?? 0)) {
+        cursor += 1;
+    };
+    true
+} -> u1;
+
+% 妥当ならsource.len()、不正なら最初の不正scalar先頭byte offset。%
+fn json_utf8__utf8_valid_prefix (source : str alias) {
+    var i := 0;
+    while (i < source.len()) {
+        let a := source[i] ?? $json_utf8_return i;
+        if (a <= 127) {
+            i += 1;
+        } elif (a >= 194 && a <= 223) {
+            if (i + 1 >= source.len()) $json_utf8_return i; fi;
+            let b := source[i + 1] ?? $json_utf8_return i;
+            if (b < 128 || b > 191) $json_utf8_return i; fi;
+            i += 2;
+        } elif (a == 224) {
+            if (i + 2 >= source.len()) $json_utf8_return i; fi;
+            let b := source[i + 1] ?? $json_utf8_return i;
+            let c := source[i + 2] ?? $json_utf8_return i;
+            if (b < 160 || b > 191 || c < 128 || c > 191) $json_utf8_return i; fi;
+            i += 3;
+        } elif ((a >= 225 && a <= 236) || (a >= 238 && a <= 239)) {
+            if (i + 2 >= source.len()) $json_utf8_return i; fi;
+            let b := source[i + 1] ?? $json_utf8_return i;
+            let c := source[i + 2] ?? $json_utf8_return i;
+            if (b < 128 || b > 191 || c < 128 || c > 191) $json_utf8_return i; fi;
+            i += 3;
+        } elif (a == 237) {
+            if (i + 2 >= source.len()) $json_utf8_return i; fi;
+            let b := source[i + 1] ?? $json_utf8_return i;
+            let c := source[i + 2] ?? $json_utf8_return i;
+            if (b < 128 || b > 159 || c < 128 || c > 191) $json_utf8_return i; fi;
+            i += 3;
+        } elif (a == 240) {
+            if (i + 3 >= source.len()) $json_utf8_return i; fi;
+            let b := source[i + 1] ?? $json_utf8_return i;
+            let c := source[i + 2] ?? $json_utf8_return i;
+            let d := source[i + 3] ?? $json_utf8_return i;
+            if (b < 144 || b > 191 || c < 128 || c > 191 || d < 128 || d > 191) {
+                $json_utf8_return i;
+            } fi;
+            i += 4;
+        } elif (a >= 241 && a <= 243) {
+            if (i + 3 >= source.len()) $json_utf8_return i; fi;
+            let b := source[i + 1] ?? $json_utf8_return i;
+            let c := source[i + 2] ?? $json_utf8_return i;
+            let d := source[i + 3] ?? $json_utf8_return i;
+            if (b < 128 || b > 191 || c < 128 || c > 191 || d < 128 || d > 191) {
+                $json_utf8_return i;
+            } fi;
+            i += 4;
+        } elif (a == 244) {
+            if (i + 3 >= source.len()) $json_utf8_return i; fi;
+            let b := source[i + 1] ?? $json_utf8_return i;
+            let c := source[i + 2] ?? $json_utf8_return i;
+            let d := source[i + 3] ?? $json_utf8_return i;
+            if (b < 128 || b > 143 || c < 128 || c > 191 || d < 128 || d > 191) {
+                $json_utf8_return i;
+            } fi;
+            i += 4;
+        } else {
+            $json_utf8_return i;
+        } fi;
+    };
+    source.len()
+} -> i64;
+
+fn json_utf8__hex (byte : u8) {
+    if (byte >= 0x30 && byte <= 0x39) (byte - 0x30) -> i64
+    elif (byte >= 0x41 && byte <= 0x46) (byte - 0x41 + 10) -> i64
+    elif (byte >= 0x61 && byte <= 0x66) (byte - 0x61 + 10) -> i64
+    else -1
+    fi
+} -> i64;
+
+fn json_utf8__append_decoded_byte (
+    var output : str alias,
+    byte : u8,
+    source : str alias,
+    var error : JsonUtf8Error alias,
+    limits : JsonUtf8Limits alias,
+    at : i64
+) {
+    if (output.len() >= limits.max_string_bytes) {
+        json_utf8__error_at(source, error, 204, at);
+        $json_utf8_return false;
+    } fi;
+    output.push(byte);
+    true
+} -> u1;
+
+fn json_utf8__append_codepoint (
+    var output : str alias,
+    codepoint : i64,
+    source : str alias,
+    var error : JsonUtf8Error alias,
+    limits : JsonUtf8Limits alias,
+    at : i64
+) {
+    var needed := 1;
+    if (codepoint > 0x7f) needed := 2; fi;
+    if (codepoint > 0x7ff) needed := 3; fi;
+    if (codepoint > 0xffff) needed := 4; fi;
+    if (output.len() > limits.max_string_bytes - needed) {
+        json_utf8__error_at(source, error, 204, at);
+        $json_utf8_return false;
+    } fi;
+    if (needed == 1) {
+        output.push(codepoint -> u8);
+    } elif (needed == 2) {
+        output.push(((0xc0 -> i64) | (codepoint >> 6)) -> u8);
+        output.push(((0x80 -> i64) | (codepoint & (0x3f -> i64))) -> u8);
+    } elif (needed == 3) {
+        output.push(((0xe0 -> i64) | (codepoint >> 12)) -> u8);
+        output.push(((0x80 -> i64) | ((codepoint >> 6) & (0x3f -> i64))) -> u8);
+        output.push(((0x80 -> i64) | (codepoint & (0x3f -> i64))) -> u8);
+    } else {
+        output.push(((0xf0 -> i64) | (codepoint >> 18)) -> u8);
+        output.push(((0x80 -> i64) | ((codepoint >> 12) & (0x3f -> i64))) -> u8);
+        output.push(((0x80 -> i64) | ((codepoint >> 6) & (0x3f -> i64))) -> u8);
+        output.push(((0x80 -> i64) | (codepoint & (0x3f -> i64))) -> u8);
+    } fi;
+    true
+} -> u1;
+
+fn json_utf8__parse_string (
+    source : str alias,
+    var cursor : i64 alias,
+    var error : JsonUtf8Error alias,
+    limits : JsonUtf8Limits alias
+) {
+    var output := "";
+    if (cursor >= source.len() || source[cursor] != 0x22) {
+        json_utf8__error_at(source, error, 102, cursor);
+        $json_utf8_return output;
+    } fi;
+    cursor += 1;
+    while (cursor < source.len()) {
+        let byte := source[cursor] ?? 0;
+        if (byte == 0x22) {
+            cursor += 1;
+            $json_utf8_return output;
+        } fi;
+        if (byte < 0x20) {
+            json_utf8__error_at(source, error, 106, cursor);
+            $json_utf8_return output;
+        } fi;
+        if (byte != 0x5c) {
+            json_utf8__append_decoded_byte(output, byte, source, error, limits, cursor);
+            if (error.code != 0) $json_utf8_return output; fi;
+            cursor += 1;
+        } else {
+            let escape_at := cursor;
+            cursor += 1;
+            if (cursor >= source.len()) {
+                json_utf8__error_at(source, error, 101, cursor);
+                $json_utf8_return output;
+            } fi;
+            let escaped := source[cursor] ?? 0;
+            cursor += 1;
+            var simple := -1;
+            if (escaped == 0x22) simple := 0x22;
+            elif (escaped == 0x5c) simple := 0x5c;
+            elif (escaped == 0x2f) simple := 0x2f;
+            elif (escaped == 0x62) simple := 0x08;
+            elif (escaped == 0x66) simple := 0x0c;
+            elif (escaped == 0x6e) simple := 0x0a;
+            elif (escaped == 0x72) simple := 0x0d;
+            elif (escaped == 0x74) simple := 0x09;
+            fi;
+            if (simple >= 0) {
+                json_utf8__append_decoded_byte(
+                    output, simple -> u8, source, error, limits, escape_at
+                );
+                if (error.code != 0) $json_utf8_return output; fi;
+            } elif (escaped == 0x75) {
+                if (cursor > source.len() - 4) {
+                    json_utf8__error_at(source, error, 104, escape_at);
+                    $json_utf8_return output;
+                } fi;
+                var unit := 0;
+                nfor (i, 0, 4) {
+                    let digit := json_utf8__hex(source[cursor + i] ?? 0);
+                    if (digit < 0) {
+                        json_utf8__error_at(source, error, 104, escape_at);
+                        $json_utf8_return output;
+                    } fi;
+                    unit := unit * 16 + digit;
+                };
+                cursor += 4;
+                var codepoint := unit;
+                if (unit >= 0xd800 && unit <= 0xdbff) {
+                    if (cursor > source.len() - 6 ||
+                        source[cursor] != 0x5c || source[cursor + 1] != 0x75) {
+                        json_utf8__error_at(source, error, 105, escape_at);
+                        $json_utf8_return output;
+                    } fi;
+                    var low := 0;
+                    nfor (i, 0, 4) {
+                        let digit := json_utf8__hex(source[cursor + 2 + i] ?? 0);
+                        if (digit < 0) {
+                            json_utf8__error_at(source, error, 104, cursor);
+                            $json_utf8_return output;
+                        } fi;
+                        low := low * 16 + digit;
+                    };
+                    if (low < 0xdc00 || low > 0xdfff) {
+                        json_utf8__error_at(source, error, 105, escape_at);
+                        $json_utf8_return output;
+                    } fi;
+                    cursor += 6;
+                    codepoint := 0x10000 + (unit - 0xd800) * 0x400 + (low - 0xdc00);
+                } elif (unit >= 0xdc00 && unit <= 0xdfff) {
+                    json_utf8__error_at(source, error, 105, escape_at);
+                    $json_utf8_return output;
+                } fi;
+                json_utf8__append_codepoint(output, codepoint, source, error, limits, escape_at);
+                if (error.code != 0) $json_utf8_return output; fi;
+            } else {
+                json_utf8__error_at(source, error, 104, escape_at);
+                $json_utf8_return output;
+            } fi;
+        } fi;
+    };
+    json_utf8__error_at(source, error, 101, source.len());
+    output
+} -> str;
+
+fn json_utf8__match_ascii (source : str alias, at : i64, literal : str) {
+    if (at < 0 || literal.len() > source.len() - at) $json_utf8_return false; fi;
+    nfor (i, 0, literal.len()) {
+        if (source[at + i] != literal[i]) $json_utf8_return false; fi;
+    };
+    true
+} -> u1;
+
+fn json_utf8__parse_i64_number (
+    source : str alias,
+    var cursor : i64 alias,
+    var error : JsonUtf8Error alias
+) {
+    let start := cursor;
+    var negative := false;
+    if (source[cursor] == 0x2d) {
+        negative := true;
+        cursor += 1;
+    } fi;
+    if (cursor >= source.len()) {
+        json_utf8__error_at(source, error, 107, cursor);
+        $json_utf8_return 0;
+    } fi;
+    let first := source[cursor] ?? 0;
+    if (first < 0x30 || first > 0x39) {
+        json_utf8__error_at(source, error, 107, cursor);
+        $json_utf8_return 0;
+    } fi;
+    var value := 0;
+    var overflow := false;
+    if (first == 0x30) {
+        cursor += 1;
+        if (cursor < source.len()) {
+            let next := source[cursor] ?? 0;
+            if (next >= 0x30 && next <= 0x39) {
+                json_utf8__error_at(source, error, 107, cursor);
+                $json_utf8_return 0;
+            } fi;
+        } fi;
+    } else {
+        while (cursor < source.len()) {
+            let byte := source[cursor] ?? 0;
+            if (byte < 0x30 || byte > 0x39) break; fi;
+            let digit := (byte - 0x30) -> i64;
+            if (! overflow) {
+                if (value < (0 - 922337203685477580) ||
+                    (value == (0 - 922337203685477580) &&
+                     ((! negative && digit > 7) || (negative && digit > 8)))) {
+                    overflow := true;
+                } else {
+                    value := value * 10 - digit;
+                } fi;
+            } fi;
+            cursor += 1;
+        };
+    } fi;
+
+    var unsupported := false;
+    if (cursor < source.len() && source[cursor] == 0x2e) {
+        unsupported := true;
+        cursor += 1;
+        let digits_at := cursor;
+        while (cursor < source.len()) {
+            let byte := source[cursor] ?? 0;
+            if (byte < 0x30 || byte > 0x39) break; fi;
+            cursor += 1;
+        };
+        if (cursor == digits_at) {
+            json_utf8__error_at(source, error, 107, cursor);
+            $json_utf8_return 0;
+        } fi;
+    } fi;
+    if (cursor < source.len() && (source[cursor] == 0x65 || source[cursor] == 0x45)) {
+        unsupported := true;
+        cursor += 1;
+        if (cursor < source.len() &&
+            (source[cursor] == 0x2b || source[cursor] == 0x2d)) cursor += 1; fi;
+        let digits_at := cursor;
+        while (cursor < source.len()) {
+            let byte := source[cursor] ?? 0;
+            if (byte < 0x30 || byte > 0x39) break; fi;
+            cursor += 1;
+        };
+        if (cursor == digits_at) {
+            json_utf8__error_at(source, error, 107, cursor);
+            $json_utf8_return 0;
+        } fi;
+    } fi;
+    if (unsupported) {
+        json_utf8__error_at(source, error, 109, start);
+        $json_utf8_return 0;
+    } fi;
+    if (overflow) {
+        json_utf8__error_at(source, error, 108, start);
+        $json_utf8_return 0;
+    } fi;
+    if (negative) value else 0 - value fi
+} -> i64;
+
+fn json_utf8__append_node (
+    source : str alias,
+    var document : JsonUtf8Document alias,
+    var error : JsonUtf8Error alias,
+    limits : JsonUtf8Limits alias,
+    kind : u8,
+    scalar : i64,
+    text : str alias,
+    children : i64 array alias,
+    keys : str array alias,
+    at : i64
+) {
+    if (! json_utf8__aligned(document)) {
+        json_utf8__error_at(source, error, 300, at);
+        $json_utf8_return -1;
+    } fi;
+    if (document.kinds.len() >= limits.max_nodes) {
+        json_utf8__error_at(source, error, 203, at);
+        $json_utf8_return -1;
+    } fi;
+    if (children.len() != keys.len() || document.children.len() > limits.max_edges ||
+        children.len() > limits.max_edges - document.children.len()) {
+        json_utf8__error_at(source, error, 205, at);
+        $json_utf8_return -1;
+    } fi;
+    let node := document.kinds.len();
+    document.kinds.push(kind);
+    document.scalars.push(scalar);
+    document.texts.push(text);
+    document.child_starts.push(document.children.len());
+    document.child_counts.push(children.len());
+    nfor (i, 0, children.len()) {
+        document.children.push(children[i] ?? -1);
+        document.keys.push(keys[i] ?? "");
+    };
+    node
+} -> i64;
+
+fn json_utf8__parse_value (
+    source : str alias,
+    var cursor : i64 alias,
+    var document : JsonUtf8Document alias,
+    var error : JsonUtf8Error alias,
+    limits : JsonUtf8Limits alias,
+    depth : i64
+) {
+    json_utf8__skip_whitespace(source, cursor);
+    if (cursor >= source.len()) {
+        json_utf8__error_at(source, error, 101, cursor);
+        $json_utf8_return -1;
+    } fi;
+    let at := cursor;
+    let byte := source[cursor] ?? 0;
+    var empty_text := "";
+    var no_children : i64 array := new i64 array(0, 0);
+    var no_keys : str array := new str array(0, "");
+
+    if (byte == 0x6e) {
+        if (! json_utf8__match_ascii(source, cursor, "null")) {
+            json_utf8__error_at(source, error, 102, cursor);
+            $json_utf8_return -1;
+        } fi;
+        cursor += 4;
+        $json_utf8_return json_utf8__append_node(
+            source, document, error, limits, 0, 0, empty_text, no_children, no_keys, at
+        );
+    } fi;
+    if (byte == 0x74 || byte == 0x66) {
+        var scalar := 0;
+        var length := 5;
+        var literal := "false";
+        if (byte == 0x74) {
+            scalar := 1;
+            length := 4;
+            literal := "true";
+        } fi;
+        if (! json_utf8__match_ascii(source, cursor, literal)) {
+            json_utf8__error_at(source, error, 102, cursor);
+            $json_utf8_return -1;
+        } fi;
+        cursor += length;
+        $json_utf8_return json_utf8__append_node(
+            source, document, error, limits, 1, scalar, empty_text, no_children, no_keys, at
+        );
+    } fi;
+    if (byte == 0x22) {
+        let text := json_utf8__parse_string(source, cursor, error, limits);
+        if (error.code != 0) $json_utf8_return -1; fi;
+        $json_utf8_return json_utf8__append_node(
+            source, document, error, limits, 3, 0, text, no_children, no_keys, at
+        );
+    } fi;
+    if (byte == 0x2d || (byte >= 0x30 && byte <= 0x39)) {
+        let number := json_utf8__parse_i64_number(source, cursor, error);
+        if (error.code != 0) $json_utf8_return -1; fi;
+        $json_utf8_return json_utf8__append_node(
+            source, document, error, limits, 2, number, empty_text, no_children, no_keys, at
+        );
+    } fi;
+    if (byte == 0x5b) {
+        if (depth >= limits.max_depth) {
+            json_utf8__error_at(source, error, 202, at);
+            $json_utf8_return -1;
+        } fi;
+        cursor += 1;
+        json_utf8__skip_whitespace(source, cursor);
+        var children : i64 array := new i64 array(0, 0);
+        var keys : str array := new str array(0, "");
+        if (cursor < source.len() && source[cursor] == 0x5d) {
+            cursor += 1;
+        } else {
+            var closed := false;
+            while (! closed) {
+                if (document.children.len() > limits.max_edges ||
+                    children.len() >= limits.max_edges - document.children.len()) {
+                    json_utf8__error_at(source, error, 205, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                let child := json_utf8__parse_value(
+                    source, cursor, document, error, limits, depth + 1
+                );
+                if (error.code != 0) $json_utf8_return -1; fi;
+                children.push(child);
+                keys.push("");
+                json_utf8__skip_whitespace(source, cursor);
+                if (cursor >= source.len()) {
+                    json_utf8__error_at(source, error, 101, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                let delimiter := source[cursor] ?? 0;
+                if (delimiter == 0x5d) {
+                    cursor += 1;
+                    closed := true;
+                } else {
+                    if (delimiter != 0x2c) {
+                        json_utf8__error_at(source, error, 102, cursor);
+                        $json_utf8_return -1;
+                    } fi;
+                    cursor += 1;
+                    json_utf8__skip_whitespace(source, cursor);
+                } fi;
+            };
+        } fi;
+        $json_utf8_return json_utf8__append_node(
+            source, document, error, limits, 4, 0, empty_text, children, keys, at
+        );
+    } fi;
+    if (byte == 0x7b) {
+        if (depth >= limits.max_depth) {
+            json_utf8__error_at(source, error, 202, at);
+            $json_utf8_return -1;
+        } fi;
+        cursor += 1;
+        json_utf8__skip_whitespace(source, cursor);
+        var children : i64 array := new i64 array(0, 0);
+        var keys : str array := new str array(0, "");
+        if (cursor < source.len() && source[cursor] == 0x7d) {
+            cursor += 1;
+        } else {
+            var closed := false;
+            while (! closed) {
+                if (cursor >= source.len()) {
+                    json_utf8__error_at(source, error, 101, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                if (source[cursor] != 0x22) {
+                    json_utf8__error_at(source, error, 102, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                let key_at := cursor;
+                let key := json_utf8__parse_string(source, cursor, error, limits);
+                if (error.code != 0) $json_utf8_return -1; fi;
+                nfor (i, 0, keys.len()) {
+                    let old := keys[i] ?? "";
+                    if (json_utf8__bytes_equal(old, key)) {
+                        json_utf8__error_at(source, error, 110, key_at);
+                        $json_utf8_return -1;
+                    } fi;
+                };
+                json_utf8__skip_whitespace(source, cursor);
+                if (cursor >= source.len()) {
+                    json_utf8__error_at(source, error, 101, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                if (source[cursor] != 0x3a) {
+                    json_utf8__error_at(source, error, 102, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                cursor += 1;
+                let child := json_utf8__parse_value(
+                    source, cursor, document, error, limits, depth + 1
+                );
+                if (error.code != 0) $json_utf8_return -1; fi;
+                if (document.children.len() > limits.max_edges ||
+                    children.len() >= limits.max_edges - document.children.len()) {
+                    json_utf8__error_at(source, error, 205, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                children.push(child);
+                keys.push(key);
+                json_utf8__skip_whitespace(source, cursor);
+                if (cursor >= source.len()) {
+                    json_utf8__error_at(source, error, 101, cursor);
+                    $json_utf8_return -1;
+                } fi;
+                let delimiter := source[cursor] ?? 0;
+                if (delimiter == 0x7d) {
+                    cursor += 1;
+                    closed := true;
+                } else {
+                    if (delimiter != 0x2c) {
+                        json_utf8__error_at(source, error, 102, cursor);
+                        $json_utf8_return -1;
+                    } fi;
+                    cursor += 1;
+                    json_utf8__skip_whitespace(source, cursor);
+                } fi;
+            };
+        } fi;
+        $json_utf8_return json_utf8__append_node(
+            source, document, error, limits, 5, 0, empty_text, children, keys, at
+        );
+    } fi;
+    json_utf8__error_at(source, error, 102, cursor);
+    -1
+} -> i64;
+
+fn json_utf8_parse (source : str alias, limits : JsonUtf8Limits alias) {
+    var document := json_utf8_document_new();
+    var error := json_utf8_error_none();
+    if (! json_utf8__limits_valid(limits)) {
+        json_utf8__error_at(source, error, 200, 0);
+    } elif (source.len() > limits.max_bytes) {
+        json_utf8__error_at(source, error, 201, limits.max_bytes);
+    } else {
+        let valid_prefix := json_utf8__utf8_valid_prefix(source);
+        if (valid_prefix != source.len()) {
+            json_utf8__error_at(source, error, 100, valid_prefix);
+        } fi;
+    } fi;
+    var cursor := 0;
+    var root := -1;
+    if (error.code == 0) {
+        root := json_utf8__parse_value(source, cursor, document, error, limits, 0);
+    } fi;
+    if (error.code == 0) {
+        json_utf8__skip_whitespace(source, cursor);
+        if (cursor != source.len()) json_utf8__error_at(source, error, 103, cursor); fi;
+    } fi;
+    if (error.code == 0) {
+        new JsonUtf8ParseResult(ok := true, document := document, root := root, error := error)
+    } else {
+        var empty := json_utf8_document_new();
+        new JsonUtf8ParseResult(ok := false, document := empty, root := -1, error := error)
+    } fi
+} -> JsonUtf8ParseResult;
+
+fn json_utf8_kind (document : JsonUtf8Document alias, node : i64) {
+    if (node < 0 || node >= document.kinds.len()) $json_utf8_return; fi;
+    document.kinds[node]
+} -> u8;
+
+fn json_utf8_boolean (document : JsonUtf8Document alias, node : i64) {
+    if ((json_utf8_kind(document, node) ?? 255) != 1) $json_utf8_return; fi;
+    (document.scalars[node] ?? 0) != 0
+} -> u1;
+
+fn json_utf8_number_i64 (document : JsonUtf8Document alias, node : i64) {
+    if ((json_utf8_kind(document, node) ?? 255) != 2) $json_utf8_return; fi;
+    document.scalars[node]
+} -> i64;
+
+fn json_utf8_string (document : JsonUtf8Document alias, node : i64) {
+    if ((json_utf8_kind(document, node) ?? 255) != 3) $json_utf8_return; fi;
+    document.texts[node]
+} -> str;
+
+fn json_utf8_size (document : JsonUtf8Document alias, node : i64) {
+    let kind := json_utf8_kind(document, node) ?? $json_utf8_return;
+    if (kind != 4 && kind != 5) $json_utf8_return; fi;
+    document.child_counts[node]
+} -> i64;
+
+fn json_utf8_child (document : JsonUtf8Document alias, node : i64, index : i64) {
+    let count := json_utf8_size(document, node) ?? $json_utf8_return;
+    if (index < 0 || index >= count) $json_utf8_return; fi;
+    let start := document.child_starts[node] ?? $json_utf8_return;
+    document.children[start + index]
+} -> i64;
+
+fn json_utf8_object_key (document : JsonUtf8Document alias, node : i64, index : i64) {
+    if ((json_utf8_kind(document, node) ?? 255) != 5) $json_utf8_return; fi;
+    let count := document.child_counts[node] ?? $json_utf8_return;
+    if (index < 0 || index >= count) $json_utf8_return; fi;
+    let start := document.child_starts[node] ?? $json_utf8_return;
+    document.keys[start + index]
+} -> str;
+
+fn json_utf8__builder_append (
+    var document : JsonUtf8Document alias,
+    limits : JsonUtf8Limits alias,
+    kind : u8,
+    scalar : i64,
+    text : str alias,
+    children : i64 array alias,
+    keys : str array alias
+) {
+    if (! json_utf8__limits_valid(limits) || ! json_utf8__aligned(document)) {
+        $json_utf8_return;
+    } fi;
+    var source := "";
+    var error := json_utf8_error_none();
+    let node := json_utf8__append_node(
+        source, document, error, limits, kind, scalar, text, children, keys, -1
+    );
+    if (error.code != 0) $json_utf8_return; fi;
+    node
+} -> i64;
+
+fn json_utf8_add_null (
+    var document : JsonUtf8Document alias,
+    limits : JsonUtf8Limits alias
+) {
+    var text := "";
+    var children : i64 array := new i64 array(0, 0);
+    var keys : str array := new str array(0, "");
+    json_utf8__builder_append(document, limits, 0, 0, text, children, keys)
+} -> i64;
+
+fn json_utf8_add_boolean (
+    var document : JsonUtf8Document alias,
+    value : u1,
+    limits : JsonUtf8Limits alias
+) {
+    var text := "";
+    var children : i64 array := new i64 array(0, 0);
+    var keys : str array := new str array(0, "");
+    let scalar : i64 := if (value) 1 else 0 fi;
+    json_utf8__builder_append(document, limits, 1, scalar, text, children, keys)
+} -> i64;
+
+fn json_utf8_add_number_i64 (
+    var document : JsonUtf8Document alias,
+    value : i64,
+    limits : JsonUtf8Limits alias
+) {
+    var text := "";
+    var children : i64 array := new i64 array(0, 0);
+    var keys : str array := new str array(0, "");
+    json_utf8__builder_append(document, limits, 2, value, text, children, keys)
+} -> i64;
+
+fn json_utf8_add_string (
+    var document : JsonUtf8Document alias,
+    text : str alias,
+    limits : JsonUtf8Limits alias
+) {
+    if (! str_utf8_valid(text) || text.len() > limits.max_string_bytes) {
+        $json_utf8_return;
+    } fi;
+    var children : i64 array := new i64 array(0, 0);
+    var keys : str array := new str array(0, "");
+    json_utf8__builder_append(document, limits, 3, 0, text, children, keys)
+} -> i64;
+
+fn json_utf8_add_array (
+    var document : JsonUtf8Document alias,
+    children : i64 array alias,
+    limits : JsonUtf8Limits alias
+) {
+    if (! json_utf8__limits_valid(limits) || ! json_utf8__aligned(document)) {
+        $json_utf8_return;
+    } fi;
+    nfor (i, 0, children.len()) {
+        let child := children[i] ?? $json_utf8_return;
+        if (child < 0 || child >= document.kinds.len()) $json_utf8_return; fi;
+    };
+    var text := "";
+    var keys : str array := new str array(children.len(), "");
+    json_utf8__builder_append(document, limits, 4, 0, text, children, keys)
+} -> i64;
+
+fn json_utf8_add_object (
+    var document : JsonUtf8Document alias,
+    keys : str array alias,
+    children : i64 array alias,
+    limits : JsonUtf8Limits alias
+) {
+    if (! json_utf8__limits_valid(limits) || ! json_utf8__aligned(document) ||
+        keys.len() != children.len()) $json_utf8_return; fi;
+    nfor (i, 0, children.len()) {
+        let child := children[i] ?? $json_utf8_return;
+        let key := keys[i] ?? $json_utf8_return;
+        if (child < 0 || child >= document.kinds.len() ||
+            key.len() > limits.max_string_bytes || ! str_utf8_valid(key)) {
+            $json_utf8_return;
+        } fi;
+        nfor (j, 0, i) {
+            let previous := keys[j] ?? $json_utf8_return;
+            if (json_utf8__bytes_equal(previous, key)) $json_utf8_return; fi;
+        };
+    };
+    var text := "";
+    json_utf8__builder_append(document, limits, 5, 0, text, children, keys)
+} -> i64;
+
+fn json_utf8__validate_document (
+    document : JsonUtf8Document alias,
+    root : i64,
+    limits : JsonUtf8Limits alias,
+    var error : JsonUtf8Error alias
+) {
+    if (! json_utf8__limits_valid(limits)) {
+        json_utf8__output_error(error, 200, -1);
+        $json_utf8_return false;
+    } fi;
+    if (! json_utf8__aligned(document) || root < 0 || root >= document.kinds.len()) {
+        json_utf8__output_error(error, 300, root);
+        $json_utf8_return false;
+    } fi;
+    if (document.kinds.len() > limits.max_nodes) {
+        json_utf8__output_error(error, 203, document.kinds.len());
+        $json_utf8_return false;
+    } fi;
+    if (document.children.len() > limits.max_edges) {
+        json_utf8__output_error(error, 205, document.children.len());
+        $json_utf8_return false;
+    } fi;
+    var expected_edge := 0;
+    nfor (node, 0, document.kinds.len()) {
+        let kind := document.kinds[node] ?? 255;
+        let scalar := document.scalars[node] ?? 0;
+        let text := document.texts[node] ?? "";
+        let start := document.child_starts[node] ?? -1;
+        let count := document.child_counts[node] ?? -1;
+        if (kind > 5 || start != expected_edge || count < 0 ||
+            start > document.children.len() || count > document.children.len() - start) {
+            json_utf8__output_error(error, 300, node);
+            $json_utf8_return false;
+        } fi;
+        if (kind <= 3 && count != 0) {
+            json_utf8__output_error(error, 300, node);
+            $json_utf8_return false;
+        } fi;
+        if (kind == 1 && scalar != 0 && scalar != 1) {
+            json_utf8__output_error(error, 300, node);
+            $json_utf8_return false;
+        } fi;
+        if (kind != 1 && kind != 2 && scalar != 0) {
+            json_utf8__output_error(error, 300, node);
+            $json_utf8_return false;
+        } fi;
+        if (kind == 3) {
+            if (text.len() > limits.max_string_bytes || ! str_utf8_valid(text)) {
+                json_utf8__output_error(error, 300, node);
+                $json_utf8_return false;
+            } fi;
+        } elif (text.len() != 0) {
+            json_utf8__output_error(error, 300, node);
+            $json_utf8_return false;
+        } fi;
+        nfor (edge, start, count) {
+            let child := document.children[edge] ?? -1;
+            let key := document.keys[edge] ?? "";
+            if (child < 0 || child >= node) {
+                json_utf8__output_error(error, 300, node);
+                $json_utf8_return false;
+            } fi;
+            if (kind == 4) {
+                if (key.len() != 0) {
+                    json_utf8__output_error(error, 300, node);
+                    $json_utf8_return false;
+                } fi;
+            } elif (kind == 5) {
+                if (key.len() > limits.max_string_bytes || ! str_utf8_valid(key)) {
+                    json_utf8__output_error(error, 300, node);
+                    $json_utf8_return false;
+                } fi;
+                nfor (other, start, edge - start) {
+                    let previous := document.keys[other] ?? "";
+                    if (json_utf8__bytes_equal(previous, key)) {
+                        json_utf8__output_error(error, 300, node);
+                        $json_utf8_return false;
+                    } fi;
+                };
+            } else {
+                json_utf8__output_error(error, 300, node);
+                $json_utf8_return false;
+            } fi;
+        };
+        expected_edge += count;
+    };
+    if (expected_edge != document.children.len()) {
+        json_utf8__output_error(error, 300, root);
+        $json_utf8_return false;
+    } fi;
+    true
+} -> u1;
+
+fn json_utf8__append_output_byte (
+    var output : str alias,
+    byte : u8,
+    limits : JsonUtf8Limits alias,
+    var error : JsonUtf8Error alias
+) {
+    if (output.len() >= limits.max_bytes) {
+        json_utf8__output_error(error, 301, output.len());
+        $json_utf8_return false;
+    } fi;
+    output.push(byte);
+    true
+} -> u1;
+
+fn json_utf8__append_output_ascii (
+    var output : str alias,
+    literal : str,
+    limits : JsonUtf8Limits alias,
+    var error : JsonUtf8Error alias
+) {
+    nfor (i, 0, literal.len()) {
+        json_utf8__append_output_byte(output, literal[i] ?? 0, limits, error);
+        if (error.code != 0) $json_utf8_return false; fi;
+    };
+    true
+} -> u1;
+
+fn json_utf8__hex_ascii (digit : i64) {
+    if (digit < 10) ((0x30 -> i64) + digit) -> u8
+    else ((0x61 -> i64) + digit - 10) -> u8 fi
+} -> u8;
+
+fn json_utf8__serialize_string (
+    source : str alias,
+    var output : str alias,
+    limits : JsonUtf8Limits alias,
+    var error : JsonUtf8Error alias
+) {
+    json_utf8__append_output_byte(output, 0x22, limits, error);
+    if (error.code != 0) $json_utf8_return false; fi;
+    nfor (i, 0, source.len()) {
+        let byte := source[i] ?? 0;
+        var escaped := -1;
+        if (byte == 0x22) escaped := 0x22;
+        elif (byte == 0x5c) escaped := 0x5c;
+        elif (byte == 0x08) escaped := 0x62;
+        elif (byte == 0x0c) escaped := 0x66;
+        elif (byte == 0x0a) escaped := 0x6e;
+        elif (byte == 0x0d) escaped := 0x72;
+        elif (byte == 0x09) escaped := 0x74;
+        fi;
+        if (escaped >= 0) {
+            json_utf8__append_output_byte(output, 0x5c, limits, error);
+            json_utf8__append_output_byte(output, escaped -> u8, limits, error);
+        } elif (byte < 0x20) {
+            json_utf8__append_output_byte(output, 0x5c, limits, error);
+            json_utf8__append_output_byte(output, 0x75, limits, error);
+            json_utf8__append_output_byte(output, 0x30, limits, error);
+            json_utf8__append_output_byte(output, 0x30, limits, error);
+            json_utf8__append_output_byte(
+                output, json_utf8__hex_ascii((byte >> 4) -> i64), limits, error
+            );
+            json_utf8__append_output_byte(
+                output, json_utf8__hex_ascii((byte & 0x0f) -> i64), limits, error
+            );
+        } else {
+            json_utf8__append_output_byte(output, byte, limits, error);
+        } fi;
+        if (error.code != 0) $json_utf8_return false; fi;
+    };
+    json_utf8__append_output_byte(output, 0x22, limits, error);
+    error.code == 0
+} -> u1;
+
+fn json_utf8__append_i64 (
+    var output : str alias,
+    value : i64,
+    var scratch : u8 array alias,
+    limits : JsonUtf8Limits alias,
+    var error : JsonUtf8Error alias
+) {
+    if (value == 0) {
+        json_utf8__append_output_byte(output, 0x30, limits, error);
+        $json_utf8_return error.code == 0;
+    } fi;
+    if (value < 0) {
+        json_utf8__append_output_byte(output, 0x2d, limits, error);
+        if (error.code != 0) $json_utf8_return false; fi;
+    } fi;
+    var remaining := if (value > 0) 0 - value else value fi;
+    var digits := 0;
+    while (remaining < 0) {
+        let digit := (0 - (remaining mod 10)) mod 10;
+        scratch[digits] := 0x30 + (digit -> u8);
+        digits += 1;
+        remaining := (remaining + digit) / 10;
+    };
+    while (digits > 0) {
+        digits -= 1;
+        json_utf8__append_output_byte(output, scratch[digits] ?? 0, limits, error);
+        if (error.code != 0) $json_utf8_return false; fi;
+    };
+    true
+} -> u1;
+
+fn json_utf8__serialize_node (
+    document : JsonUtf8Document alias,
+    node : i64,
+    var output : str alias,
+    var scratch : u8 array alias,
+    limits : JsonUtf8Limits alias,
+    var error : JsonUtf8Error alias,
+    depth : i64,
+    var visits : i64 alias
+) {
+    if (visits >= limits.max_nodes) {
+        json_utf8__output_error(error, 203, node);
+        $json_utf8_return false;
+    } fi;
+    visits += 1;
+    let kind := document.kinds[node] ?? 255;
+    if ((kind == 4 || kind == 5) && depth >= limits.max_depth) {
+        json_utf8__output_error(error, 202, node);
+        $json_utf8_return false;
+    } fi;
+    if (kind == 0) {
+        json_utf8__append_output_ascii(output, "null", limits, error);
+    } elif (kind == 1) {
+        if ((document.scalars[node] ?? 0) == 0) {
+            json_utf8__append_output_ascii(output, "false", limits, error);
+        } else {
+            json_utf8__append_output_ascii(output, "true", limits, error);
+        } fi;
+    } elif (kind == 2) {
+        json_utf8__append_i64(
+            output, document.scalars[node] ?? 0, scratch, limits, error
+        );
+    } elif (kind == 3) {
+        let text := document.texts[node] ?? "";
+        json_utf8__serialize_string(text, output, limits, error);
+    } elif (kind == 4 || kind == 5) {
+        let open : u8 := if (kind == 4) 0x5b else 0x7b fi;
+        let close : u8 := if (kind == 4) 0x5d else 0x7d fi;
+        json_utf8__append_output_byte(output, open, limits, error);
+        let start := document.child_starts[node] ?? 0;
+        let count := document.child_counts[node] ?? 0;
+        nfor (i, 0, count) {
+            if (i > 0) json_utf8__append_output_byte(output, 0x2c, limits, error); fi;
+            if (error.code != 0) $json_utf8_return false; fi;
+            let edge := start + i;
+            if (kind == 5) {
+                let key := document.keys[edge] ?? "";
+                json_utf8__serialize_string(key, output, limits, error);
+                json_utf8__append_output_byte(output, 0x3a, limits, error);
+                if (error.code != 0) $json_utf8_return false; fi;
+            } fi;
+            let child := document.children[edge] ?? -1;
+            json_utf8__serialize_node(
+                document, child, output, scratch, limits, error, depth + 1, visits
+            );
+            if (error.code != 0) $json_utf8_return false; fi;
+        };
+        json_utf8__append_output_byte(output, close, limits, error);
+    } else {
+        json_utf8__output_error(error, 300, node);
+    } fi;
+    error.code == 0
+} -> u1;
+
+fn json_utf8_serialize (
+    document : JsonUtf8Document alias,
+    root : i64,
+    limits : JsonUtf8Limits alias
+) {
+    var error := json_utf8_error_none();
+    var output := "";
+    if (json_utf8__validate_document(document, root, limits, error)) {
+        var scratch : u8 array := new u8 array(20, 0);
+        var visits := 0;
+        json_utf8__serialize_node(
+            document, root, output, scratch, limits, error, 0, visits
+        );
+    } fi;
+    if (error.code == 0) {
+        new JsonUtf8SerializeResult(ok := true, bytes := output, error := error)
+    } else {
+        var empty := "";
+        new JsonUtf8SerializeResult(ok := false, bytes := empty, error := error)
+    } fi
+} -> JsonUtf8SerializeResult;

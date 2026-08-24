@@ -5,7 +5,8 @@
 > [`modules-and-library.md`](modules-and-library.md)を変更するものでもない。
 
 - 調査・実測日: 2026-08-24〜2026-08-25
-- branch: `codex3/stdlib-bulk-io`
+- branch: `codex3/stdlib-json-jsonl`
+- integrated bulk I/O checkpoint: `codex3/stdlib-bulk-io` = `62498f1add42bf05f39385af09411ae3ebb728bd`
 - integrated Fenwick range checkpoint: `codex3/stdlib-fenwick-range` = `2012cb0a4bd41a098dad8aa8f7dbbd0d15098828`
 - integrated ordered multiset checkpoint: `codex3/stdlib-ordered-multiset` = `3e2eeef2202a4ede6394675bd8d8942cb9a0b0eb`
 - integrated sparse checkpoint: `codex3/stdlib-sparse-table` = `2ea12164647d232c2a451274f80439526db9c057`
@@ -277,6 +278,35 @@ STEEL nativeへ流し、5 passed、0 failed。既存single-token試験のreferen
 木約1.05倍、VM約1.12倍遅く、per-value allocation削減を速度保証とは扱わない。
 全release gateは797 passed、6 failed、1 ignoredで、失敗6件は4.3に列挙した未変更のnative baselineと同じ。
 
+### 4.8 P2第一checkpoint: UTF-8 JSON / JSON Lines
+
+PraTeX側から来た一般codec要件だけを入力にし、PraTeX固有schemaやfile capabilityを持たない二sourceを加えた。
+
+| source / 型 | 公開操作 | 表現・境界 |
+|---|---|---|
+| `codec/json_utf8.vaak` / `JsonUtf8Document` | parse、serialize、typed accessor、append-only builder | node/edge平行配列。UTF-8、順序保存、duplicate拒否、i64 number限定 |
+| `codec/jsonl_utf8.vaak` / `JsonlUtf8Reader` | feed、finish、next、buffered bytes、serialize line | 有界owned chunk。LF/CRLF/終端LFなし、record位置、terminal error |
+
+JSON documentを再帰structにせず、leafを先、containerを後に追加するflat DAGへした。builderのchild IDは親より
+小さく、serializerは全node/edgeのcanonical shape、UTF-8、key重複を出力前に検査する。object keyは入力・追加順を
+保ち、sortしない。parse失敗は空document、serialize失敗は空bytesだけを返すため、部分結果をcommitしない。
+
+numberは`i64::MIN..=i64::MAX`だけを値として持ち、`-0`を0へ正規化する。正しい小数・指数はunsupported、
+整数範囲外とnumber構文違反は別codeである。これによりf64丸め、任意精度、decimal表現を初版から暗黙に決めない。
+入力byte、container深さ、node、decoded string/key、edge、出力byteに独立budgetとstable codeを持たせた。
+
+JSONLはfeedしたchunkを完全なrecordになるまでUTF-8検査しないので、scalar、`\u` escape、numberの途中で分割できる。
+JSON errorのrecord内offset/line/columnに、0-based record番号、絶対record開始、絶対error位置を加える。空・空白行は
+skipせず固有errorにし、reader errorはterminalとする。record/総入力/未読bufferを別上限にし、file/socket/stdin、
+PraTeX build manifest schema、host capabilityをsourceへ入れていない。
+
+最初のreaderはrecordごとに残りsuffixを複製したが、512件で参照575.383 ms・VM203.288 ms、2048件でVM3.128 sに
+なった。同じfixtureでbuffer head＋間欠compactへ変えると512件が参照284.985 ms・VM73.284 ms、2048件VM272.645 ms
+になったため、毎record copy案は棄却した。raw値と再現commandは[`stdlib/BENCHMARK.md`](../../stdlib/BENCHMARK.md)
+に残す。さらに4,096-byte recordを16-byte chunkで伸ばすfixtureでは、毎chunkの改行再探索がVM 943.026 ms、
+scan cursor版が51.895 msだったため、探索済みprefixの再走査も棄却した。codec契約とerror code一覧は
+[`stdlib/README.md`](../../stdlib/README.md)を参照する。
+
 ## 5. flat graph checkpoint
 
 `stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
@@ -408,6 +438,8 @@ P1内では次の小checkpoint順にする。
 5. 完了: host名を増やさず、`read_n_into`が一つの関数frameからcaller-owned `i64 array`へ埋める。
    `format_range`は結果`str`と20-byte scratchを各一度だけ確保する。`str.reserve`、zero-copy host view、
    stdin/stdout runnerは未決のまま分ける。
+6. 完了: UTF-8 JSONをflat documentへparse/serializeし、JSONLを有界chunk readerへした。numberはi64限定、
+   error位置とbudget codeを型付きで返す。file capabilityとPraTeX固有schemaは別層に残す。
 
 P2のtrie/stringはUnicodeを暗黙に扱わない。最初のtrie候補はnode/edge/label/terminalをparallel arrayにした
 byte版で、遷移O(degree)のmutable基準と、build後にedgeをsortしてbinary searchするfrozen版を比較する。

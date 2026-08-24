@@ -1,7 +1,13 @@
-# Vaak文字列ライブラリ
+# pure Vaak任意選択ライブラリ
+
+Vaak本体の意味論や中核の無名標準ライブラリ（S-3）を増やさず、既存構文だけで
+書いたsource単位のライブラリである。Vaakにはまだmodule/import機構がないため、
+埋め込むhostが必要なsourceを依存順に利用者programへ前置きする。
+
+## 文字列
 
 `string.vaak`は、既存の`str`と配列操作だけで書いた任意選択のライブラリである。
-中核の無名標準ライブラリ（S-3）を変更せず、`str_*`自由関数として提供する。
+`str_*`自由関数として提供する。
 
 Vaakにはまだmodule/import機構がない。埋め込むホストは
 `vaak::stdlib::STRING`を利用者ソースの前へ置いてからparse/check/compileする。
@@ -21,7 +27,7 @@ let program = vaak::parser::parse(&source)?;
 動くVaak側の例は[`examples/文字列.vaak`](examples/文字列.vaak)にある。単独の
 プログラムではなく、`string.vaak`を前置きして使う利用者ソースである。
 
-## API
+### API
 
 入力本体は`alias`で受け、走査前の深い複製を避ける。needle、separator、
 replacementは値で受ける。これは小さい文字列を一度複製する代わりに、文字列
@@ -52,9 +58,9 @@ replacementは値で受ける。これは小さい文字列を一度複製する
 | `str_is_utf8_boundary(source, index)` | 妥当なUTF-8の符号位置境界か |
 | `str_slice_utf8(source, from, upto)` | UTF-8妥当性と両境界を検査してslice |
 
-## 端の契約
+### 端の契約
 
-### 空needle
+#### 空needle
 
 - `starts_with`、`ends_with`、`contains`は`true`。
 - `find`は`0`、`find_from`は`from`を返す。
@@ -62,7 +68,7 @@ replacementは値で受ける。これは小さい文字列を一度複製する
 - `split`の空separatorと`replace_all`の空oldは、零幅一致をどのように
   列挙するかを暗黙に決めないためparadox。
 
-### 添字と回数
+#### 添字と回数
 
 - 位置はすべてバイト添字。
 - `find_from`と`rfind_from`の`from`は`0..=source.len()`だけが有効。
@@ -74,7 +80,7 @@ replacementは値で受ける。これは小さい文字列を一度複製する
 - `repeat`の負回数はparadox。0回と空のsourceは空文字列。非空sourceでは
   `count * source.len()`を`i64`で表せなければ、周回を始める前にparadox。
 
-### UTF-8
+#### UTF-8
 
 `str`の表現と通常APIはバイト単位である。検索・分割・置換・大小変換は
 Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以上のバイトへ
@@ -84,7 +90,7 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 結果は不正なUTF-8になり得る。この費用と判断を隠さない。妥当性を保つ必要が
 あるときは`str_slice_utf8`を使う。この関数は入力全体を検査するためO(n)である。
 
-## 実装上の性質
+### 実装上の性質
 
 - 検索は素朴な照合で、最悪O(source × needle)。巨大な検索には将来、前処理済み
   matcherまたは外部WASMを使う余地がある。
@@ -95,6 +101,127 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 - `str_utf8_valid`は過長符号化、UTF-16 surrogate範囲、U+10FFFF超過を拒む。
 - 第一級callback、sum型、match構文は必要としない。
 - 参照実装、VM、STEEL nativeの同一ソース試験は`tests/string_library.rs`にある。
+
+## UTF-8 JSON / JSON Lines codec
+
+[`codec/json_utf8.vaak`](codec/json_utf8.vaak)はUTF-8 JSONをflat documentへparseし、
+compact JSONへserializeする。[`codec/jsonl_utf8.vaak`](codec/jsonl_utf8.vaak)は、その
+codecを有界chunk readerと一行writerで包む。どちらもfile、socket、標準host名を持たない。
+
+Rust hostは次の順でsourceを前置きする。
+
+```rust
+let source = format!(
+    "{}\n{}\n{}\n{}",
+    vaak::stdlib::STRING,
+    vaak::stdlib::JSON_UTF8,
+    vaak::stdlib::JSONL_UTF8,
+    app,
+);
+```
+
+単体JSONだけなら`STRING`、`JSON_UTF8`まででよい。parse/check/type-check/compileは連結後の
+sourceに対して一度行い、実行ごとにsourceを組み直さない。
+
+### JSON documentと公開API
+
+再帰型を要求しないため、`JsonUtf8Document`はnodeとedgeを平行配列へ追加順で保持する。
+kindはnull、boolean、i64 number、string、array、objectの6種で、array/objectは
+`children`の連続区間を参照する。object keyは対応するedgeの`keys`へ置く。
+
+| API | 契約 |
+|---|---|
+| `json_utf8_limits_default()` | 既定budgetを作る |
+| `json_utf8_parse(source, limits)` | 成功時にdocumentとroot、失敗時に空documentと`root == -1` |
+| `json_utf8_serialize(document, root, limits)` | compact JSON。失敗時の`bytes`は必ず空 |
+| `json_utf8_kind` / `boolean` / `number_i64` / `string` | kindが合うnodeだけ値を返す |
+| `json_utf8_size` / `child` / `object_key` | array/objectの順序付きedgeを読む |
+| `json_utf8_add_null` / `boolean` / `number_i64` / `string` | leafを末尾へ追加する |
+| `json_utf8_add_array` / `add_object` | 既存nodeだけをchildにしてcontainerを末尾へ追加する |
+
+builderのchild IDはcontainerより前に存在しなければならず、cycleを作れない。objectは入力順・
+追加順をそのままserializeし、keyをsortしない。duplicate keyはparserとbuilderの両方が拒否する。
+同じdocumentとrootからは同じbyte列を返す。
+
+JSON numberの初版表現は`i64`だけである。`-9223372036854775808..=9223372036854775807`を扱い、
+`-0`は`0`へ正規化する。構文として正しい小数・指数表記はcode 109（unsupported number）であり、
+丸めたり文字列へ暗黙変換したりしない。整数範囲外はcode 108、number構文違反はcode 107である。
+
+stringはRFC 8259のescapeをdecodeし、UTF-16 surrogate pairをUTF-8へ変換する。unpaired surrogate、
+不正UTF-8、raw control byteを拒否する。serializerはquote、backslashと既知controlを短いescapeへし、
+その他の`0x00..0x1f`を小文字hexの`\u00xx`へする。solidusと非ASCII UTF-8はそのまま出す。
+
+### JSON errorとbudget
+
+`JsonUtf8Error`の`offset`は0-based byte位置、`line`と`column`は1-basedであり、`column`も
+Unicode scalar数ではなくbyte数で数える。categoryは
+`code / 100`で、0が成功、1が入力・構文、2がbudget、3がdocument・出力を表す。
+
+| code | 意味 |
+|---:|---|
+| 100 | 不正UTF-8 |
+| 101 | 途中で入力終端 |
+| 102 | 予期しないtoken |
+| 103 | JSON値の後ろに非空白byte |
+| 104 | 不正escape / `\u` hex |
+| 105 | unpaired UTF-16 surrogate |
+| 106 | string内のraw control byte |
+| 107 | number構文違反 |
+| 108 | i64範囲外の整数 |
+| 109 | 正しいが初版表現外の小数・指数number |
+| 110 | duplicate object key |
+| 200 | 負のlimit |
+| 201 | 入力byte上限 |
+| 202 | container深さ上限 |
+| 203 | node上限 |
+| 204 | decoded string / key byte上限 |
+| 205 | edge上限 |
+| 300 | 不正なflat document |
+| 301 | serialize出力byte上限 |
+
+既定値は`max_bytes = 16 MiB`、`max_depth = 64`、`max_nodes = 1,048,576`、
+`max_string_bytes = 16 MiB`、`max_edges = 1,048,576`である。parseは一つでも失敗すれば
+途中nodeを公開せず、serializeも途中byte列を公開しない。
+
+### JSON Lines reader / writer
+
+`JsonlUtf8Reader`はowned byte buffer、次の0-based record番号、総入力byte数と終了・失敗状態を持つ。
+公開fieldはmodule privacy未完成によるもので、`jsonl_utf8_reader_new`で作り、codec関数だけで更新した
+stateを契約対象とする。壊れたstateはcode 403でterminal errorになる。
+
+| API | 契約 |
+|---|---|
+| `jsonl_utf8_reader_new()` | 独立した空reader |
+| `jsonl_utf8_feed(reader, chunk, limits)` | chunkを原子的に追加。UTF-8検査はまだ行わない |
+| `jsonl_utf8_finish(reader, limits)` | 入力終端を通知。冪等 |
+| `jsonl_utf8_next(reader, limits)` | NEED_MORE / VALUE / END / ERRORのいずれか |
+| `jsonl_utf8_buffered_bytes(reader)` | 消費済みprefixを除く未読byte数 |
+| `jsonl_utf8_serialize_line(document, root, limits)` | compact JSONの後ろへLFを一つだけ付ける |
+
+status値は`jsonl_utf8_status_need_more()`、`value()`、`end()`、`error()`で比較する。chunk境界は
+UTF-8 scalar、`\u` escape、numberの途中に置いてよい。LFとCRLFをrecord終端として受け、`finish`後の
+最終recordにはLFがなくてもよい。CRはCRLFの一部の時だけpayloadから外す。空またはJSON空白だけの行は
+JSONL固有errorであり、黙ってskipしない。
+
+errorは0-based `record`、絶対`record_start`、record内`offset`、`absolute_offset`を同時に持つ。
+JSON parser由来のcode/category/line/columnは保存する。一度ERRORになったreaderはterminalで、以後の
+`next`と`feed`は同じerrorを返す。`finish`後の`feed`もstate errorであり、追加byteをcommitしない。
+
+| code | JSONL固有の意味 |
+|---:|---|
+| 400 | 空・空白だけのrecord |
+| 401 | record payload byte上限 |
+| 402 | 全feedの総byte上限 |
+| 403 | finish後feedまたは不正reader state |
+| 404 | 未読buffer byte上限 |
+| 405 | 負のJSONL limitまたは不正な内包JSON limit |
+
+`JsonlUtf8Limits`はJSON limitに加え、既定でrecord 16 MiB、総入力1 GiB、未読buffer 32 MiBを
+上限にする。record上限はLFとCRLFのframing byteを除くpayload、総入力はframingを含む全chunk、
+buffer上限は消費済みprefixを除く未読byteを数える。readerはbuffer内headを進め、消費済みprefixが
+残り以上になった時だけcompactする。未完recordのdelimiter探索はscan cursorから再開するが、JSON parseと
+UTF-8検査はcomplete recordまで行わない。毎recordでsuffixを複製した案と、毎chunkで先頭から再探索した案は
+二次的に増加したため棄却し、測定値を[`BENCHMARK.md`](BENCHMARK.md)へ残した。
 # pure Vaak ライブラリ試作
 
 これは未実装のモジュール構文を先取りしない、ソース単位のライブラリ試作である。

@@ -210,3 +210,46 @@ bulk readはper-token frameを除き、木で約1.81倍、VMで約1.05倍速か�
 `reversed`配列を除き、結果strと固定scratchを各一度だけ確保するが、この標本では木で約1.05倍、VMで約1.12倍
 遅い。allocation回数を静的に減らすことと現backendで速いことは同じでない。token桁数、入力byte数、出力件数、
 separator、output capacity/reserve、host転送をpairedにし、単一規模から永続的な速度保証を作らない。
+
+## UTF-8 JSONL checkpoint
+
+2026-08-25、同じLinux x86_64環境で、一括chunkに入れた連続i64 JSON recordを最後まで読む
+`examples/bench_jsonl.rs`を実行した。parse、check、VM compileは計測外で、一度予熱後の5回または3回の
+medianである。最初の実装は、一件読むたびに未読suffix全体を新しい`str`へ複製した。対照実装はbuffer内の
+headだけを進め、消費済みprefixが残り以上になった時と、次のfeedが物理buffer上限へ当たる時だけcompactする。
+
+| records / input | engine | 毎record suffix copy（棄却） | head + 間欠compact（採用） | 比 |
+|---:|---|---:|---:|---:|
+| 512 / 1,938 bytes | 木を辿る実装 | 575.383 ms | **284.985 ms** | 2.02倍高速 |
+| 512 / 1,938 bytes | VM | 203.288 ms | **73.284 ms** | 2.77倍高速 |
+| 2,048 / 9,130 bytes | VM | 3.128 s | **272.645 ms** | 11.47倍高速 |
+
+再現commandは次のとおりである。
+
+```bash
+RECORDS=512 ROUNDS=5 ENGINE=both cargo run --release --locked --example bench_jsonl
+RECORDS=2048 ROUNDS=3 ENGINE=vm cargo run --release --locked --example bench_jsonl
+```
+
+record数を4倍にしたとき、棄却案のVM時間は約15.4倍へ増えた。入力byte数自体も約4.7倍だが、毎回残り全部を
+複製するため、record数と総byte数の積に近い費用を払う。採用案は同じ比較で約3.72倍であり、このfixtureでは
+suffix複製の二次的増加を除けた。絶対時間や小recordでの比を永続保証にはしないが、棄却案を再導入しないための
+結果として固定する。採用案も各record payloadとcompact時の残りをowned `str`へ複製するためzero-copyではない。
+viewやring bufferを追加する場合は、UTF-8分割、error offset、buffer上限、参照/VM一致を同じfixtureで再測定する。
+
+同じcheckpointで、4,096-byteのJSON string一件を16-byte chunkへ分け、各feed後に`next`を一度呼ぶ
+split-record fixtureも測った。最初のhead版は未完recordの改行探索を毎回`buffer_head`から再開していた。
+探索済み位置だけを`buffer_scan`へ保存し、JSON parseとUTF-8検査はcomplete recordまで遅延する版と比較した。
+
+| record / chunk | engine | 毎chunk先頭から再探索（棄却） | scan cursor（採用） | 比 |
+|---:|---|---:|---:|---:|
+| 4,096-byte JSON string / 16 bytes | VM | 943.026 ms | **51.895 ms** | 18.17倍高速 |
+
+```bash
+MODE=split RECORD_BYTES=4096 CHUNK_BYTES=16 ROUNDS=3 ENGINE=vm \
+  cargo run --release --locked --example bench_jsonl
+```
+
+scan cursorはdelimiter探索の内部位置であり、UTF-8 scalarやescapeがchunk途中にある時点で入力を受理したとは
+みなさない。完全なrecordになってから従来どおり全payloadをJSON parserへ渡す。したがってerror code/offsetと
+原子性は変えず、同じprefixの再走査だけを棄却した。この一標本からchunk size別の永続倍率は保証しない。
