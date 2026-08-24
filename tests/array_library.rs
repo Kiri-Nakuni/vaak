@@ -25,6 +25,7 @@ const SEGTREE: &str = include_str!("../stdlib/ds/segtree_i64.vaak");
 const LAZY_SEGTREE: &str = include_str!("../stdlib/ds/lazy_segtree_i64.vaak");
 const SPARSE_TABLE: &str = include_str!("../stdlib/ds/sparse_table_i64.vaak");
 const DISJOINT_SPARSE_TABLE: &str = include_str!("../stdlib/ds/disjoint_sparse_table_i64.vaak");
+const ORDERED_MULTISET: &str = include_str!("../stdlib/ds/ordered_multiset_i64.vaak");
 const ASCII_I64: &str = include_str!("../stdlib/io/ascii_i64.vaak");
 
 fn source(parts: &[&str], body: &str) -> String {
@@ -184,6 +185,11 @@ fn 各ソースは単独または明示した依存だけで前置きできる()
         "値 13",
     );
     both(
+        &[ORDERED_MULTISET],
+        "let keys := [3, 7]; var set := ordered_multiset_i64_new(keys) ?? new OrderedMultisetI64(keys := [], fenwick := [], total := 0); ordered_multiset_i64_insert(set, 7) ?? false; ordered_multiset_i64_kth(set, 0)",
+        "値 7",
+    );
+    both(
         &[ASCII_I64],
         r#"let input := "  -42 "; var at := 0; io_ascii_i64_read(input, at)"#,
         "値 -42",
@@ -269,6 +275,10 @@ fn 各ソースはsteelにも単独で前置きできる() {
             "let xs := [4, 2, 7]; let t := disjoint_sparse_sum_i64_from(xs) ?? new DisjointSparseSumI64(length := 0, levels := 0, data := []); disjoint_sparse_sum_i64_prod(t, 0, 3)",
         ),
         (
+            ORDERED_MULTISET,
+            "let keys := [3, 7]; var set := ordered_multiset_i64_new(keys) ?? new OrderedMultisetI64(keys := [], fenwick := [], total := 0); ordered_multiset_i64_insert(set, 7) ?? false; ordered_multiset_i64_kth(set, 0)",
+        ),
+        (
             ASCII_I64,
             r#"let input := "42"; var at := 0; io_ascii_i64_read(input, at)"#,
         ),
@@ -309,6 +319,7 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         LAZY_SEGTREE,
         SPARSE_TABLE,
         DISJOINT_SPARSE_TABLE,
+        ORDERED_MULTISET,
         ASCII_I64,
     ];
     both(&libraries, "42", "値 42");

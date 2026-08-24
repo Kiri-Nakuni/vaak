@@ -5,7 +5,8 @@
 > [`modules-and-library.md`](modules-and-library.md)を変更するものでもない。
 
 - 調査・実測日: 2026-08-24〜2026-08-25
-- branch: `codex3/stdlib-sparse-table`
+- branch: `codex3/stdlib-ordered-multiset`
+- integrated sparse checkpoint: `codex3/stdlib-sparse-table` = `2ea12164647d232c2a451274f80439526db9c057`
 - integrated ordering checkpoint: `codex3/stdlib-ordering` = `0f22c4899d2692fe785a8f0de8f8652bb8cc3006`
 - integrated structure checkpoint: `codex2/stdlib-heap-deque` = `4a31a5fb4810e67a37e82c658cfd913a0446c0e2`
 - integrated graph checkpoint: `codex2/stdlib-graph` = `e8c2f93aeddd6394ef77342543a7a09637de8057`
@@ -204,6 +205,28 @@ slice min/max・`wrapping_add` oracleへ照合する。2026-08-25のfocused gate
 `gcd`版は`i64::MIN`を含む非負化、符号、identityの契約を数値checkpointで先に定める。任意idempotent演算や
 monoid callback、更新可能なsparse tableはこのsourceから推測させず、generic/module所有者へ残す。
 
+### 4.5 P1第三checkpoint: compressed ordered multiset
+
+online balanced treeやgeneric比較を先取りせず、構築時にsorted uniqueなi64 universeを固定する一型を加えた。
+
+| source / 型 | build | mutation / query | 不正・空 | 追加領域 |
+|---|---:|---:|---|---:|
+| `ordered_multiset_i64.vaak` / `OrderedMultisetI64` | O(n) | insert、erase、count、rank、k-th O(log n)、len O(1) | universe外mutationと範囲外k-thはparadox、空eraseはfalse | O(n) |
+
+`count(value)`はuniverse外も0、`order_of_key(value)`は任意i64について未満の総個数を返す。`kth(index)`は
+0-basedで、重複を個数分だけ順位へ含める。mutation前にpoint/totalの非負・`i64::MAX`上限を検査するため、
+失敗はFenwick欄を部分更新しない。constructorは入力universeを複製し、重複・降順をparadoxへする。
+
+内部は`keys`、`fenwick`、`total`の三fieldで、`FenwickCountI64`と同じ非負count invariantとbit walkを使う。
+別named型を入れ子にした補助呼出は現行STEELの共通sourceにできなかったため、このsourceは暗黙依存を持たず
+flat fieldを直接扱う。core/STEELは変更せず、将来のmodule compositionやonline key構造のAPIを確定しない。
+
+`tests/ordered_multiset_i64.rs`は固定境界と280操作を独立Rust vector oracleへ照合し、reference / VM /
+STEEL nativeで5 passed、0 failed。inventoryは12 passed、0 failedで、単独前置きと全source名衝突も通った。
+`examples/bench_ordered_multiset.rs`は256-key、1024 insert、rank/k-th各2048件を線形count列とpairedにし、
+raw値を`stdlib/BENCHMARK.md`へ残した。
+全release gateは787 passed、6 failed、1 ignoredで、失敗6件は4.3に列挙した未変更のnative baselineと同じ。
+
 ## 5. flat graph checkpoint
 
 `stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
@@ -312,7 +335,7 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 | 順位 | まとまり | 具体的な順序 | 先に満たすgate |
 |---:|---|---|---|
 | P0 済 | 基準構造 | 通常/rollback/weighted DSU、通常/count Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 第三checkpointまでの差分試験とbench |
-| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress・sparse/disjoint済** → 圧縮済みordered multiset → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
+| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress・sparse/disjoint・圧縮済みordered multiset済** → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
 | P2 | byte string・trie・基礎数値 | Z/prefix/KMP → flat byte trie → Aho-Corasick/Manacher → gcd/extgcd/isqrt/sieve/factorization →安全なmod算術 | `str`はbyte列、i64中間幅、allocation測定 |
 | P3 | flat graph | CSR → BFS/DFS/topological sort → SCC → 2-SAT → Dijkstra → LCA/HLD | graph/resultをflat化、決定的tie-break |
 | P4 | 高級構造・flow | wavelet matrix、persistent/rollback構造、Li Chao、maxflow、min-cost flow | memory上限、再帰深さ、overflow、backend差 |
@@ -323,9 +346,9 @@ P1内では次の小checkpoint順にする。
 1. 完了: `array/i64`のinsertion/heap/merge sort、sorted unique、座標圧縮。
 2. 完了: `SparseMinI64` / `SparseMaxI64`のidempotent O(1) queryと、固定sum用disjoint sparse table。
    `gcd`版は`i64::MIN`の符号・identity契約を先に決めるため保留。
-3. sorted uniqueなuniverseを構築時に受ける`OrderedMultisetI64`候補を、Fenwickのprefix countとk-th探索で作る。
-   `insert`、一個erase、count、`order_of_key`、k-thを対象にし、universe外keyと空eraseのstatus/paradoxを
-   試験で決める。任意keyをonline追加するbalanced treeや乱数priorityは別候補とする。
+3. 完了: sorted uniqueなuniverseを構築時に受ける`OrderedMultisetI64`を、flat Fenwickのprefix countと
+   k-th探索で作った。universe外mutationはparadox、空eraseはfalse、未知keyのcount/rankは通常queryとした。
+   任意keyをonline追加するbalanced treeや乱数priorityは別候補とする。
 4. rollback DSU、weighted/potential DSU、prefix countのlower-boundは第三checkpointで別sourceとして完了。
    Fenwickのrange-add/point-getとrange-add/range-sumは、折返し演算と必要配列数を明記して次の派生候補にする。
 5. I/Oはhost名を増やさず、現行scannerの一token一時文字列0を保つ。`read_n_into`候補で一つの関数frameから
@@ -348,6 +371,7 @@ divisor列挙、pow/mod inverse/CRT/floor sum、固定modulus組合せの順を�
 - 実装済み: insertion/heap/merge sort、sorted unique、coordinate compression
 - 候補: partition/select、permutation
 - DSU、Fenwick、min/max heap、deque、bitset
+- 実装済み: 圧縮済みi64 ordered multiset
 - gcd/lcm、pow_mod、inv_mod、crt、floor_sum
 - byte列のZ algorithm、prefix function
 - ASCII i64 scanner/formatter、pure output builder
@@ -453,7 +477,7 @@ licenseは`docs/LICENSING.md`どおりMITである。
 8. modintのmodulus identityとconvolutionのwidening数値設計。
 9. accelerated backendとpure reference sourceの選択・feature query。
 10. ACL風のall-in-one facadeを持つか。未使用module除去と再export決定前には置かない。
-11. ordered multisetを圧縮済みuniverseだけにするか、online arbitrary key構造まで標準範囲にするか。
+11. 圧縮済みordered multiset候補へonline arbitrary key構造も併設するか。今回の固定universe契約は変更しない。
 12. byte trieのmutable/frozen表現、alphabet固定版の数、public field不変条件をどこまで保証するか。
 13. bulk scanner/output scratchの所有者と大きさ。host streaming、reserve、標準stdin/stdoutとは別に決める。
 14. SCCの決定的なgroup番号まで永続APIにするか、同一成分partitionと位相方向だけを保証するか。

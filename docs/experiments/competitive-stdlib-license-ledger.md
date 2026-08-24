@@ -4,7 +4,7 @@
 > 外部実装をvendorする許可にもならない。
 
 - 調査日: 2026-08-24〜2026-08-25
-- 対象branch: `codex3/stdlib-sparse-table`（ordering / structure / graph checkpointを統合）
+- 対象branch: `codex3/stdlib-ordered-multiset`（ordering / sparse / structure / graph checkpointを統合）
 - Vaak本体のlicense: [`docs/LICENSING.md`](../LICENSING.md)のとおりMIT
 - 規律: 公式仕様から契約・分類・計算量だけを調べ、source、test、解説文を転写・翻訳しない
 
@@ -55,6 +55,17 @@ min/maxの重なる2冪区間と、sumの中央suffix/prefixは既知の分類�
 test vectorを入力にしていない。Rust側は結果oracleだけで、Vaakのflat layout、API、empty/paradox、
 capacity overflow、公開欄検査はこのrepository内の既存stdlib規律から定めた。ACLにsparse table APIがあるとは
 記録せず、ACL-1のsource/testも参照していない。
+
+## compressed ordered multiset checkpointで独立に定義したもの
+
+| Vaak source | 外部実装の入力 | 独立性を固定する試験 |
+|---|---|---|
+| `ds/ordered_multiset_i64.vaak` | なし。ACL-FENWICK-1を通常Fenwickの分類・計算量比較にだけ使用 | sorted uniqueなRust `Vec<i64>`と非負count列をoracleにし、280操作のcount/rank/k-thを照合 |
+
+外部repository、ordered multiset実装、競プロblog、snippet、test vectorは入力にしていない。Vaak側の固定universe、
+未知keyの照会とmutationの区別、空eraseのstatus、0-based k-th、overflow時の原子性は独立に定義した。
+Rust vector modelは`tests/ordered_multiset_i64.rs`の結果oracleだけに使い、Vaak sourceへ転写していない。
+`FenwickCountI64`とは公開型を合成せず、同じ非負count不変条件を単独source内のflat fieldへ独立に適用した。
 
 ## 今後の追記規則
 

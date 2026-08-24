@@ -127,6 +127,7 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/lazy_segtree_i64.vaak` | `RangeAddSumSegtreeI64`, `range_add_sum_segtree_i64_*` | i64折返し加算上のrange add/range sum。build O(n)、更新・query O(log n) |
 | `ds/sparse_table_i64.vaak` | `SparseMinI64`, `SparseMaxI64`, `sparse_min_i64_*`, `sparse_max_i64_*` | immutableな固定min/max。build O(n log n)、半開区間query O(1) |
 | `ds/disjoint_sparse_table_i64.vaak` | `DisjointSparseSumI64`, `disjoint_sparse_sum_i64_*` | immutableなi64折返し和。build O(n log n)、半開区間query O(1) |
+| `ds/ordered_multiset_i64.vaak` | `OrderedMultisetI64`, `ordered_multiset_i64_*` | sorted unique universe固定。重複、順位、0-based k-thをO(log n)で扱う |
 | `graph/csr_scc_two_sat_i64.vaak` | `CsrBuilderI64`, `CsrI64`, `SccResultI64`, `BfsResultI64`, `TopologicalResultI64`, `TwoSatI64` | 安定順序CSR、再帰なしSCC/BFS、辞書順topological、2-SAT。添字はi64固定 |
 | `io/ascii_i64.vaak` | `io_ascii_i64_*` | hostが一括で渡す`str`の整数scannerと返却用`str` formatter。stdin/stdout自体は持たない |
 
@@ -190,6 +191,16 @@ min/maxを重なる二区間からO(1)で返す。`DisjointSparseSumI64`は各bl
 sparse tableはstatic query用で、point/range更新後も使える構造を装わない。公開欄を直接変更した値は
 契約対象外だが、`*_is_valid`はflat shapeと構築済み集約をO(n log n)で再検査できる。generic idempotent演算や
 任意monoid callbackを先取りせず、min/max/sumの固定三演算だけを別APIにした。
+
+`OrderedMultisetI64`は構築時のsorted uniqueな`keys`を複製し、未知keyをonline追加しない。`insert`、
+`erase_one`、`count`、`contains`、`order_of_key`、0-based `kth`はO(log n)、`len`はO(1)である。任意keyの
+`count`は0、`order_of_key`はそのkey未満の総個数を返す。universe外のmutationと範囲外`kth`はparadox、
+universe内で個数0の`erase_one`は`false`であり、失敗時に個数を変えない。
+
+内部は`keys`、非負count用の`fenwick`、`total`を一つの型に持つ。`FenwickCountI64`と同じ非負・上限の
+不変条件とbit walkを使うが、別named型を入れ子にせず単独sourceとしてSTEELまで前置きできる形にした。
+公開欄を直接変更した値は契約対象外で、`ordered_multiset_i64_is_valid`がkey順・shape・各count・totalを
+O(n log n)で検査する。online balanced tree、乱数priority、generic key比較はこのAPIから推測させない。
 
 `io/ascii_i64.vaak`はS-4のhost境界を変えない。hostがstdin等を一括で`str`として渡し、Vaakは
 cursorを明示して読む。出力は`str`へ追記し、最上位の値としてhostへ返す。標準host名、streaming、

@@ -1,0 +1,212 @@
+%{ 構築時にsorted unique universeを固定するi64 ordered multiset。
+
+   insert、erase_one、count、order_of_key、kthはO(log n)。
+   universe外のmutationと範囲外kthはparadox。空eraseはfalse。
+   任意keyのcountは0、order_of_keyはそのkey未満の要素数を返す。 }%
+
+flow $ordered_multiset_i64_return = $repeat(break, getdepth());
+
+struct OrderedMultisetI64 {
+    var keys : i64 array;
+    var fenwick : i64 array;
+    var total : i64;
+};
+
+fn ordered_multiset_i64_new (universe : i64 array alias) {
+    var i := 1;
+    while (i < universe.len()) {
+        if ((universe[i - 1] ?? $ordered_multiset_i64_return) >=
+            (universe[i] ?? $ordered_multiset_i64_return)) {
+            $ordered_multiset_i64_return;
+        } fi;
+        i += 1;
+    };
+    var keys := universe;
+    new OrderedMultisetI64(
+        keys := keys,
+        fenwick := new i64 array(keys.len(), 0),
+        total := 0
+    )
+} -> OrderedMultisetI64;
+
+fn ordered_multiset_i64__lower_bound (set : OrderedMultisetI64 alias,
+                                      value : i64) {
+    var lo := 0;
+    var hi := set.keys.len();
+    while (lo < hi) {
+        let middle := lo + (hi - lo) / 2;
+        if ((set.keys[middle] ?? $ordered_multiset_i64_return) < value) {
+            lo := middle + 1;
+        } else {
+            hi := middle;
+        } fi;
+    };
+    lo
+} -> i64;
+
+fn ordered_multiset_i64__rank (set : OrderedMultisetI64 alias,
+                               value : i64) {
+    let rank := ordered_multiset_i64__lower_bound(set, value) ??
+        $ordered_multiset_i64_return;
+    if (rank >= set.keys.len()) $ordered_multiset_i64_return; fi;
+    if ((set.keys[rank] ?? $ordered_multiset_i64_return) != value) {
+        $ordered_multiset_i64_return;
+    } fi;
+    rank
+} -> i64;
+
+fn ordered_multiset_i64__prefix_sum (set : OrderedMultisetI64 alias,
+                                     last : i64) {
+    if (last < 0 || last > set.fenwick.len()) $ordered_multiset_i64_return; fi;
+    var sum := 0;
+    var i := last;
+    while (i > 0) {
+        sum += set.fenwick[i - 1] ?? $ordered_multiset_i64_return;
+        i -= i & (0 - i);
+    };
+    sum
+} -> i64;
+
+fn ordered_multiset_i64__get (set : OrderedMultisetI64 alias,
+                              rank : i64) {
+    if (rank < 0 || rank >= set.fenwick.len()) $ordered_multiset_i64_return; fi;
+    let right := ordered_multiset_i64__prefix_sum(set, rank + 1) ??
+        $ordered_multiset_i64_return;
+    let left := ordered_multiset_i64__prefix_sum(set, rank) ??
+        $ordered_multiset_i64_return;
+    right - left
+} -> i64;
+
+fn ordered_multiset_i64__select (set : OrderedMultisetI64 alias,
+                                 target : i64) {
+    if (target <= 0 || target > set.total) $ordered_multiset_i64_return; fi;
+    var step := 1;
+    while (step <= set.fenwick.len() / 2) { step += step; };
+    var rank := 0;
+    var accumulated := 0;
+    while (step > 0) {
+        if (step <= set.fenwick.len() - rank) {
+            let next := rank + step;
+            let candidate := accumulated +
+                (set.fenwick[next - 1] ?? $ordered_multiset_i64_return);
+            if (candidate < target) {
+                rank := next;
+                accumulated := candidate;
+            } fi;
+        } fi;
+        step /= 2;
+    };
+    rank
+} -> i64;
+
+fn ordered_multiset_i64__add (var set : OrderedMultisetI64 alias,
+                              rank : i64,
+                              delta : i64) {
+    if (rank < 0 || rank >= set.fenwick.len()) $ordered_multiset_i64_return; fi;
+    let current := ordered_multiset_i64__get(set, rank) ??
+        $ordered_multiset_i64_return;
+    if (delta >= 0) {
+        if (set.total > 9223372036854775807 - delta) {
+            $ordered_multiset_i64_return;
+        } fi;
+    } else {
+        if (current + delta < 0) $ordered_multiset_i64_return; fi;
+    } fi;
+    var i := rank + 1;
+    while (i <= set.fenwick.len()) {
+        set.fenwick[i - 1] += delta;
+        i += i & (0 - i);
+    };
+    set.total += delta;
+    true
+} -> u1;
+
+fn ordered_multiset_i64_universe_len (set : OrderedMultisetI64 alias) {
+    set.keys.len()
+} -> i64;
+
+fn ordered_multiset_i64_len (set : OrderedMultisetI64 alias) {
+    set.total
+} -> i64;
+
+fn ordered_multiset_i64_is_empty (set : OrderedMultisetI64 alias) {
+    set.total == 0
+} -> u1;
+
+fn ordered_multiset_i64_count (set : OrderedMultisetI64 alias,
+                               value : i64) {
+    let rank := ordered_multiset_i64__lower_bound(set, value) ??
+        $ordered_multiset_i64_return;
+    if (rank >= set.keys.len()) $ordered_multiset_i64_return 0; fi;
+    if ((set.keys[rank] ?? $ordered_multiset_i64_return) != value) {
+        $ordered_multiset_i64_return 0;
+    } fi;
+    ordered_multiset_i64__get(set, rank)
+} -> i64;
+
+fn ordered_multiset_i64_contains (set : OrderedMultisetI64 alias,
+                                  value : i64) {
+    (ordered_multiset_i64_count(set, value) ?? $ordered_multiset_i64_return) > 0
+} -> u1;
+
+fn ordered_multiset_i64_order_of_key (set : OrderedMultisetI64 alias,
+                                      value : i64) {
+    let rank := ordered_multiset_i64__lower_bound(set, value) ??
+        $ordered_multiset_i64_return;
+    ordered_multiset_i64__prefix_sum(set, rank)
+} -> i64;
+
+fn ordered_multiset_i64_kth (set : OrderedMultisetI64 alias,
+                             index : i64) {
+    if (index < 0 || index >= set.total) {
+        $ordered_multiset_i64_return;
+    } fi;
+    let rank := ordered_multiset_i64__select(set, index + 1) ??
+        $ordered_multiset_i64_return;
+    set.keys[rank]
+} -> i64;
+
+fn ordered_multiset_i64_insert (var set : OrderedMultisetI64 alias,
+                                value : i64) {
+    let rank := ordered_multiset_i64__rank(set, value) ??
+        $ordered_multiset_i64_return;
+    ordered_multiset_i64__add(set, rank, 1)
+} -> u1;
+
+fn ordered_multiset_i64_erase_one (var set : OrderedMultisetI64 alias,
+                                   value : i64) {
+    let rank := ordered_multiset_i64__rank(set, value) ??
+        $ordered_multiset_i64_return;
+    let count := ordered_multiset_i64__get(set, rank) ??
+        $ordered_multiset_i64_return;
+    if (count == 0) false
+    else ordered_multiset_i64__add(set, rank, -1)
+    fi
+} -> u1;
+
+fn ordered_multiset_i64_is_valid (set : OrderedMultisetI64 alias) {
+    var key_at := 1;
+    while (key_at < set.keys.len()) {
+        if ((set.keys[key_at - 1] ?? $ordered_multiset_i64_return) >=
+            (set.keys[key_at] ?? $ordered_multiset_i64_return)) {
+            $ordered_multiset_i64_return false;
+        } fi;
+        key_at += 1;
+    };
+    if (set.fenwick.len() != set.keys.len() || set.total < 0) {
+        $ordered_multiset_i64_return false;
+    } fi;
+
+    var total := 0;
+    var rank := 0;
+    while (rank < set.keys.len()) {
+        let count := ordered_multiset_i64__get(set, rank) ??
+            $ordered_multiset_i64_return false;
+        if (count < 0 || total > 9223372036854775807 - count) {
+            $ordered_multiset_i64_return false;
+        } fi;
+        total += count;
+        rank += 1;
+    };
+    total == set.total
+} -> u1;

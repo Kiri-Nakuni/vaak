@@ -155,3 +155,20 @@ VMではbuild込みでもminが約7.9倍、sumが約7.0倍速かった。木を�
 約1.16倍遅く、O(1) queryでもnamed function枠と`table.data[index]`の複合読み取り費用が残る。
 これはstatic tableの計算量試験を否定しないが、単一規模での採否やcrossoverを保証しない。query本数、幅、
 要素数、buildを償却する回数を変え、flat引数版やcompound place fast path後とpairedにする。
+
+## compressed ordered multiset checkpoint
+
+2026-08-25、同じLinux x86_64環境で
+`ROUNDS=3 cargo run --release --locked --example bench_ordered_multiset`を実行した。一度暖機後の3回平均で、
+parse、静的検査、VM compileは計測外。両caseとも同じ256個のsorted unique universeを作り、同じ1024回の
+insert後に`order_of_key`と0-based k-thを各2048回実行する。構築とinsertの費用も計測へ含む。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| 線形count列でrankとk-th | 1.264 s | 1.157 s | 177 |
+| `OrderedMultisetI64`で同じrankとk-th | **1.046 s** | **376.788 ms** | 177 |
+
+この標本ではordered multisetが線形count列に対して木で約1.21倍、VMで約3.07倍速かった。固定universeの
+Fenwick queryはO(log n)だが、named functionと`set.fenwick[index]`の複合place費用は残る。単一の256-key分布、
+重複率、query比だけからcrossoverや永続的な性能を保証しない。universe規模、insert/erase比、偏った個数、
+flat引数版、compound place fast path後を同じchecksumでpairedにして再測定する。
