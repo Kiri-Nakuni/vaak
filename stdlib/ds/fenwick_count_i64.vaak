@@ -1,0 +1,140 @@
+%{ 非負i64個数のFenwick tree。
+
+   任意の折返し加算を許すFenwickI64とは別型であり、各pointとtotalを
+   0..=i64::MAXへ保つ。この不変条件によりprefixは単調になり、
+   lower_bound(target)で累積個数から0-based添字をO(log n)で選べる。
+
+   point add、prefix/range sum、lower_boundはO(log n)、from_countsはO(n)。 }%
+
+flow $fenwick_count_i64_return = $repeat(break, getdepth());
+
+struct FenwickCountI64 {
+    var data : i64 array;
+    var total : i64;
+};
+
+% n < 0はparadox。n == 0は有効。%
+fn fenwick_count_i64_new (n : i64) {
+    if (n < 0) $fenwick_count_i64_return; fi;
+    new FenwickCountI64 (
+        data := new i64 array(n, 0),
+        total := 0
+    )
+} -> FenwickCountI64;
+
+% 非負のpoint列からO(n)で構築する。総和がi64::MAXを超える場合はparadox。%
+fn fenwick_count_i64_from_counts (values : i64 array alias) {
+    var tree := fenwick_count_i64_new(values.len()) ?? $fenwick_count_i64_return;
+    nfor (i, 0, values.len()) {
+        let value := values[i] ?? $fenwick_count_i64_return;
+        if (value < 0 || tree.total > 9223372036854775807 - value) {
+            $fenwick_count_i64_return;
+        } fi;
+        tree.data[i] := value;
+        tree.total += value;
+    };
+
+    var i := 1;
+    while (i <= tree.data.len()) {
+        let parent := i + (i & (0 - i));
+        if (parent <= tree.data.len()) {
+            tree.data[parent - 1] += tree.data[i - 1] ?? $fenwick_count_i64_return;
+        } fi;
+        i += 1;
+    };
+    tree
+} -> FenwickCountI64;
+
+fn fenwick_count_i64_len (tree : FenwickCountI64 alias) {
+    tree.data.len()
+} -> i64;
+
+fn fenwick_count_i64_total (tree : FenwickCountI64 alias) {
+    tree.total
+} -> i64;
+
+% [0, last)の和。last == 0は0。範囲外はparadox。%
+fn fenwick_count_i64_prefix_sum (tree : FenwickCountI64 alias, last : i64) {
+    if (last < 0 || last > tree.data.len()) $fenwick_count_i64_return; fi;
+    var total := 0;
+    var i := last;
+    while (i > 0) {
+        total += tree.data[i - 1] ?? $fenwick_count_i64_return;
+        i -= i & (0 - i);
+    };
+    total
+} -> i64;
+
+% [first, last)の和。空区間は0。範囲外はparadox。%
+fn fenwick_count_i64_range_sum (
+    tree : FenwickCountI64 alias,
+    first : i64,
+    last : i64
+) {
+    if (first < 0 || first > last || last > tree.data.len()) {
+        $fenwick_count_i64_return;
+    } fi;
+    let right := fenwick_count_i64_prefix_sum(tree, last) ?? $fenwick_count_i64_return;
+    let left := fenwick_count_i64_prefix_sum(tree, first) ?? $fenwick_count_i64_return;
+    right - left
+} -> i64;
+
+fn fenwick_count_i64_get (tree : FenwickCountI64 alias, index : i64) {
+    if (index < 0 || index >= tree.data.len()) $fenwick_count_i64_return; fi;
+    fenwick_count_i64_range_sum(tree, index, index + 1)
+} -> i64;
+
+%{
+   pointをdeltaだけ変える。更新後のpointとtotalが非負i64へ収まらなければ
+   何も変更せずparadox。成功はtrue。
+}%
+fn fenwick_count_i64_add (
+    var tree : FenwickCountI64 alias,
+    index : i64,
+    delta : i64
+) {
+    if (index < 0 || index >= tree.data.len()) $fenwick_count_i64_return; fi;
+    let current := fenwick_count_i64_get(tree, index) ?? $fenwick_count_i64_return;
+    if (delta >= 0) {
+        if (tree.total > 9223372036854775807 - delta) $fenwick_count_i64_return; fi;
+    } else {
+        if (current + delta < 0) $fenwick_count_i64_return; fi;
+    } fi;
+
+    var i := index + 1;
+    while (i <= tree.data.len()) {
+        tree.data[i - 1] += delta;
+        i += i & (0 - i);
+    };
+    tree.total += delta;
+    true
+} -> u1;
+
+%{
+   1 <= target <= totalに対し、prefix(index + 1) >= targetとなる最小の
+   0-based indexを返す。範囲外target（空treeを含む）はparadox。
+}%
+fn fenwick_count_i64_lower_bound (tree : FenwickCountI64 alias, target : i64) {
+    if (target <= 0 || target > tree.total) $fenwick_count_i64_return; fi;
+
+    var step := 1;
+    while (step <= tree.data.len() / 2) {
+        step += step;
+    };
+
+    var index := 0;
+    var accumulated := 0;
+    while (step > 0) {
+        if (step <= tree.data.len() - index) {
+            let next := index + step;
+            let candidate := accumulated +
+                (tree.data[next - 1] ?? $fenwick_count_i64_return);
+            if (candidate < target) {
+                index := next;
+                accumulated := candidate;
+            } fi;
+        } fi;
+        step /= 2;
+    };
+    index
+} -> i64;
