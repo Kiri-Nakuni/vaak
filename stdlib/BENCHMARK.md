@@ -94,3 +94,26 @@ query loop中には新しいVaak arrayを作らない。rollback workloadだけ�
 VMで約2.22倍速い。O(log n)であってもnamed function/compound placeの定数費用は木を辿る実装で残るため、
 これを永続的な性能保証やcrossoverとしない。要素数別のpaired測定とflat表現、place fast path後の再測定を
 続ける。測定中allocationが少ないことはAPIのmemory上限を意味せず、各構築の配列とrollback historyはO(n)。
+## graph checkpoint
+
+2026-08-24に`cargo run --release --locked --example bench_graph_library`を同じWindows環境で実行した。
+parse、静的検査、VM compileを計測外にし、一度暖機後の5回平均である。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| 512頂点、約1100辺のCSR構築と反復SCC | 561.35 ms | 174.63 ms | 1成分 |
+| 2048頂点の有向路をCSR構築して反復SCC | 2.087 s | 618.48 ms | 2048成分 |
+| 1024頂点の有向路をCSR構築してBFS | 339.45 ms | 95.25 ms | 距離1023 |
+| 1024頂点、約2045辺を安定topological sort | 906.01 ms | 267.36 ms | 1024頂点 |
+| `CsrI64.to[i]`を32×1024回更新 | 110.93 ms | 44.78 ms | 232 |
+| 生の`to[i]`を同じ回数更新 | 45.53 ms | 35.17 ms | 232 |
+
+同じ更新workloadで複合place版はflat版に対し、木で約2.44倍、VMで約1.27倍だった。この対照では
+graph全関数の実行時束縛費用を混ぜず、実際と同じ`CsrI64(start, to)`のstruct定義だけを前置きした。SCC本体は
+`start`/`to`の読み取りが中心で、builderと結果をnamed structにする定数費用とalgorithmの計算量を
+この比だけから分離はできない。fixtureではさらに4096頂点の有向路を通し、再帰深さではなく明示配列stackの
+容量だけがVに比例することを確認した。同じ4096頂点路をBFSとtopological sortにも通し、いずれも
+Vaakの再帰上限へ探索深さを重ねない。
+
+この一標本はAPI採否や大規模性能の結論ではない。次は辺密度、成分形状、backend、flat引数版をpairedにし、
+BFS/topological sortを同じCSRへ追加した後も、parse/check/compileと外部I/Oを実行時間へ混ぜず比較する。

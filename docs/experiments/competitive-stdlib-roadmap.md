@@ -4,9 +4,11 @@
 > この文書では確定しない。`docs/vaak/decisions.md`と
 > [`modules-and-library.md`](modules-and-library.md)を変更するものでもない。
 
-- 調査・実測日: 2026-08-24
-- branch: `codex2/stdlib-heap-deque`
-- fetched base: `origin/codex2/full` = `7c5ccd706e4dc466dad45baf275c0b550c8bc777`
+- 調査・実測日: 2026-08-24〜2026-08-25
+- branch: `codex3/stdlib-ordering`
+- integrated structure checkpoint: `codex2/stdlib-heap-deque` = `4a31a5fb4810e67a37e82c658cfd913a0446c0e2`
+- integrated graph checkpoint: `codex2/stdlib-graph` = `e8c2f93aeddd6394ef77342543a7a09637de8057`
+- inherited base: `origin/codex2/full` = `7c5ccd706e4dc466dad45baf275c0b550c8bc777`
 - 実装範囲: pure Vaak source、差分試験、benchだけ。core/STEELの意味は変更しない
 
 ## 1. 第一checkpointの境界
@@ -148,9 +150,61 @@ reference / VM / STEELへ流す。外部仕様の参照範囲は
 2026-08-24のfocused gateは26 passed、全release gateは760 passed、0 failed、1 ignored。STEEL LLVM IR生成は
 成功し、このmachineにclangが無いためnative実行部分だけを既存方針どおりskipした。
 
-## 5. 標準入力・scanner・outputの現状
+## 5. flat graph checkpoint
 
-### 5.1 既存host APIで分かったこと
+`stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
+
+| 層 | API | 契約 |
+|---|---|---|
+| builder | `csr_i64_builder_new`, `add_directed`, `add_undirected`, `build` | 頂点内で追加順を保持。無向self-loopは同じ向きの二辺 |
+| CSR | `CsrI64(start, to)`、個数・degree・neighbor・reverse | `start`はV+1、`to`はEのflat配列。不正公開欄はparadox |
+| SCC | `scc_i64`, `scc_i64_same` | 反復Kosaraju。`group_count`とV長の`group_of` |
+| BFS | `bfs_i64` | 単一始点。V長の`distance`/`parent`、未到達は-1 |
+| topological | `topological_sort_i64` | 辞書順最小。cycleは`acyclic=false`と空order |
+| 2-SAT | `two_sat_i64_add_clause`, `set_value`, `solve` | literal graphをCSR/SCCへ渡す。充足不能は通常結果 |
+
+CSR構築、SCC、2-SATはいずれもO(V+E)である。`add_*`のhot pathは既存辺を毎回再走査せずO(1)、公開欄を
+利用者が直接変更した場合の全検査は`build`/`solve`前に一度行う。頂点・変数・辺端点はi64固定の
+0-based indexで、負数、範囲外、V+1や2Vをi64で表せない個数はparadoxにする。
+
+SCCはvertex昇順とCSR内の辺順をtie-breakに使い、異なる成分を結ぶ辺`u -> v`には
+`group_of[u] < group_of[v]`となる番号を決定的に付ける。空、self-loop、parallel edge、切断graphを
+通常入力として扱う。再帰は使わず、4096頂点の有向路を参照実装・VM・STEEL IRで通したため、現行の
+評価深さ上限へDFS深さを重ねない。
+
+BFSも再帰せず、V要素を一度だけ入れるflat queueでO(V+E)とする。未到達の`distance`/`parent`は-1、
+始点のparentは始点自身である。同じ最短距離の親候補はCSRの辺順で最初に発見したものを保つ。
+topological sortはKahn法のready集合を固定i64 min-heapにし、利用可能な頂点番号が小さい順、すなわち
+辞書順最小のorderをO(E+V log V)で返す。cycleは不正入力ではないためparadoxにせず、partial prefixも
+公開せず`TopologicalResultI64(false, [])`へ原子的に畳む。parallel edgeはindegreeを辺ごとに数える。
+
+2-SATは`(x_i == value_i) OR (x_j == value_j)`を直接追加する。充足不能は
+`TwoSatResultI64(false, [])`であり、不正入力のparadoxではない。充足可能ならV長のbool assignmentを返す。
+固定seed graphはRustの推移閉包による相互到達性、固定seed clauseはRustの全割当列挙を独立oracleにし、
+参照実装・VM・STEELの同じsourceを照合する。ACLのsource/testは使っていない。
+
+`stdlib/examples/graph_scc_io.vaak`は既存`io/ascii_i64.vaak`とgraph sourceを前置きし、hostが一括で渡す
+`str`から`n m`とm辺を読み、成分数とV個のgroup番号を一括`str`で返す。これはpure層と競技I/O層の
+接続例であり、stdin/stdout、標準host名、streaming、callbackを新設しない。
+
+### 5.1 既存DSU/FenwickとのAPI差分
+
+このbranchはbase `54e05ab`に既に含まれる`DsuI64`/`FenwickI64`をそのまま参照し、別branchのmergeや
+core変更はしていない。三者は同じi64 indexでも状態契約が異なる。
+
+| API | 状態 | 結果 | graphとの関係 |
+|---|---|---|---|
+| `DsuI64` | merge/経路圧縮でmutable | leader、size、group数。全頂点label配列は返さない | 無向辺を逐次処理。CSRや辺順を要求しない |
+| `FenwickI64` | point addでmutable | i64のprefix/半開区間sum | 頂点・辺ではなく数列index。overflowはVaak i64の折返し |
+| `CsrI64` + BFS/SCC/topological | build後はread-onlyとして利用 | V長flat配列またはorder | 有向辺順と全graph検証を共有 |
+
+将来の連結成分・Kruskal fixtureは、CSRをDSU内部へ埋めたり`DsuI64`の永続APIを変えたりせず、辺列を
+順に`dsu_i64_merge`へ渡す利用例として始める。Fenwickを距離queueやpriority queueへ流用せず、用途の
+違いを維持する。
+
+## 6. 標準入力・scanner・outputの現状
+
+### 6.1 既存host APIで分かったこと
 
 - S-3は`print`を持たず、S-4は出力をhostの仕事にしている。
 - standalone CLIの`vaak <file>`はfileを**Vaak source**として読み、最上位に残った値を表示する。
@@ -161,7 +215,7 @@ reference / VM / STEELへ流す。外部仕様の参照範囲は
 - C-31により最上位結果の解釈はhost側にある。したがってoutput `str`を値として返し、hostが一度書く形は
   新しい言語意味を要しない。
 
-### 5.2 今回実装できたpure層
+### 6.2 今回実装できたpure層
 
 `io_ascii_i64_read(source, var position)`はASCII whitespaceを飛ばし、任意の`+`/`-`付きi64を読む。
 空token、数字以外を含むtoken、overflow、cursor範囲外はparadoxであり、失敗時cursorを動かさない。
@@ -180,7 +234,7 @@ formatterも`i64::MIN`を正のi64へ反転せず処理する。各整数はO(�
 
 この手順の2と5を既存CLIの標準挙動へ加えることはapplication変更であるため、今回実装していない。
 
-### 5.3 未決のI/O境界
+### 6.3 未決のI/O境界
 
 - `stdin` / `stdout`等の標準host名と型をVaak projectが保証するか
 - 全入力snapshot、chunk pull、同期HostFnのどれを標準競技runnerにするか
@@ -190,7 +244,7 @@ formatterも`i64::MIN`を正のi64へ反転せず処理する。各整数はO(�
 
 これらは新しいprimitive/capability/S-nを要しうるため、未解決として意味論・host API所有者へ返す。
 
-## 6. rich stdlibへの段階的roadmap
+## 7. rich stdlibへの段階的roadmap
 
 APIの綴りではなく、現行Vaakで意味と性能を一段ずつ検証できる順にする。
 
@@ -260,14 +314,21 @@ AC Libraryのsegtree/lazysegtreeはmonoid/action callbackをtemplate parameter�
 
 ### Phase C: flat graph結果
 
-- CSR builderとvertex/edge範囲検査
-- SCC: `group_count` + `group_of : i64 array`
-- 2-SAT: SCC上のliteral/implication配置
-- BFS/DFS/Dijkstra、topological order、LCA/HLD
+- 実装済み: CSR builderとvertex/edge範囲検査
+- 実装済み: SCCの`group_count` + `group_of : i64 array`
+- 実装済み: SCC上のliteral/implication配置を使う2-SAT
+- 実装済み: CSRを共有する単一始点BFSと辞書順最小topological sort
+- 次checkpoint: 既存`DsuI64`と無向辺を組み合わせる連結成分・Kruskal用fixture
+- その次: 非負i64距離のDijkstra、0/1重み固定の0-1 BFS
+- 後続: LCA/HLD。maxflow/min-cost flowはPhase Dで状態契約を別に固定
 
 入れ子配列を必須にせずflat resultを基礎にする。SCC番号のtopological方向と同点tie-break、parallel edge、
 self-loop、空graphを明記する。再帰ではなく明示stackを基準にし、参照/VM/STEELで同じgroup assignmentまたは
 同値なcanonical normalizationを比較する。
+
+Dijkstraは距離加算overflowと到達不能sentinel、0-1 BFSは重み範囲違反、topological sortはcycle時の
+paradox/statusのどちらを公開契約にするかを実装前に明記する。maxflowを急いで同じgraph型へ可変残余辺を
+混ぜず、immutable CSRとmutable algorithm stateを分ける。
 
 ### Phase D: flow
 
@@ -289,7 +350,7 @@ self-loop、空graphを明記する。再帰ではなく明示stackを基準に�
 i64正規化、widening primitive、backend accelerationを比較する。`str`はC-77どおりbyte列なので、suffix
 array等はbyte版とinteger array版を分け、Unicode code point/書記素algorithmとは呼ばない。
 
-## 7. AC Libraryを参照する範囲とlicense
+## 8. AC Libraryを参照する範囲とlicense
 
 AtCoder公式repositoryはAC Libraryを公式libraryと説明し、`atcoder` headerをCC0で公開している。
 
@@ -324,7 +385,7 @@ CC0であっても、どの契約を参照したかをこの文書に残す。pr
 Vaak libraryはそれをそのまま採らず、paradox/status/runtime errorを各APIで明記する。Vaak repository自体の
 licenseは`docs/LICENSING.md`どおりMITである。
 
-## 8. 意味論所有者へ返す未決事項
+## 9. 意味論所有者へ返す未決事項
 
 1. module/import/export/re-exportの構文、source identity、named type identity。
 2. named struct fieldをopaque/privateにするか。heap/deque不変条件をどこで守るか。
@@ -340,5 +401,7 @@ licenseは`docs/LICENSING.md`どおりMITである。
 11. ordered multisetを圧縮済みuniverseだけにするか、online arbitrary key構造まで標準範囲にするか。
 12. byte trieのmutable/frozen表現、alphabet固定版の数、public field不変条件をどこまで保証するか。
 13. bulk scanner/output scratchの所有者と大きさ。host streaming、reserve、標準stdin/stdoutとは別に決める。
+14. SCCの決定的なgroup番号まで永続APIにするか、同一成分partitionと位相方向だけを保証するか。
+15. BFS/topological sortの到達不能・cycle、Dijkstraのoverflowを共通result型なしでどう表すか。
 
 どれもこのcheckpointでは新しいS-nや言語意味へ昇格させない。
