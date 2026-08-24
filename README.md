@@ -61,9 +61,19 @@ Vaak errorで巻き戻らないため、複数更新を原子的にしたい場�
 hostが必要なsourceを利用者programの前へ依存順で連結してから一度だけprepareします。
 
 このcheckpointには、文字列、配列・探索・整列、DSU、Fenwick、heap/deque、segment tree、sparse table、
-ordered multiset、CSR graph/SCC/BFS/topological sort/2-SAT、一括ASCII整数I/O、UTF-8 JSON/JSONL等の
+ordered multiset、固定長dense bitset、CSR graph/SCC/BFS/topological sort/2-SAT、一括ASCII整数I/O、UTF-8 JSON/JSONL等の
 試作があります。公開関数、境界条件、依存順は[`stdlib/README.md`](stdlib/README.md)、測定と棄却案は
 [`stdlib/BENCHMARK.md`](stdlib/BENCHMARK.md)を参照してください。
+
+source冒頭の明示依存から決定的な前置き順を得られます。tie-breakはlocaleでなくUTF-8 byte順です。
+
+```console
+python3 scripts/resolve-stdlib.py codec/jsonl_utf8.vaak
+python3 scripts/resolve-stdlib.py --concat codec/jsonl_utf8.vaak > program-prefix.vaak
+```
+
+header契約とstable診断codeは[`stdlib/DEPENDENCIES.md`](stdlib/DEPENDENCIES.md)にあります。resolverは
+Vaak本文から依存を推測せず、missing、cycle、重複、非canonical pathを成功順序にしません。
 
 JSON/JSONLをRust hostから使う場合は、次の順で前置きします。codecはfileやsocketを開きません。
 
@@ -77,6 +87,10 @@ let source = format!(
 );
 ```
 
+TeX文字class、game snapshotの有限mask、競技programの集合には
+`vaak::stdlib::DENSE_BITSET_U32`を単独で前置きできます。論理長と末尾paddingを値の契約として保持するため、
+最速だった生の`u32 array`案ではなくnamed型を公開しています。比較値と棄却理由はbenchmark文書に残しています。
+
 ## IRON VAAK (.NET / Unity)
 
 `codex3/iron-vaak-dotnet` branchでは、IRON VAAKのC ABI、`.NET Standard 2.1` / `.NET 8` facade、
@@ -89,6 +103,14 @@ Lua → Vaak → Lua再入は作りません。
 対象OS matrix、artifact hardeningが採用gateに残ります。IRON JIT VAAKも長期候補であり、VM fallbackや
 同じ差分fixtureを迂回しません。
 
+## self-host実験
+
+`codex3/steel-selfhost` branchでは、Vaakで書いた算術subset compilerがLLVM IRを生成し、そのcompiler自身を
+Rust STEELでnative化する最小縦切りまで通しています。Rust版STEEL全体の置換は未完成なので、完成扱いせず、
+fallbackとしてpure Vaak numeric bytecode interpreterを実装しました。同じ13,000,010 opcodeではRust oracle
+62.294 ms、Vaak/STEEL 87.657 ms（約1.41倍）でした。nested compiler呼出しはSIGSEGVするため、最小fixture、
+signal 11、再現commandをignored棄却記録として保持しています。
+
 ## 検証
 
 全体ゲートは次です。
@@ -97,10 +119,11 @@ Lua → Vaak → Lua再入は作りません。
 cargo test --release --locked --no-fail-fast -- --test-threads=1
 ```
 
-`codex3/stdlib-json-jsonl`の2026-08-25 checkpointでは833件中826 passed、6 failed、1 ignoredです。
+`codex3/stdlib-dense-bitset`の2026-08-25 checkpointでは841件中833 passed、6 failed、2 ignoredです。
 6件は既知のSTEEL native配列共有問題に由来するgraph 3件、heap 1件、ASCII I/O 1件、string 1件で、
-JSON/JSONLの新規24件と参照実装・VMの回帰試験は通過しています。既知失敗を成功扱いせず、backend修正時に
-同じfixtureで解消を確認します。
+JSON/JSONLの24件、DenseBitSetの通常7件、参照実装・VMの回帰試験は通過しています。ignoredの一件は既存の
+STEEL alias配列共有、もう一件は負長bitset constructorの`??`回収が42でなく48になる再現fixtureです。
+既知失敗を成功扱いせず、backend修正時に同じfixtureで解消を確認します。
 
 ## 文書の地図
 

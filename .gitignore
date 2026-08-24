@@ -1,6 +1,8 @@
 /target
 legacy/reod-tier1/target/
 node_modules/
+__pycache__/
+*.pyc
 .git-frozen/
 
 # Zed 拡張の成果物
