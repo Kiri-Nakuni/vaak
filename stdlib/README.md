@@ -115,6 +115,8 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/fenwick_i64_flat.vaak` | `fenwick_i64_flat_*` | 生の配列一本を受ける性能対照。入れ子の左辺を作らない |
 | `ds/heap_i64.vaak` | `MinHeapI64`, `MaxHeapI64`, `min_heap_i64_*`, `max_heap_i64_*` | 固定比較の二分heap。heapify、push/pop/peek/replace |
 | `ds/deque_i64.vaak` | `DequeI64`, `deque_i64_*` | 容量倍増ring buffer。両端push/popは償却O(1) |
+| `ds/segtree_i64.vaak` | `SumSegtreeI64`, `MinSegtreeI64`, `MaxSegtreeI64`と各prefix API | O(n) build、point set/get、半開区間prod/all_prod。空区間は各identity |
+| `ds/lazy_segtree_i64.vaak` | `RangeAddSumSegtreeI64`, `range_add_sum_segtree_i64_*` | i64折返し加算上のrange add/range sum。build O(n)、更新・query O(log n) |
 | `io/ascii_i64.vaak` | `io_ascii_i64_*` | hostが一括で渡す`str`の整数scannerと返却用`str` formatter。stdin/stdout自体は持たない |
 
 配列を値引数で受けると深い複製になるため、読み取りは `alias`、破壊は
@@ -133,6 +135,17 @@ heapのmin/maxもgeneric callbackを使わず比較をhot loopへ直接書いた
 未完成の間は公開されるため、直接変更後は`*_heapify`でheap propertyを復元する。dequeは
 `data/head/size`のring bufferで、容量不足時だけ論理順にコピーして倍増する。公開欄の構造不変条件は
 `deque_i64_is_valid`で検査できる。
+
+segment treeはgeneric monoidを装わず、sum/min/maxを別named typeへ固定した。`prod(first, last)`は
+有効な空区間を許し、sumは0、minは`i64::MAX`、maxは`i64::MIN`を返す。範囲外、逆転区間、負の長さ、
+内部配列長をi64で表せない長さはparadoxである。sumとrange-add-sumの算術overflowは、Fenwickと同じく
+Vaakのi64規則で折り返す。
+
+range addとsumは2の冪を法とする加算monoid上でも自然に合成できるのでlazy版を独立型にした。一方、
+折返し加算は大小関係を保存しないため、nodeのmin/maxへdeltaを足すだけのrange-add-min/maxは正しくない。
+overflowだけ別にparadoxへ変える契約も導入していない。range assign、任意predicateの`max_right` /
+`min_left`、generic actionはAPI候補のままにし、callback/module specializationと現行の複合place費用を
+測る前に固定variantを増やさない。
 
 `io/ascii_i64.vaak`はS-4のhost境界を変えない。hostがstdin等を一括で`str`として渡し、Vaakは
 cursorを明示して読む。出力は`str`へ追記し、最上位の値としてhostへ返す。標準host名、streaming、

@@ -44,3 +44,33 @@ ring dequeのpush/popはアルゴリズム上は償却O(1)だが、この大き�
 読む費用が支配しているためである。この一標本からring方式を棄却も、十分高速とも判断しない。
 要素数を増やしたpaired測定、検査関数をhot pathから外した版、flat表現、入れ子place fast path後の
 再測定を次の性能gateとする。heapも同じく、二分heapの計算量と現行struct経路の定数費用を分けて扱う。
+
+## segment tree checkpoint
+
+第二checkpointのAPIを加える前に既存caseを再実行し、named functionとcompound placeの費用が残ることを
+確認した。その上でflat配列へquery loopをその場書きした対照、`SumSegtreeI64`、配列走査と
+`RangeAddSumSegtreeI64`を同じ実行へ足した。2026-08-24、`ROUNDS=3`を設定した
+`cargo run --release --locked --example bench_array_library`による、一度暖機後の3回平均である。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| `len`を直接20,000回読む | 9.88 ms | 4.71 ms | 157 |
+| alias関数枠から`len`を20,000回読む | 60.53 ms | 12.85 ms | 157 |
+| 任意range和を毎回走査する | 326.25 ms | 227.95 ms | 112 |
+| flat segment和のloopをその場に書く | **61.26 ms** | **28.86 ms** | 112 |
+| `SumSegtreeI64.prod`で同じrange和 | 307.33 ms | 89.23 ms | 112 |
+| 配列走査で128回のrange add/sum | **21.95 ms** | **7.92 ms** | 10 |
+| lazy treeで同じrange add/sum | 338.65 ms | 59.55 ms | 10 |
+| min heapへ1024 pushして全pop | 1.004 s | 358.91 ms | 140 |
+| 生配列へ1024 pushして`remove(0)` | 4.42 ms | 2.39 ms | 187 |
+| `DequeI64`へ1024 push_backして全pop_front | 467.98 ms | 33.63 ms | 187 |
+
+`SumSegtreeI64`は線形走査より木でわずかに速く、VMで約2.55倍速い一方、flat loopより木で約5.0倍、
+VMで約3.1倍遅い。現構文では`&=`を`tree.data`のような経路へ張れないため、named型のqueryは
+compound readを通る。配列全体を局所値へ複製すればAPI上のO(log n)を失う可能性があるので採用しなかった。
+
+lazy treeはアルゴリズム上O(log n)でも、128要素・固定32要素区間のこの標本では線形走査より木で約15倍、
+VMで約7.5倍遅い。再帰named functionと`data`/`lazy`のcompound accessが支配している。これは
+range-add-sumの意味・計算量試験を否定しないが、range assign等のvariantを同じ表現のまま増やす根拠にも
+しない。第一checkpointのheap/ringの遅さも同じpaired表へ残した。最終判断は要素数crossover、flat表現、
+compound place fast path後の再測定を必要とする。

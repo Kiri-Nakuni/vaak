@@ -11,6 +11,8 @@ const FENWICK: &str = include_str!("../stdlib/ds/fenwick_i64.vaak");
 const FENWICK_FLAT: &str = include_str!("../stdlib/ds/fenwick_i64_flat.vaak");
 const HEAP: &str = include_str!("../stdlib/ds/heap_i64.vaak");
 const DEQUE: &str = include_str!("../stdlib/ds/deque_i64.vaak");
+const SEGTREE: &str = include_str!("../stdlib/ds/segtree_i64.vaak");
+const LAZY_SEGTREE: &str = include_str!("../stdlib/ds/lazy_segtree_i64.vaak");
 
 struct Case {
     name: &'static str,
@@ -158,6 +160,111 @@ fn main() {
                 nfor (q, 0, 2048) {
                     let last := (q * 29) mod 513;
                     acc += fenwick_i64_flat_prefix_sum(data, last) ?? 0;
+                };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "任意range和を毎回走査する",
+            library: "",
+            body: r#"
+                var xs : i64 array := new i64 array(512, 0);
+                nfor (i, 0, xs.len()) { xs[i] := (i * 17) mod 101 - 50; };
+                var acc := 0;
+                nfor (q, 0, 2048) {
+                    var first := (q * 29) mod 513;
+                    var last := (q * 47) mod 513;
+                    if (first > last) {
+                        let saved := first; first := last; last := saved;
+                    } fi;
+                    var i := first;
+                    while (i < last) { acc += xs[i] ?? 0; i += 1; };
+                };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "flat segment和をその場に書く",
+            library: "",
+            body: r#"
+                var data : i64 array := new i64 array(1024, 0);
+                nfor (i, 0, 512) { data[512 + i] := (i * 17) mod 101 - 50; };
+                var node := 512;
+                while (node > 1) {
+                    node -= 1; data[node] := (data[node * 2] ?? 0) + (data[node * 2 + 1] ?? 0);
+                };
+                var acc := 0;
+                nfor (q, 0, 2048) {
+                    var first := (q * 29) mod 513;
+                    var last := (q * 47) mod 513;
+                    if (first > last) {
+                        let saved := first; first := last; last := saved;
+                    } fi;
+                    var left := first + 512;
+                    var right := last + 512;
+                    while (left < right) {
+                        if ((left & 1) == 1) { acc += data[left] ?? 0; left += 1; } fi;
+                        if ((right & 1) == 1) { right -= 1; acc += data[right] ?? 0; } fi;
+                        left /= 2; right /= 2;
+                    };
+                };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "SumSegtreeI64でrange和",
+            library: SEGTREE,
+            body: r#"
+                var values : i64 array := new i64 array(512, 0);
+                nfor (i, 0, values.len()) { values[i] := (i * 17) mod 101 - 50; };
+                let tree := sum_segtree_i64_from(values) ??
+                    new SumSegtreeI64(length := 0, size := 1, data := [0, 0]);
+                var acc := 0;
+                nfor (q, 0, 2048) {
+                    var first := (q * 29) mod 513;
+                    var last := (q * 47) mod 513;
+                    if (first > last) {
+                        let saved := first; first := last; last := saved;
+                    } fi;
+                    acc += sum_segtree_i64_prod(tree, first, last) ?? 0;
+                };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "配列走査でrange add/sum",
+            library: "",
+            body: r#"
+                var values : i64 array := new i64 array(128, 0);
+                nfor (i, 0, values.len()) { values[i] := (i * 17) mod 101 - 50; };
+                var acc := 0;
+                nfor (q, 0, 128) {
+                    let first := (q * 19) mod 97;
+                    let last := first + 32;
+                    let delta := (q * 31) mod 101 - 50;
+                    var i := first;
+                    while (i < last) { values[i] += delta; i += 1; };
+                    i := first;
+                    while (i < last) { acc += values[i] ?? 0; i += 1; };
+                };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "lazy treeでrange add/sum",
+            library: LAZY_SEGTREE,
+            body: r#"
+                var values : i64 array := new i64 array(128, 0);
+                nfor (i, 0, values.len()) { values[i] := (i * 17) mod 101 - 50; };
+                var tree := range_add_sum_segtree_i64_from(values) ??
+                    new RangeAddSumSegtreeI64(length := 0, size := 1, data := [0, 0], lazy := [0, 0]);
+                var acc := 0;
+                nfor (q, 0, 128) {
+                    let first := (q * 19) mod 97;
+                    let last := first + 32;
+                    let delta := (q * 31) mod 101 - 50;
+                    range_add_sum_segtree_i64_range_add(tree, first, last, delta) ?? false;
+                    acc += range_add_sum_segtree_i64_prod(tree, first, last) ?? 0;
                 };
                 acc mod 251
             "#,

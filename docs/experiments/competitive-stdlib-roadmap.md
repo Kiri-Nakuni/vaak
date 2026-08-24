@@ -88,6 +88,41 @@ resource failureであり、このlibraryは新しい回復意味論を定めな
 5回平均のrawな一標本は`stdlib/BENCHMARK.md`に記録した。絶対時間や1024要素だけからbackend/APIを
 決定しない。
 
+### 4.1 第二checkpoint: 固定i64 segment tree
+
+generic monoid、action callback、module specializationを先取りせず、次の二sourceを加えた。
+
+| source / 型 | 構築 | 更新 | query | 空区間identity |
+|---|---:|---:|---:|---|
+| `segtree_i64.vaak` / `SumSegtreeI64` | O(n) | point set O(log n) | get O(1)、prod O(log n)、all O(1) | 0 |
+| 同 / `MinSegtreeI64` | O(n) | point set O(log n) | 同上 | `i64::MAX` |
+| 同 / `MaxSegtreeI64` | O(n) | point set O(log n) | 同上 | `i64::MIN` |
+| `lazy_segtree_i64.vaak` / `RangeAddSumSegtreeI64` | O(n) | range add O(log n) | get/prod O(log n)、all O(1) | 0 |
+
+全rangeは`[first, last)`で、0長の木と有効な空区間を許す。負長、逆転、範囲外、内部配列長の
+`i64` overflowはparadoxである。sumとrange-add-sumの値計算はFenwick同様、Vaakのi64算術で折り返す。
+range-add-sumは2の冪を法とする加算でも`sum += delta * length`が成立するため、意味論を増やさずlazyに
+できる。
+
+一方、折返し加算は順序を保存しない。例えば`i64::MAX`と0へ1を加えると`i64::MIN`と1になるので、
+nodeのmin/maxへdeltaを足すだけのrange-add-min/maxは誤る。更新だけoverflow時paradoxへ変える別契約も
+導入しない。range assignは実装可能だが、pending actionを持つ複数配列へのcompound placeと再帰関数枠の
+費用が大きい段階で永続APIを増やさず、別型候補として保留した。
+
+現構文では`&=`の対象は名前に限られ、`tree.data`へ直接aliasを張れない。そこでnamed型のhot pathは
+`tree.data[i]`を通る。API追加前の再測定でもalias関数枠とcompound placeの費用を再確認し、追加後には
+flat配列へloopをその場書きしたsegment queryとnamed型をpaired測定した。結果は
+`stdlib/BENCHMARK.md`にraw値として残し、計算量と現backendの定数費用を混同しない。
+
+`tests/segtree_i64.rs`は0長、identity、範囲、容量overflow、i64折返し、重なるlazy更新と、Rustの
+独立vector oracleから生成した決定的random列をreference/VM/STEELへ同じsourceで流す。再帰helperでは
+成功時の早期flowが外側frameまで抜ける形を避け、分岐値を自然に返す。これはcore意味論の変更ではない。
+2026-08-24のfocused gateは31 passed、全release gateは746 passed、0 failed、1 ignored。STEELは
+LLVM IR生成まで成功し、このmachineにはclangが無いためnative実行部分だけを既存方針どおりskipした。
+
+`max_right` / `min_left`はpredicateの単調性とidentity条件を要求する。generic callbackが未完成の間に
+`>= threshold`等の固定predicate variantを乱造せず、callback/module specializationのAPI候補として保留する。
+
 ## 5. 標準入力・scanner・outputの現状
 
 ### 5.1 既存host APIで分かったこと
@@ -148,15 +183,15 @@ paradoxとstatusをAPIごとに明記する。
 
 ### Phase B: 固定演算specialization
 
-- `segtree/i64/sum|min|max|gcd`
-- `lazy_segtree/i64/range_add_sum|range_add_min|range_assign_min|max`
+- `segtree/i64/sum|min|max`（第二checkpoint済み）、`gcd`（候補）
+- `lazy_segtree/i64/range_add_sum`（第二checkpoint済み）、`range_add_min|max`と`range_assign_*`（候補）
 - sparse/disjoint sparse table
 - sliding min/max、Dijkstra、LCA、heavy-light decomposition
 
 AC Libraryのsegtree/lazysegtreeはmonoid/action callbackをtemplate parameterにする。Vaakではgeneric/callbackが
 未完成であり、参照実装のfunction frame費用も大きい。最初は演算をhot loopへ直書きする固定版だけを
-比較し、runtime callback APIやmodule specializationを先に確定しない。`max_right`/`min_left`も任意predicate
-ではなく、単調性とidentityを名前で固定できる用途版から検討する。
+比較し、runtime callback APIやmodule specializationを先に確定しない。`max_right`/`min_left`は任意predicate
+とidentity条件の表現が決まるまで固定predicate用途版も公開しない。
 
 ### Phase C: flat graph結果
 
@@ -221,7 +256,8 @@ licenseは`docs/LICENSING.md`どおりMITである。
 
 1. module/import/export/re-exportの構文、source identity、named type identity。
 2. named struct fieldをopaque/privateにするか。heap/deque不変条件をどこで守るか。
-3. generic/callback/module specializationと固定演算source generationの境界。
+3. generic/callback/module specializationと固定演算source generationの境界。`max_right` / `min_left`の
+   predicate、range assign action、折返し順序上のrange-add-min/maxを含む。
 4. query/mutationごとのinvalid range、empty、resource failureの共通表。
 5. stdlib sourceの配布・version・prepare/cache key・到達可能性単位。
 6. `DequeI64`、flat ring、core place最適化後のどれを永続APIにするか。
