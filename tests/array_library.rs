@@ -11,6 +11,9 @@ const PREFIX: &str = include_str!("../stdlib/array/i64/prefix_sum.vaak");
 const DSU: &str = include_str!("../stdlib/ds/dsu_i64.vaak");
 const FENWICK: &str = include_str!("../stdlib/ds/fenwick_i64.vaak");
 const FENWICK_FLAT: &str = include_str!("../stdlib/ds/fenwick_i64_flat.vaak");
+const HEAP: &str = include_str!("../stdlib/ds/heap_i64.vaak");
+const DEQUE: &str = include_str!("../stdlib/ds/deque_i64.vaak");
+const ASCII_I64: &str = include_str!("../stdlib/io/ascii_i64.vaak");
 
 fn source(parts: &[&str], body: &str) -> String {
     let mut src = String::new();
@@ -29,7 +32,7 @@ fn checked(parts: &[&str], body: &str) -> String {
     let errors: Vec<_> = vaak::check::check(&prog)
         .into_iter()
         .chain(vaak::types::check_types(&prog))
-        .map(|e| e.msg)
+        .map(|e| format!("{} @{:?}", e.msg, e.span))
         .collect();
     assert!(errors.is_empty(), "静的検査: {errors:?}\n{body}");
     src
@@ -98,6 +101,21 @@ fn 各ソースは単独で前置きできる() {
         "let f := fenwick_i64_flat_new(3) ?? [0]; f.len()",
         "値 3",
     );
+    both(
+        &[HEAP],
+        "var h := min_heap_i64_new() ?? new MinHeapI64(data := [0]); min_heap_i64_push(h, 7) ?? false; min_heap_i64_peek(h)",
+        "値 7",
+    );
+    both(
+        &[DEQUE],
+        "var q := deque_i64_new() ?? new DequeI64(data := [0], head := 0, size := 0); deque_i64_push_front(q, 7) ?? false; deque_i64_peek_back(q)",
+        "値 7",
+    );
+    both(
+        &[ASCII_I64],
+        r#"let input := "  -42 "; var at := 0; io_ascii_i64_read(input, at)"#,
+        "値 -42",
+    );
 }
 
 #[test]
@@ -126,6 +144,18 @@ fn 各ソースはsteelにも単独で前置きできる() {
             FENWICK_FLAT,
             "let f := fenwick_i64_flat_new(3) ?? [0]; f.len()",
         ),
+        (
+            HEAP,
+            "var h := max_heap_i64_new() ?? new MaxHeapI64(data := [0]); max_heap_i64_push(h, 7) ?? false; max_heap_i64_peek(h)",
+        ),
+        (
+            DEQUE,
+            "var q := deque_i64_new() ?? new DequeI64(data := [0], head := 0, size := 0); deque_i64_push_back(q, 7) ?? false; deque_i64_peek_front(q)",
+        ),
+        (
+            ASCII_I64,
+            r#"let input := "42"; var at := 0; io_ascii_i64_read(input, at)"#,
+        ),
     ];
     for (library, body) in cases {
         let src = checked(&[library], body);
@@ -145,6 +175,9 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         DSU,
         FENWICK,
         FENWICK_FLAT,
+        HEAP,
+        DEQUE,
+        ASCII_I64,
     ];
     both(&libraries, "42", "値 42");
     let src = checked(&libraries, "42");

@@ -1,0 +1,99 @@
+%{ 既存 str/u8 操作だけを使う競技入力向けの小さな層。
+
+   stdin/stdout や標準 host 名は定義しない。host が一括で渡した str と
+   最上位から返す str の間だけを扱う。公開関数は io_ascii_i64_ で始まる。 }%
+
+flow $io_ascii_i64_return = $repeat(break, getdepth());
+
+fn io_ascii_i64__is_whitespace (byte : u8) {
+    byte == 0x20 || (byte >= 0x09 && byte <= 0x0d)
+} -> u1;
+
+% position 以降に ASCII whitespace でない byte があるか。範囲外は paradox。%
+fn io_ascii_i64_has_next (source : str alias, position : i64) {
+    if (position < 0 || position > source.len()) $io_ascii_i64_return; fi;
+    var cursor := position;
+    while (cursor < source.len() &&
+           io_ascii_i64__is_whitespace(source[cursor] ?? $io_ascii_i64_return)) {
+        cursor += 1;
+    };
+    cursor < source.len()
+} -> u1;
+
+%{ ASCII whitespace を飛ばして i64 を一つ読む。
+   先頭の + / - を許す。token が空、数字以外を含む、i64 範囲外なら paradox。
+   失敗時は position を変更しない。成功時は数字直後（区切りの前）へ進める。 }%
+fn io_ascii_i64_read (source : str alias, var position : i64 alias) {
+    if (position < 0 || position > source.len()) $io_ascii_i64_return; fi;
+    var cursor := position;
+    while (cursor < source.len() &&
+           io_ascii_i64__is_whitespace(source[cursor] ?? $io_ascii_i64_return)) {
+        cursor += 1;
+    };
+    if (cursor == source.len()) $io_ascii_i64_return; fi;
+
+    var negative := false;
+    let first := source[cursor] ?? $io_ascii_i64_return;
+    if (first == 0x2d) {
+        negative := true;
+        cursor += 1;
+    } elif (first == 0x2b) {
+        cursor += 1;
+    } fi;
+    if (cursor == source.len()) $io_ascii_i64_return; fi;
+
+    var value := 0;
+    var digits := 0;
+    while (cursor < source.len()) {
+        let byte := source[cursor] ?? $io_ascii_i64_return;
+        if (byte < 0x30 || byte > 0x39) break; fi;
+        let digit := (byte - 0x30) -> i64;
+        if (value < (0 - 922337203685477580)) $io_ascii_i64_return; fi;
+        if (value == (0 - 922337203685477580) &&
+            ((! negative && digit > 7) || (negative && digit > 8))) {
+            $io_ascii_i64_return;
+        } fi;
+        value := value * 10 - digit;
+        digits += 1;
+        cursor += 1;
+    };
+    if (digits == 0) $io_ascii_i64_return; fi;
+    if (cursor < source.len() &&
+        ! io_ascii_i64__is_whitespace(source[cursor] ?? $io_ascii_i64_return)) {
+        $io_ascii_i64_return;
+    } fi;
+    position := cursor;
+    if (negative) value else 0 - value fi
+} -> i64;
+
+% i64 を十進 ASCII で追記する。i64::MIN も扱う。成功は true。%
+fn io_ascii_i64_append (var output : str alias, value : i64) {
+    if (value == 0) {
+        output.push(0x30);
+        $io_ascii_i64_return true;
+    } fi;
+    if (value < 0) output.push(0x2d); fi;
+
+    % 正の最大値を越える i64::MIN を扱うため、負のまま桁を剥がす。%
+    var remaining := if (value > 0) 0 - value else value fi;
+    var reversed : u8 array := new u8 array(0, 0);
+    while (remaining < 0) {
+        let digit := (0 - (remaining mod 10)) mod 10;
+        reversed.push(0x30 + (digit -> u8));
+        remaining := (remaining + digit) / 10;
+    };
+    while (reversed.len() > 0) {
+        output.push(reversed.pop() ?? $io_ascii_i64_return);
+    };
+    true
+} -> u1;
+
+fn io_ascii_i64_append_space (var output : str alias) {
+    output.push(0x20);
+    true
+} -> u1;
+
+fn io_ascii_i64_append_newline (var output : str alias) {
+    output.push(0x0a);
+    true
+} -> u1;

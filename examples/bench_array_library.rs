@@ -9,6 +9,8 @@ use vaak::interp::Eval;
 const BINARY: &str = include_str!("../stdlib/array/i64/search_binary.vaak");
 const FENWICK: &str = include_str!("../stdlib/ds/fenwick_i64.vaak");
 const FENWICK_FLAT: &str = include_str!("../stdlib/ds/fenwick_i64_flat.vaak");
+const HEAP: &str = include_str!("../stdlib/ds/heap_i64.vaak");
+const DEQUE: &str = include_str!("../stdlib/ds/deque_i64.vaak");
 
 struct Case {
     name: &'static str,
@@ -157,6 +159,45 @@ fn main() {
                     let last := (q * 29) mod 513;
                     acc += fenwick_i64_flat_prefix_sum(data, last) ?? 0;
                 };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "min heapを往復する",
+            library: HEAP,
+            body: r#"
+                var heap := min_heap_i64_new() ?? new MinHeapI64(data := [0]);
+                nfor (i, 0, 1024) {
+                    min_heap_i64_push(heap, (i * 1009) mod 2039 - 1019) ?? false;
+                };
+                var acc := 0;
+                nfor (i, 0, 1024) {
+                    acc += min_heap_i64_pop(heap) ?? 0;
+                };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "配列先頭removeでFIFO",
+            library: "",
+            body: r#"
+                var queue : i64 array := new i64 array(0, 0);
+                nfor (i, 0, 1024) { queue.push((i * 37) mod 101); };
+                var acc := 0;
+                nfor (i, 0, 1024) { acc += queue.remove(0) ?? 0; };
+                acc mod 251
+            "#,
+        },
+        Case {
+            name: "ring dequeでFIFO",
+            library: DEQUE,
+            body: r#"
+                var queue := deque_i64_new() ?? new DequeI64(data := [0], head := 0, size := 0);
+                nfor (i, 0, 1024) {
+                    deque_i64_push_back(queue, (i * 37) mod 101) ?? false;
+                };
+                var acc := 0;
+                nfor (i, 0, 1024) { acc += deque_i64_pop_front(queue) ?? 0; };
                 acc mod 251
             "#,
         },

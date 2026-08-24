@@ -8,9 +8,16 @@
 | **Claude** | Vaak の言語意味論、決定記録、STEEL | `src/` `docs/` `examples/` `editors/` |
 | **Codex** | PraTeX 埋め込みの additive API | `src/embedding.rs`、対応する試験と引き継ぎ文書。必要な支援変更だけ |
 | **Codex** | [PraTeX](https://git.trap.jp/Suima/vaak-rtex)（別版方） | PraTeX の中だけ |
+| **Codex** | pure Vaak 競プロstdlibの実験 | `stdlib/`、対応する試験・bench・非規範roadmap。言語意味論とcoreは変えない |
 
 Codex の枝は **`codex2/pratex-embedding-api`**（基点 `codex2/main`）。以後も
 `codex2/` 以下で作業する。Claude の枝と優先順位をこの枝から書き換えない。
+
+競プロstdlibの実験枝は **`codex2/stdlib-heap-deque`** であり、2026-08-24にfetchした
+`origin/codex2/full`のexact commit
+`7c5ccd706e4dc466dad45baf275c0b550c8bc777`を基点とする。この枝では既存機能だけで書ける
+細粒度libraryと差分試験を追加してよい。module/generic/callback、I/O primitive、host capability、
+empty/paradoxの新しい一般則、S-nは確定せず、必要なら未決事項として意味論の所有者へ返す。
 
 PraTeX 埋め込みのための追加 API は進めてよい。ただし、既存の Vaak プログラムの意味、
 参照実装・VM・STEEL の結果、C-n/S-n の解釈を変える必要が出たら実装を止め、Claude に

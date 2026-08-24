@@ -1,0 +1,159 @@
+%{ i64 の両端 queue。
+
+   data/head/size の ring bufferで表し、先頭 remove の O(n) を避ける。
+   push は容量倍増を含めて償却 O(1)、pop/peek/get は最悪 O(1)。
+   公開型・関数は DequeI64 / deque_i64_ で始まる。 }%
+
+flow $deque_i64_return = $repeat(break, getdepth());
+
+struct DequeI64 {
+    var data : i64 array;
+    var head : i64;
+    var size : i64;
+};
+
+fn deque_i64_new () {
+    new DequeI64 (
+        data := new i64 array(0, 0),
+        head := 0,
+        size := 0
+    )
+} -> DequeI64;
+
+% capacity < 0 は paradox。0 は空の容量として有効。%
+fn deque_i64_with_capacity (capacity : i64) {
+    if (capacity < 0) $deque_i64_return; fi;
+    new DequeI64 (
+        data := new i64 array(capacity, 0),
+        head := 0,
+        size := 0
+    )
+} -> DequeI64;
+
+fn deque_i64_len (deque : DequeI64 alias) {
+    deque.size
+} -> i64;
+
+fn deque_i64_capacity (deque : DequeI64 alias) {
+    deque.data.len()
+} -> i64;
+
+fn deque_i64_is_empty (deque : DequeI64 alias) {
+    deque.size == 0
+} -> u1;
+
+% 公開欄を直接壊していないかを O(1) で検査する。%
+fn deque_i64_is_valid (deque : DequeI64 alias) {
+    if (deque.size < 0 || deque.size > deque.data.len()) $deque_i64_return false; fi;
+    if (deque.data.len() == 0) {
+        deque.head == 0 && deque.size == 0
+    } else {
+        deque.head >= 0 && deque.head < deque.data.len()
+    } fi
+} -> u1;
+
+% 論理 offset を overflow 無しで ring 上の添字へ写す。内部操作。%
+fn deque_i64__physical (deque : DequeI64 alias, offset : i64) {
+    if (! deque_i64_is_valid(deque) || offset < 0 || offset >= deque.size ||
+        deque.data.len() == 0) $deque_i64_return; fi;
+    if (offset >= deque.data.len() - deque.head) {
+        offset - (deque.data.len() - deque.head)
+    } else {
+        deque.head + offset
+    } fi
+} -> i64;
+
+% 満杯のときだけ呼ぶ。要素を論理順に写し、容量を倍増する。%
+fn deque_i64__grow (var deque : DequeI64 alias) {
+    if (! deque_i64_is_valid(deque) || deque.size != deque.data.len()) $deque_i64_return; fi;
+    let old_capacity := deque.data.len();
+    % 2 倍が i64 を越える場合は配列長を折り返さず paradox。%
+    if (old_capacity > 4611686018427387903) $deque_i64_return; fi;
+    let new_capacity := if (old_capacity == 0) 4 else old_capacity * 2 fi;
+    var grown : i64 array := new i64 array(new_capacity, 0);
+    nfor (i, 0, deque.size) {
+        let source := if (i >= old_capacity - deque.head) {
+            i - (old_capacity - deque.head)
+        } else {
+            deque.head + i
+        } fi;
+        grown[i] := deque.data[source] ?? $deque_i64_return;
+    };
+    deque.data := grown;
+    deque.head := 0;
+    true
+} -> u1;
+
+% 容量増加を含めて償却 O(1)。成功は true。%
+fn deque_i64_push_back (var deque : DequeI64 alias, value : i64) {
+    if (! deque_i64_is_valid(deque)) $deque_i64_return; fi;
+    if (deque.size == deque.data.len()) {
+        deque_i64__grow(deque) ?? $deque_i64_return;
+    } fi;
+    let index := if (deque.size >= deque.data.len() - deque.head) {
+        deque.size - (deque.data.len() - deque.head)
+    } else {
+        deque.head + deque.size
+    } fi;
+    deque.data[index] := value;
+    deque.size += 1;
+    true
+} -> u1;
+
+fn deque_i64_push_front (var deque : DequeI64 alias, value : i64) {
+    if (! deque_i64_is_valid(deque)) $deque_i64_return; fi;
+    if (deque.size == deque.data.len()) {
+        deque_i64__grow(deque) ?? $deque_i64_return;
+    } fi;
+    if (deque.head == 0) deque.head := deque.data.len() - 1;
+    else deque.head -= 1;
+    fi;
+    deque.data[deque.head] := value;
+    deque.size += 1;
+    true
+} -> u1;
+
+% 空なら paradox。最悪 O(1)。%
+fn deque_i64_peek_front (deque : DequeI64 alias) {
+    let index := deque_i64__physical(deque, 0) ?? $deque_i64_return;
+    deque.data[index]
+} -> i64;
+
+fn deque_i64_peek_back (deque : DequeI64 alias) {
+    let index := deque_i64__physical(deque, deque.size - 1) ?? $deque_i64_return;
+    deque.data[index]
+} -> i64;
+
+% 論理添字。範囲外は paradox。最悪 O(1)。%
+fn deque_i64_get (deque : DequeI64 alias, index : i64) {
+    let physical := deque_i64__physical(deque, index) ?? $deque_i64_return;
+    deque.data[physical]
+} -> i64;
+
+% 空なら paradox。最悪 O(1)。%
+fn deque_i64_pop_front (var deque : DequeI64 alias) {
+    let index := deque_i64__physical(deque, 0) ?? $deque_i64_return;
+    let value := deque.data[index] ?? $deque_i64_return;
+    if (deque.head + 1 == deque.data.len()) deque.head := 0;
+    else deque.head += 1;
+    fi;
+    deque.size -= 1;
+    if (deque.size == 0) deque.head := 0; fi;
+    value
+} -> i64;
+
+fn deque_i64_pop_back (var deque : DequeI64 alias) {
+    let index := deque_i64__physical(deque, deque.size - 1) ?? $deque_i64_return;
+    let value := deque.data[index] ?? $deque_i64_return;
+    deque.size -= 1;
+    if (deque.size == 0) deque.head := 0; fi;
+    value
+} -> i64;
+
+% 容量を保持して空にする。成功は true、最悪 O(1)。%
+fn deque_i64_clear (var deque : DequeI64 alias) {
+    if (! deque_i64_is_valid(deque)) $deque_i64_return; fi;
+    deque.head := 0;
+    deque.size := 0;
+    true
+} -> u1;

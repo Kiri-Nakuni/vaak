@@ -113,6 +113,9 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/dsu_i64.vaak` | `DsuI64`, `dsu_i64_*` | union by size + path compression。添字範囲外は paradox |
 | `ds/fenwick_i64.vaak` | `FenwickI64`, `fenwick_i64_*` | i64 加算に固定。point add と半開区間 sum |
 | `ds/fenwick_i64_flat.vaak` | `fenwick_i64_flat_*` | 生の配列一本を受ける性能対照。入れ子の左辺を作らない |
+| `ds/heap_i64.vaak` | `MinHeapI64`, `MaxHeapI64`, `min_heap_i64_*`, `max_heap_i64_*` | 固定比較の二分heap。heapify、push/pop/peek/replace |
+| `ds/deque_i64.vaak` | `DequeI64`, `deque_i64_*` | 容量倍増ring buffer。両端push/popは償却O(1) |
+| `io/ascii_i64.vaak` | `io_ascii_i64_*` | hostが一括で渡す`str`の整数scannerと返却用`str` formatter。stdin/stdout自体は持たない |
 
 配列を値引数で受けると深い複製になるため、読み取りは `alias`、破壊は
 `var alias` に揃えた。subarray を別名にせず `(xs, first, last)` の半開区間を渡す。
@@ -125,3 +128,12 @@ hot loop へ直接書く固定演算版を基準にし、将来のモジュー�
 `FenwickI64` 版は型名が付く一方、更新の左辺が `tree.data[i]` になる。flat 版は
 型による取り違え防止を失う代わりに `data[i]` だけを更新する。この二本は永続 API の
 候補を二重化するためではなく、現行 VM の入れ子経路の費用を分離して測る対照実験である。
+
+heapのmin/maxもgeneric callbackを使わず比較をhot loopへ直接書いた。`data`欄はmodule privacyが
+未完成の間は公開されるため、直接変更後は`*_heapify`でheap propertyを復元する。dequeは
+`data/head/size`のring bufferで、容量不足時だけ論理順にコピーして倍増する。公開欄の構造不変条件は
+`deque_i64_is_valid`で検査できる。
+
+`io/ascii_i64.vaak`はS-4のhost境界を変えない。hostがstdin等を一括で`str`として渡し、Vaakは
+cursorを明示して読む。出力は`str`へ追記し、最上位の値としてhostへ返す。標準host名、streaming、
+buffer flushは未決であり、このsourceはそれらを暗黙に導入しない。

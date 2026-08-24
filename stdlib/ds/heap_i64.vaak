@@ -1,0 +1,239 @@
+%{ i64 の二分 min/max heap。
+
+   比較を hot loop へ直接書き、generic callback は使わない。
+   公開型・関数は MinHeapI64 / min_heap_i64_ と
+   MaxHeapI64 / max_heap_i64_ で始まる。
+
+   data 欄は module privacy が入るまで公開されたままなので、利用者が直接
+   書き換えた後は heap property を保証しない。heapify で復元できる。 }%
+
+flow $heap_i64_return = $repeat(break, getdepth());
+
+struct MinHeapI64 {
+    var data : i64 array;
+};
+
+struct MaxHeapI64 {
+    var data : i64 array;
+};
+
+fn min_heap_i64_new () {
+    new MinHeapI64 ( data := new i64 array(0, 0) )
+} -> MinHeapI64;
+
+fn max_heap_i64_new () {
+    new MaxHeapI64 ( data := new i64 array(0, 0) )
+} -> MaxHeapI64;
+
+fn min_heap_i64_len (heap : MinHeapI64 alias) {
+    heap.data.len()
+} -> i64;
+
+fn max_heap_i64_len (heap : MaxHeapI64 alias) {
+    heap.data.len()
+} -> i64;
+
+fn min_heap_i64_is_empty (heap : MinHeapI64 alias) {
+    heap.data.len() == 0
+} -> u1;
+
+fn max_heap_i64_is_empty (heap : MaxHeapI64 alias) {
+    heap.data.len() == 0
+} -> u1;
+
+% 内部操作。index が範囲外なら paradox。%
+fn min_heap_i64__sift_up (var heap : MinHeapI64 alias, index : i64) {
+    if (index < 0 || index >= heap.data.len()) $heap_i64_return; fi;
+    var child := index;
+    while (child > 0) {
+        let parent := (child - 1) / 2;
+        let parent_value := heap.data[parent] ?? $heap_i64_return;
+        let child_value := heap.data[child] ?? $heap_i64_return;
+        if (parent_value <= child_value) break; fi;
+        heap.data[parent] := child_value;
+        heap.data[child] := parent_value;
+        child := parent;
+    };
+    true
+} -> u1;
+
+fn max_heap_i64__sift_up (var heap : MaxHeapI64 alias, index : i64) {
+    if (index < 0 || index >= heap.data.len()) $heap_i64_return; fi;
+    var child := index;
+    while (child > 0) {
+        let parent := (child - 1) / 2;
+        let parent_value := heap.data[parent] ?? $heap_i64_return;
+        let child_value := heap.data[child] ?? $heap_i64_return;
+        if (parent_value >= child_value) break; fi;
+        heap.data[parent] := child_value;
+        heap.data[child] := parent_value;
+        child := parent;
+    };
+    true
+} -> u1;
+
+% 内部操作。index が範囲外なら paradox。%
+fn min_heap_i64__sift_down (var heap : MinHeapI64 alias, index : i64) {
+    if (index < 0 || index >= heap.data.len()) $heap_i64_return; fi;
+    var root := index;
+    loop {
+        let left := root * 2 + 1;
+        if (left >= heap.data.len()) break; fi;
+        var child := left;
+        let right := left + 1;
+        if (right < heap.data.len() &&
+            (heap.data[right] ?? $heap_i64_return) <
+            (heap.data[left] ?? $heap_i64_return)) {
+            child := right;
+        } fi;
+        let root_value := heap.data[root] ?? $heap_i64_return;
+        let child_value := heap.data[child] ?? $heap_i64_return;
+        if (root_value <= child_value) break; fi;
+        heap.data[root] := child_value;
+        heap.data[child] := root_value;
+        root := child;
+    };
+    true
+} -> u1;
+
+fn max_heap_i64__sift_down (var heap : MaxHeapI64 alias, index : i64) {
+    if (index < 0 || index >= heap.data.len()) $heap_i64_return; fi;
+    var root := index;
+    loop {
+        let left := root * 2 + 1;
+        if (left >= heap.data.len()) break; fi;
+        var child := left;
+        let right := left + 1;
+        if (right < heap.data.len() &&
+            (heap.data[right] ?? $heap_i64_return) >
+            (heap.data[left] ?? $heap_i64_return)) {
+            child := right;
+        } fi;
+        let root_value := heap.data[root] ?? $heap_i64_return;
+        let child_value := heap.data[child] ?? $heap_i64_return;
+        if (root_value >= child_value) break; fi;
+        heap.data[root] := child_value;
+        heap.data[child] := root_value;
+        root := child;
+    };
+    true
+} -> u1;
+
+% O(n)。空も成功し true。%
+fn min_heap_i64_heapify (var heap : MinHeapI64 alias) {
+    var parent := heap.data.len() / 2;
+    while (parent > 0) {
+        parent -= 1;
+        min_heap_i64__sift_down(heap, parent) ?? $heap_i64_return;
+    };
+    true
+} -> u1;
+
+fn max_heap_i64_heapify (var heap : MaxHeapI64 alias) {
+    var parent := heap.data.len() / 2;
+    while (parent > 0) {
+        parent -= 1;
+        max_heap_i64__sift_down(heap, parent) ?? $heap_i64_return;
+    };
+    true
+} -> u1;
+
+% 入力を一度複製して O(n) heapify する。%
+fn min_heap_i64_from (values : i64 array alias) {
+    var heap := min_heap_i64_new() ?? $heap_i64_return;
+    nfor (i, 0, values.len()) {
+        heap.data.push(values[i] ?? $heap_i64_return);
+    };
+    min_heap_i64_heapify(heap) ?? $heap_i64_return;
+    heap
+} -> MinHeapI64;
+
+fn max_heap_i64_from (values : i64 array alias) {
+    var heap := max_heap_i64_new() ?? $heap_i64_return;
+    nfor (i, 0, values.len()) {
+        heap.data.push(values[i] ?? $heap_i64_return);
+    };
+    max_heap_i64_heapify(heap) ?? $heap_i64_return;
+    heap
+} -> MaxHeapI64;
+
+% O(n) の debug 用検査。空は true。%
+fn min_heap_i64_is_valid (heap : MinHeapI64 alias) {
+    var i := 1;
+    while (i < heap.data.len()) {
+        let parent := (i - 1) / 2;
+        if ((heap.data[parent] ?? $heap_i64_return) >
+            (heap.data[i] ?? $heap_i64_return)) $heap_i64_return false; fi;
+        i += 1;
+    };
+    true
+} -> u1;
+
+fn max_heap_i64_is_valid (heap : MaxHeapI64 alias) {
+    var i := 1;
+    while (i < heap.data.len()) {
+        let parent := (i - 1) / 2;
+        if ((heap.data[parent] ?? $heap_i64_return) <
+            (heap.data[i] ?? $heap_i64_return)) $heap_i64_return false; fi;
+        i += 1;
+    };
+    true
+} -> u1;
+
+% 空なら paradox。O(1)。%
+fn min_heap_i64_peek (heap : MinHeapI64 alias) {
+    heap.data[0]
+} -> i64;
+
+fn max_heap_i64_peek (heap : MaxHeapI64 alias) {
+    heap.data[0]
+} -> i64;
+
+% 配列の伸長を含めて償却 O(log n)。成功は true。%
+fn min_heap_i64_push (var heap : MinHeapI64 alias, value : i64) {
+    heap.data.push(value);
+    min_heap_i64__sift_up(heap, heap.data.len() - 1) ?? $heap_i64_return;
+    true
+} -> u1;
+
+fn max_heap_i64_push (var heap : MaxHeapI64 alias, value : i64) {
+    heap.data.push(value);
+    max_heap_i64__sift_up(heap, heap.data.len() - 1) ?? $heap_i64_return;
+    true
+} -> u1;
+
+% 空なら paradox。O(log n)。%
+fn min_heap_i64_pop (var heap : MinHeapI64 alias) {
+    let top := heap.data[0] ?? $heap_i64_return;
+    let last := heap.data.pop() ?? $heap_i64_return;
+    if (heap.data.len() > 0) {
+        heap.data[0] := last;
+        min_heap_i64__sift_down(heap, 0) ?? $heap_i64_return;
+    } fi;
+    top
+} -> i64;
+
+fn max_heap_i64_pop (var heap : MaxHeapI64 alias) {
+    let top := heap.data[0] ?? $heap_i64_return;
+    let last := heap.data.pop() ?? $heap_i64_return;
+    if (heap.data.len() > 0) {
+        heap.data[0] := last;
+        max_heap_i64__sift_down(heap, 0) ?? $heap_i64_return;
+    } fi;
+    top
+} -> i64;
+
+% 空なら paradox。先頭を value に置き換え、以前の先頭を返す。O(log n)。%
+fn min_heap_i64_replace (var heap : MinHeapI64 alias, value : i64) {
+    let old := heap.data[0] ?? $heap_i64_return;
+    heap.data[0] := value;
+    min_heap_i64__sift_down(heap, 0) ?? $heap_i64_return;
+    old
+} -> i64;
+
+fn max_heap_i64_replace (var heap : MaxHeapI64 alias, value : i64) {
+    let old := heap.data[0] ?? $heap_i64_return;
+    heap.data[0] := value;
+    max_heap_i64__sift_down(heap, 0) ?? $heap_i64_return;
+    old
+} -> i64;
