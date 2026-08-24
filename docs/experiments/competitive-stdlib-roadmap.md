@@ -5,7 +5,8 @@
 > [`modules-and-library.md`](modules-and-library.md)を変更するものでもない。
 
 - 調査・実測日: 2026-08-24〜2026-08-25
-- branch: `codex3/stdlib-json-jsonl`
+- branch: `codex3/stdlib-dense-bitset`
+- dense bitset base: `codex3/stdlib-json-jsonl` = `1bb004b252183ad4b3706a81470733ec3657d466`
 - integrated bulk I/O checkpoint: `codex3/stdlib-bulk-io` = `62498f1add42bf05f39385af09411ae3ebb728bd`
 - integrated Fenwick range checkpoint: `codex3/stdlib-fenwick-range` = `2012cb0a4bd41a098dad8aa8f7dbbd0d15098828`
 - integrated ordered multiset checkpoint: `codex3/stdlib-ordered-multiset` = `3e2eeef2202a4ede6394675bd8d8942cb9a0b0eb`
@@ -307,6 +308,41 @@ PraTeX build manifest schema、host capabilityをsourceへ入れていない。
 scan cursor版が51.895 msだったため、探索済みprefixの再走査も棄却した。codec契約とerror code一覧は
 [`stdlib/README.md`](../../stdlib/README.md)を参照する。
 
+### 4.9 共通core checkpoint: fixed dense bit set
+
+TeX埋め込み、LVMINIBVS、競技programのいずれにもある「一つの既知snapshot内の有限集合」を、
+application固有adapterより先にpure Vaakで共有するため、`stdlib/ds/dense_bitset_u32.vaak`を加えた。
+
+| 型 / source | 固定した範囲 | 別層へ残したもの |
+|---|---|---|
+| `DenseBitSetU32(length, words)` | 0-based固定長集合、32-bit word、末尾padding 0 | Unicode分類、TeX catcode、game world identity、vertex意味 |
+| 単一点操作 | contains / assign / insert / remove、変更status | atomic、同期、host object handle |
+| 集合操作 | copy / union / intersection / xor / difference / complement | 可変長集合、sparse集合、generic word幅 |
+| query | count / intersects / subset / first / next / 0-based k-th | iterator構文、callback、sentinel一般則 |
+
+単一点操作はO(1)、全体操作はO(ceil(length / 32))で、負長、範囲外index、shape違反、長さ違いは
+paradoxにする。二項mutationは両operandを先に検査してから更新し、末尾paddingを常に0へ保つ。
+sourceは他libraryへ依存せず、`vaak::stdlib::DENSE_BITSET_U32`として明示前置きできる。
+
+`tests/dense_bitset_u32.rs`の7試験は、0/1/31/32/33境界、deep copy、padding、変更前拒否に加え、
+TeX ASCII文字class、12候補のLVMINIBVS有限解釈mask、70要素の競プロ集合を同一sourceで通す。
+固定seed 97-bit・240操作はRust `Vec<bool>`を結果oracleにし、通常値の全fixtureを参照実装・VM・
+STEEL clang `-O2` nativeで照合した。focused gateは7 passed、0 failed、inventory gateは12 passed、0 failed。
+全release gateは833 passed、6 failed、1 ignoredで、失敗は4.3に列挙した未変更のgraph 3件、heap、
+ASCII I/O、stringのSTEEL native baselineと同じである。
+
+故意に公開fieldを壊した値と負長constructorのparadox回収は参照実装・VMでも確認した。一方、負長を
+`??`でfallbackへ回収するisolated sourceをSTEEL nativeへ通すと期待終了値42に対し48となったため、
+そのerror-pathを三backend一致の主張へ含めない。valid-valueのmutation・長さ違い拒否はSTEEL nativeでも
+一致している。これは既存STEELのparadox/fallback経路の観測として残し、pure library checkpointからcoreや
+言語意味を変更しない。意味論・STEEL所有者が直した後に同じfixtureをnative gateへ昇格する。
+
+2051 bit・集合演算128回ではu8-per-bit案が融合packed flat案より木28.152倍、VM28.295倍遅く、payloadも
+7.888倍大きかったため棄却した。同じ三走査のflat u32に対してもnamed型は木4.723倍、VM2.667倍の時間を
+要したが、論理長・padding・長さ一致を値として運べないため公開APIには採らず性能対照だけ残す。
+raw値、環境、再現commandは
+[`stdlib/BENCHMARK.md`](../../stdlib/BENCHMARK.md)に固定した。
+
 ## 5. flat graph checkpoint
 
 `stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
@@ -440,6 +476,8 @@ P1内では次の小checkpoint順にする。
    stdin/stdout runnerは未決のまま分ける。
 6. 完了: UTF-8 JSONをflat documentへparse/serializeし、JSONLを有界chunk readerへした。numberはi64限定、
    error位置とbudget codeを型付きで返す。file capabilityとPraTeX固有schemaは別層に残す。
+7. 完了: `DenseBitSetU32`を32-bit packed固定長集合として加えた。TeX文字class、game有限mask、競プロ集合を
+   共通fixtureにし、u8-per-bitを実測で棄却、flat u32を性能対照に残した。domain adapterは別sourceとする。
 
 P2のtrie/stringはUnicodeを暗黙に扱わない。最初のtrie候補はnode/edge/label/terminalをparallel arrayにした
 byte版で、遷移O(degree)のmutable基準と、build後にedgeをsortしてbinary searchするfrozen版を比較する。
@@ -456,7 +494,8 @@ divisor列挙、pow/mod inverse/CRT/floor sum、固定modulus組合せの順を�
 - range check、copy/fill/reverse/rotate、linear/binary search、prefix/difference
 - 実装済み: insertion/heap/merge sort、sorted unique、coordinate compression
 - 候補: partition/select、permutation
-- DSU、point/count/range-update Fenwick、min/max heap、deque、bitset
+- DSU、point/count/range-update Fenwick、min/max heap、deque
+- 実装済み: 末尾paddingを0に保つ固定長`DenseBitSetU32`
 - 実装済み: 圧縮済みi64 ordered multiset
 - gcd/lcm、pow_mod、inv_mod、crt、floor_sum
 - byte列のZ algorithm、prefix function

@@ -1,0 +1,380 @@
+%{ 固定長のdense bit set。
+
+   length個のbitを32-bit wordへ詰め、末尾wordの未使用bitは常に0にする。
+   indexは0-based。contains/insert/remove/assignはO(1)、集合演算とcountは
+   O(ceil(length / 32))、first/next/kthは走査したword数に線形である。
+
+   insert/remove/assignは集合が実際に変わったときtrue、既に同じならfalse。
+   二項演算は同じlengthだけを受け、shape・length違反ではtargetを変える前に
+   paradoxとなる。 }%
+
+flow $dense_bitset_u32_return = $repeat(break, getdepth());
+
+struct DenseBitSetU32 {
+    var length : i64;
+    var words : u32 array;
+};
+
+fn dense_bitset_u32__all_bits () {
+    4294967295 -> u32
+} -> u32;
+
+fn dense_bitset_u32__word_count (length : i64) {
+    if (length < 0) $dense_bitset_u32_return; fi;
+    var count := length / 32;
+    if (length mod 32 != 0) count += 1; fi;
+    count
+} -> i64;
+
+fn dense_bitset_u32__last_mask (length : i64) {
+    if (length < 0) $dense_bitset_u32_return; fi;
+    if (length == 0) $dense_bitset_u32_return (0 -> u32); fi;
+    let remainder := length mod 32;
+    if (remainder == 0) dense_bitset_u32__all_bits()
+    else ((1 -> u32) << remainder) - (1 -> u32)
+    fi
+} -> u32;
+
+% field数、word数、末尾paddingをO(1)で検査する。%
+fn dense_bitset_u32_is_valid (set : DenseBitSetU32 alias) {
+    if (set.length < 0) $dense_bitset_u32_return false; fi;
+    let expected := dense_bitset_u32__word_count(set.length) ??
+        $dense_bitset_u32_return false;
+    if (set.words.len() != expected) $dense_bitset_u32_return false; fi;
+    if (expected == 0) $dense_bitset_u32_return true; fi;
+
+    let last := set.words[expected - 1] ?? $dense_bitset_u32_return false;
+    let used := dense_bitset_u32__last_mask(set.length) ??
+        $dense_bitset_u32_return false;
+    (last & (dense_bitset_u32__all_bits() ^ used)) == (0 -> u32)
+} -> u1;
+
+fn dense_bitset_u32_new (length : i64) {
+    let count := dense_bitset_u32__word_count(length) ??
+        $dense_bitset_u32_return;
+    new DenseBitSetU32(
+        length := length,
+        words := new u32 array(count, 0)
+    )
+} -> DenseBitSetU32;
+
+% duplicate indexは一度だけ立つ。範囲違反は値を返さない。%
+fn dense_bitset_u32_from_indices (
+    length : i64,
+    indices : i64 array alias
+) {
+    var at := 0;
+    while (at < indices.len()) {
+        let index := indices[at] ?? $dense_bitset_u32_return;
+        if (index < 0 || index >= length) $dense_bitset_u32_return; fi;
+        at += 1;
+    };
+
+    var set := dense_bitset_u32_new(length) ?? $dense_bitset_u32_return;
+    at := 0;
+    while (at < indices.len()) {
+        dense_bitset_u32_insert(
+            set, indices[at] ?? $dense_bitset_u32_return
+        ) ?? $dense_bitset_u32_return;
+        at += 1;
+    };
+    set
+} -> DenseBitSetU32;
+
+fn dense_bitset_u32_len (set : DenseBitSetU32 alias) {
+    if (! dense_bitset_u32_is_valid(set)) $dense_bitset_u32_return; fi;
+    set.length
+} -> i64;
+
+fn dense_bitset_u32_word_len (set : DenseBitSetU32 alias) {
+    if (! dense_bitset_u32_is_valid(set)) $dense_bitset_u32_return; fi;
+    set.words.len()
+} -> i64;
+
+fn dense_bitset_u32_is_empty (set : DenseBitSetU32 alias) {
+    if (! dense_bitset_u32_is_valid(set)) $dense_bitset_u32_return; fi;
+    var at := 0;
+    while (at < set.words.len()) {
+        if ((set.words[at] ?? $dense_bitset_u32_return) != (0 -> u32)) {
+            $dense_bitset_u32_return false;
+        } fi;
+        at += 1;
+    };
+    true
+} -> u1;
+
+fn dense_bitset_u32_contains (set : DenseBitSetU32 alias, index : i64) {
+    if (! dense_bitset_u32_is_valid(set) ||
+        index < 0 || index >= set.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    let word_index := index / 32;
+    let bit_index := index mod 32;
+    let mask : u32 := (1 -> u32) << bit_index;
+    ((set.words[word_index] ?? $dense_bitset_u32_return) & mask) != (0 -> u32)
+} -> u1;
+
+% 戻り値はmembershipが変わったか。%
+fn dense_bitset_u32_assign (
+    var set : DenseBitSetU32 alias,
+    index : i64,
+    value : u1
+) {
+    if (! dense_bitset_u32_is_valid(set) ||
+        index < 0 || index >= set.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    let word_index := index / 32;
+    let bit_index := index mod 32;
+    let mask : u32 := (1 -> u32) << bit_index;
+    let word := set.words[word_index] ?? $dense_bitset_u32_return;
+    let present := (word & mask) != (0 -> u32);
+    if (value) {
+        if (! present) set.words[word_index] := word | mask; fi;
+    } else {
+        if (present) {
+            set.words[word_index] := word &
+                (dense_bitset_u32__all_bits() ^ mask);
+        } fi;
+    } fi;
+    present != value
+} -> u1;
+
+fn dense_bitset_u32_insert (var set : DenseBitSetU32 alias, index : i64) {
+    dense_bitset_u32_assign(set, index, true)
+} -> u1;
+
+fn dense_bitset_u32_remove (var set : DenseBitSetU32 alias, index : i64) {
+    dense_bitset_u32_assign(set, index, false)
+} -> u1;
+
+fn dense_bitset_u32_clear (var set : DenseBitSetU32 alias) {
+    if (! dense_bitset_u32_is_valid(set)) $dense_bitset_u32_return; fi;
+    var at := 0;
+    while (at < set.words.len()) {
+        set.words[at] := 0 -> u32;
+        at += 1;
+    };
+    true
+} -> u1;
+
+fn dense_bitset_u32_fill (var set : DenseBitSetU32 alias) {
+    if (! dense_bitset_u32_is_valid(set)) $dense_bitset_u32_return; fi;
+    var at := 0;
+    while (at < set.words.len()) {
+        set.words[at] := dense_bitset_u32__all_bits();
+        at += 1;
+    };
+    if (set.words.len() > 0) {
+        set.words[set.words.len() - 1] :=
+            dense_bitset_u32__last_mask(set.length) ?? $dense_bitset_u32_return;
+    } fi;
+    true
+} -> u1;
+
+fn dense_bitset_u32_copy_from (
+    var target : DenseBitSetU32 alias,
+    source : DenseBitSetU32 alias
+) {
+    if (! dense_bitset_u32_is_valid(target) ||
+        ! dense_bitset_u32_is_valid(source) ||
+        target.length != source.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    var at := 0;
+    while (at < target.words.len()) {
+        target.words[at] := source.words[at] ?? $dense_bitset_u32_return;
+        at += 1;
+    };
+    true
+} -> u1;
+
+fn dense_bitset_u32_union_into (
+    var target : DenseBitSetU32 alias,
+    other : DenseBitSetU32 alias
+) {
+    if (! dense_bitset_u32_is_valid(target) ||
+        ! dense_bitset_u32_is_valid(other) ||
+        target.length != other.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    var at := 0;
+    while (at < target.words.len()) {
+        target.words[at] := (target.words[at] ?? $dense_bitset_u32_return) |
+            (other.words[at] ?? $dense_bitset_u32_return);
+        at += 1;
+    };
+    true
+} -> u1;
+
+fn dense_bitset_u32_intersection_into (
+    var target : DenseBitSetU32 alias,
+    other : DenseBitSetU32 alias
+) {
+    if (! dense_bitset_u32_is_valid(target) ||
+        ! dense_bitset_u32_is_valid(other) ||
+        target.length != other.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    var at := 0;
+    while (at < target.words.len()) {
+        target.words[at] := (target.words[at] ?? $dense_bitset_u32_return) &
+            (other.words[at] ?? $dense_bitset_u32_return);
+        at += 1;
+    };
+    true
+} -> u1;
+
+fn dense_bitset_u32_xor_into (
+    var target : DenseBitSetU32 alias,
+    other : DenseBitSetU32 alias
+) {
+    if (! dense_bitset_u32_is_valid(target) ||
+        ! dense_bitset_u32_is_valid(other) ||
+        target.length != other.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    var at := 0;
+    while (at < target.words.len()) {
+        target.words[at] := (target.words[at] ?? $dense_bitset_u32_return) ^
+            (other.words[at] ?? $dense_bitset_u32_return);
+        at += 1;
+    };
+    true
+} -> u1;
+
+fn dense_bitset_u32_difference_into (
+    var target : DenseBitSetU32 alias,
+    other : DenseBitSetU32 alias
+) {
+    if (! dense_bitset_u32_is_valid(target) ||
+        ! dense_bitset_u32_is_valid(other) ||
+        target.length != other.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    let all := dense_bitset_u32__all_bits();
+    var at := 0;
+    while (at < target.words.len()) {
+        target.words[at] := (target.words[at] ?? $dense_bitset_u32_return) &
+            (all ^ (other.words[at] ?? $dense_bitset_u32_return));
+        at += 1;
+    };
+    true
+} -> u1;
+
+fn dense_bitset_u32_complement_into (var set : DenseBitSetU32 alias) {
+    if (! dense_bitset_u32_is_valid(set)) $dense_bitset_u32_return; fi;
+    let all := dense_bitset_u32__all_bits();
+    var at := 0;
+    while (at < set.words.len()) {
+        set.words[at] := all ^ (set.words[at] ?? $dense_bitset_u32_return);
+        at += 1;
+    };
+    if (set.words.len() > 0) {
+        set.words[set.words.len() - 1] :=
+            (set.words[set.words.len() - 1] ?? $dense_bitset_u32_return) &
+            (dense_bitset_u32__last_mask(set.length) ?? $dense_bitset_u32_return);
+    } fi;
+    true
+} -> u1;
+
+fn dense_bitset_u32_count_ones (set : DenseBitSetU32 alias) {
+    if (! dense_bitset_u32_is_valid(set)) $dense_bitset_u32_return; fi;
+    var total := 0;
+    var at := 0;
+    while (at < set.words.len()) {
+        total += (set.words[at] ?? $dense_bitset_u32_return).count_ones();
+        at += 1;
+    };
+    total
+} -> i64;
+
+fn dense_bitset_u32_intersects (
+    left : DenseBitSetU32 alias,
+    right : DenseBitSetU32 alias
+) {
+    if (! dense_bitset_u32_is_valid(left) ||
+        ! dense_bitset_u32_is_valid(right) ||
+        left.length != right.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    var at := 0;
+    while (at < left.words.len()) {
+        if (((left.words[at] ?? $dense_bitset_u32_return) &
+             (right.words[at] ?? $dense_bitset_u32_return)) != (0 -> u32)) {
+            $dense_bitset_u32_return true;
+        } fi;
+        at += 1;
+    };
+    false
+} -> u1;
+
+fn dense_bitset_u32_is_subset (
+    subset : DenseBitSetU32 alias,
+    superset : DenseBitSetU32 alias
+) {
+    if (! dense_bitset_u32_is_valid(subset) ||
+        ! dense_bitset_u32_is_valid(superset) ||
+        subset.length != superset.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    var at := 0;
+    while (at < subset.words.len()) {
+        let a := subset.words[at] ?? $dense_bitset_u32_return;
+        let b := superset.words[at] ?? $dense_bitset_u32_return;
+        if ((a & b) != a) $dense_bitset_u32_return false; fi;
+        at += 1;
+    };
+    true
+} -> u1;
+
+% from以上で最初に立つindex。from == lengthと見つからない場合はparadox。%
+fn dense_bitset_u32_next_set (set : DenseBitSetU32 alias, from : i64) {
+    if (! dense_bitset_u32_is_valid(set) || from < 0 || from > set.length) {
+        $dense_bitset_u32_return;
+    } fi;
+    if (from == set.length) $dense_bitset_u32_return; fi;
+
+    var word_index := from / 32;
+    let bit_index := from mod 32;
+    var candidate : u32 := set.words[word_index] ?? $dense_bitset_u32_return;
+    if (bit_index > 0) {
+        let below : u32 := ((1 -> u32) << bit_index) - (1 -> u32);
+        candidate := candidate & (dense_bitset_u32__all_bits() ^ below);
+    } fi;
+
+    while (candidate == (0 -> u32)) {
+        word_index += 1;
+        if (word_index >= set.words.len()) $dense_bitset_u32_return; fi;
+        candidate := set.words[word_index] ?? $dense_bitset_u32_return;
+    };
+    word_index * 32 + candidate.trailing_zeros()
+} -> i64;
+
+fn dense_bitset_u32_first_set (set : DenseBitSetU32 alias) {
+    dense_bitset_u32_next_set(set, 0)
+} -> i64;
+
+% 0-basedでrank番目に立つindex。範囲外はparadox。%
+fn dense_bitset_u32_kth_set (set : DenseBitSetU32 alias, rank : i64) {
+    if (! dense_bitset_u32_is_valid(set) || rank < 0) {
+        $dense_bitset_u32_return;
+    } fi;
+    var remaining := rank;
+    var word_index := 0;
+    while (word_index < set.words.len()) {
+        var candidate : u32 := set.words[word_index] ?? $dense_bitset_u32_return;
+        let count := candidate.count_ones();
+        if (remaining < count) {
+            while (remaining > 0) {
+                candidate := candidate & (candidate - (1 -> u32));
+                remaining -= 1;
+            };
+            $dense_bitset_u32_return
+                word_index * 32 + candidate.trailing_zeros();
+        } fi;
+        remaining -= count;
+        word_index += 1;
+    };
+    $dense_bitset_u32_return
+} -> i64;

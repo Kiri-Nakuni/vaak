@@ -253,3 +253,36 @@ MODE=split RECORD_BYTES=4096 CHUNK_BYTES=16 ROUNDS=3 ENGINE=vm \
 scan cursorはdelimiter探索の内部位置であり、UTF-8 scalarやescapeがchunk途中にある時点で入力を受理したとは
 みなさない。完全なrecordになってから従来どおり全payloadをJSON parserへ渡す。したがってerror code/offsetと
 原子性は変えず、同じprefixの再走査だけを棄却した。この一標本からchunk size別の永続倍率は保証しない。
+
+## DenseBitSetU32 checkpoint
+
+2026-08-25、Linux x86_64、Intel Core i7-8650U、rustc 1.94.0、clang 18.1.3の環境で、
+2051 bitの同じ二集合を作り、union / intersection / xor / differenceを各32回、合計128回行った。
+各演算は同じ左集合から開始して立っているbit数をchecksumへ加える。u8版と融合flat版は演算・countを
+一loopにし、三走査flat版とnamed版はcopy・演算・countを同じ三走査にした。全caseの結果は88で一致した。
+構築と操作実行を測定へ含め、parse、check、type-check、VM compileは除いた。一度予熱後の5回medianである。
+
+| 表現 | payload要素 | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|---:|
+| u8-per-bit素朴配列（棄却） | 2051 u8 | 979.615046 ms | 710.116008 ms | 88 |
+| u32 word flat融合loop（性能上限対照） | 65 u32 | **34.797280 ms** | **25.096550 ms** | 88 |
+| u32 word flat三走査（named対照） | 65 u32 | 42.486729 ms | 27.428707 ms | 88 |
+| `DenseBitSetU32` named型（採用） | 65 u32 + length | 200.660835 ms | 73.143142 ms | 88 |
+
+```bash
+ROUNDS=5 cargo run --release --locked --example bench_dense_bitset
+```
+
+u8-per-bit案は融合flat packed案より木で28.152倍、VMで28.295倍遅く、payloadも2051 byte対260 byteで
+7.888倍大きい。このworkloadで速度・payloadの両方に負けたため、primary storage案として棄却する。
+`u8` payload値の0/1以外を別途拒む不変条件も必要になる。単一machine・単一規模の絶対倍率は保証しないが、
+再採用するならbit単位操作が支配する別workloadとmemory測定をpairedにする。
+
+同じ三走査にしたflat u32案でもnamed型は木で4.723倍、VMで2.667倍の時間を要した。融合loopは三走査flatより
+木で1.221倍、VMで1.093倍速く、loop fusionの差とnamed表現の差を混同しない対照にした。ただし生配列だけでは
+論理`length`が運べず、2051番目以降の末尾padding、長さ違いの二項演算、0-based範囲を一つの値として
+検査できない。
+TeX文字class・LVMINIBVS snapshot mask・競プロ集合で同じ値契約を渡す公開APIには採用せず、現backendの
+性能上限を測る対照としてだけ残す。named型もu8案より木で4.882倍、VMで9.709倍速かったが、flatとの差は
+関数frame、`set.words[i]`のcompound read/write、各公開操作のshape検査を含む。module privacyやplace fast path、
+bulk buildを導入する場合はこの同一checksumを再実行し、契約を弱めず差が縮むか確認する。

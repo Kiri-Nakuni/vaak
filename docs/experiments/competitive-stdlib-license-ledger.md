@@ -4,7 +4,7 @@
 > 外部実装をvendorする許可にもならない。
 
 - 調査日: 2026-08-24〜2026-08-25
-- 対象branch: `codex3/stdlib-json-jsonl`（P1 checkpointsを統合し、pure codecを追加）
+- 対象branch: `codex3/stdlib-dense-bitset`（`1bb004b`の統合checkpoint上へpure固定長集合を追加）
 - Vaak本体のlicense: [`docs/LICENSING.md`](../LICENSING.md)のとおりMIT
 - 規律: 公式仕様から契約・分類・計算量だけを調べ、source、test、解説文を転写・翻訳しない
 
@@ -107,6 +107,24 @@ error位置を直接構成するだけで、別JSON実装の出力をVaak source
 JSONLの毎record suffix copy案とbuffer-head案、毎chunk再探索案とscan cursor案は同じrepository内benchmarkで
 比較し、suffix copyと再探索を棄却した。測定値は`stdlib/BENCHMARK.md`へ残し、外部実装のbenchmarkや
 algorithmを入力にしていない。
+
+## DenseBitSetU32 checkpointで独立に定義したもの
+
+| Vaak source | 外部仕様・要求の入力 | 読まない範囲 / 独立性を固定する試験 |
+|---|---|---|
+| `ds/dense_bitset_u32.vaak` | TeX埋め込み・LVMINIBVS・競技programに共通して有限集合が必要という分類と、このrepositoryの既存stdlib規律だけ | LuaTeX、rtex、LVMINIBVS、競プロlibraryのsource/test/snippetを使わない。Rust `Vec<bool>`を結果oracleだけに使う240操作と三domain fixtureを三backendへ照合 |
+
+32-bit word、0-based index、末尾padding 0、同一長だけの集合演算、paradox、変更status、API名、実装loopは
+Vaakの現行`u32 array`、bit演算、alias、flowから独立に定義した。LuaTeX公式資料からTeX埋め込みに有限な
+文字分類が必要というdomain分類を得ても、LuaTeXのGPL-2.0-or-later source、header、test、bitset表現、APIを
+閲覧・転写していない。GPL-3.0のrtex repositoryからもcodeをVaakへ運ばず、PraTeX固有schema、catcode規則、
+file I/Oはこのsourceへ含めていない。添付されたLVMINIBVS評価から運んだのはsnapshot内の有限maskという
+要求だけで、game source、adapter、world identity、Unity/Lua APIは入力にしていない。
+
+Rust `Vec<bool>`は`tests/dense_bitset_u32.rs`内でmembership・集合演算・rank結果を計算するoracleに限定し、
+内部表現やalgorithmをVaak sourceへ転写しない。TeX fixtureのASCII code、LVMINIBVS fixtureの架空の12候補、
+競プロfixtureの70整数はこのcheckpoint用に独立構成したtest dataである。u8-per-bit、flat u32、named u32の
+比較もrepository内の同一workloadだけで測り、外部benchmark結果を入力にしていない。
 
 ## 今後の追記規則
 

@@ -20,3 +20,9 @@ pub const JSON_UTF8: &str = include_str!("../stdlib/codec/json_utf8.vaak");
 /// [`STRING`]、[`JSON_UTF8`]、このsourceの順に連結する。file/socket capabilityは
 /// 含まず、hostから渡されたbyte chunkと返却するowned `str`だけを扱う。
 pub const JSONL_UTF8: &str = include_str!("../stdlib/codec/jsonl_utf8.vaak");
+
+/// 固定長集合を32-bit wordへ詰めるpure Vaak source。
+///
+/// TeXの有限文字class、game snapshot内の有限mask、競技programの集合演算で
+/// 同じ表現を使える。host capabilityや特定applicationの意味は含まない。
+pub const DENSE_BITSET_U32: &str = include_str!("../stdlib/ds/dense_bitset_u32.vaak");

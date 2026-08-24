@@ -27,6 +27,7 @@ const LAZY_SEGTREE: &str = include_str!("../stdlib/ds/lazy_segtree_i64.vaak");
 const SPARSE_TABLE: &str = include_str!("../stdlib/ds/sparse_table_i64.vaak");
 const DISJOINT_SPARSE_TABLE: &str = include_str!("../stdlib/ds/disjoint_sparse_table_i64.vaak");
 const ORDERED_MULTISET: &str = include_str!("../stdlib/ds/ordered_multiset_i64.vaak");
+const DENSE_BITSET: &str = vaak::stdlib::DENSE_BITSET_U32;
 const ASCII_I64: &str = include_str!("../stdlib/io/ascii_i64.vaak");
 const STRING: &str = vaak::stdlib::STRING;
 const JSON_UTF8: &str = vaak::stdlib::JSON_UTF8;
@@ -199,6 +200,11 @@ fn 各ソースは単独または明示した依存だけで前置きできる()
         "値 7",
     );
     both(
+        &[DENSE_BITSET],
+        "var set := dense_bitset_u32_new(33) ?? new DenseBitSetU32(length := 0, words := []); dense_bitset_u32_insert(set, 32) ?? false; dense_bitset_u32_count_ones(set)",
+        "値 1",
+    );
+    both(
         &[ASCII_I64],
         r#"let input := "  -42 "; var at := 0; io_ascii_i64_read(input, at)"#,
         "値 -42",
@@ -302,6 +308,10 @@ fn 各ソースはsteelにも単独で前置きできる() {
             "let keys := [3, 7]; var set := ordered_multiset_i64_new(keys) ?? new OrderedMultisetI64(keys := [], fenwick := [], total := 0); ordered_multiset_i64_insert(set, 7) ?? false; ordered_multiset_i64_kth(set, 0)",
         ),
         (
+            DENSE_BITSET,
+            "var set := dense_bitset_u32_new(33) ?? new DenseBitSetU32(length := 0, words := []); dense_bitset_u32_insert(set, 32) ?? false; dense_bitset_u32_count_ones(set)",
+        ),
+        (
             ASCII_I64,
             r#"let input := "42"; var at := 0; io_ascii_i64_read(input, at)"#,
         ),
@@ -360,6 +370,7 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         SPARSE_TABLE,
         DISJOINT_SPARSE_TABLE,
         ORDERED_MULTISET,
+        DENSE_BITSET,
         ASCII_I64,
         STRING,
         JSON_UTF8,

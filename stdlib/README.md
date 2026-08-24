@@ -222,6 +222,40 @@ buffer上限は消費済みprefixを除く未読byteを数える。readerはbuff
 残り以上になった時だけcompactする。未完recordのdelimiter探索はscan cursorから再開するが、JSON parseと
 UTF-8検査はcomplete recordまで行わない。毎recordでsuffixを複製した案と、毎chunkで先頭から再探索した案は
 二次的に増加したため棄却し、測定値を[`BENCHMARK.md`](BENCHMARK.md)へ残した。
+
+## DenseBitSetU32
+
+[`ds/dense_bitset_u32.vaak`](ds/dense_bitset_u32.vaak)は、`length`個のbitを32-bit wordへ
+詰める固定長集合である。単独sourceであり、Rust hostからは
+`vaak::stdlib::DENSE_BITSET_U32`を利用者sourceの前へ置く。TeXの有限文字class、gameの一つの
+snapshot内にある有限解釈mask、競技programの頂点・状態集合を同じpure層で扱い、TeX engine、Unity、
+Lua、fileなどのhost capabilityは含まない。
+
+`DenseBitSetU32(length, words)`の有効な値は、`length >= 0`、
+`words.len() == ceil(length / 32)`、末尾wordの未使用bitが0の三条件を満たす。
+`dense_bitset_u32_is_valid`は公開fieldを直接変更した値も検査する。constructorと全mutationは
+このpaddingを保つ。二項演算は両方のshapeと同一`length`を更新前に検査し、違反時はtargetを変えず
+paradoxにする。
+
+| API群 | 契約 |
+|---|---|
+| `new`, `from_indices`, `len`, `word_len`, `is_valid`, `is_empty` | 負長・範囲外indexはparadox。重複indexは一bitとして扱う |
+| `contains`, `assign`, `insert`, `remove` | 0-based index。更新系はmembershipが実際に変わった時だけ`true` |
+| `clear`, `fill`, `copy_from` | その場更新。複製元と結果は独立したarrayを持つ |
+| `union_into`, `intersection_into`, `xor_into`, `difference_into`, `complement_into` | 固定長集合演算。末尾paddingは常に0 |
+| `count_ones`, `intersects`, `is_subset` | bit数・交差・包含を返す |
+| `first_set`, `next_set`, `kth_set` | 立っている0-based index。候補なし・rank範囲外はparadox |
+
+単一点操作はO(1)、集合演算・`count_ones`・全体変更はO(ceil(length / 32))である。
+`next_set`は開始位置を含み、`kth_set`のrankは0-based。空集合の`first_set`、
+`next_set(set, length)`、存在しないrankはいずれもparadoxで、`-1` sentinelを集合APIへ埋め込まない。
+payload要素だけを数えると2051 bitの`u8`一bit一要素版は2051 byte、packed版は65 word = 260 byteである。
+実runtimeのarray headerやallocator overheadを含むmemory実測ではない。
+
+`tests/dense_bitset_u32.rs`はRust `Vec<bool>`を独立oracleにした240操作に加え、TeX文字class、
+LVMINIBVS有限解釈mask、競プロ集合を参照実装・VM・STEEL nativeで同じ結果へ通す。u8-per-bit、
+packed flat配列、named型のpaired測定と棄却判断は[`BENCHMARK.md`](BENCHMARK.md)に残す。
+
 # pure Vaak ライブラリ試作
 
 これは未実装のモジュール構文を先取りしない、ソース単位のライブラリ試作である。
@@ -256,6 +290,7 @@ UTF-8検査はcomplete recordまで行わない。毎recordでsuffixを複製し
 | `ds/sparse_table_i64.vaak` | `SparseMinI64`, `SparseMaxI64`, `sparse_min_i64_*`, `sparse_max_i64_*` | immutableな固定min/max。build O(n log n)、半開区間query O(1) |
 | `ds/disjoint_sparse_table_i64.vaak` | `DisjointSparseSumI64`, `disjoint_sparse_sum_i64_*` | immutableなi64折返し和。build O(n log n)、半開区間query O(1) |
 | `ds/ordered_multiset_i64.vaak` | `OrderedMultisetI64`, `ordered_multiset_i64_*` | sorted unique universe固定。重複、順位、0-based k-thをO(log n)で扱う |
+| `ds/dense_bitset_u32.vaak` | `DenseBitSetU32`, `dense_bitset_u32_*` | 32-bit wordへ詰める固定長集合。末尾paddingを0に保ち、集合演算はword数に線形 |
 | `graph/csr_scc_two_sat_i64.vaak` | `CsrBuilderI64`, `CsrI64`, `SccResultI64`, `BfsResultI64`, `TopologicalResultI64`, `TwoSatI64` | 安定順序CSR、再帰なしSCC/BFS、辞書順topological、2-SAT。添字はi64固定 |
 | `io/ascii_i64.vaak` | `io_ascii_i64_*` | host-owned `str`の単体/bulk整数scannerと返却用bulk formatter。stdin/stdout自体は持たない |
 
