@@ -1,0 +1,117 @@
+# Vaak
+
+Vaak（ヴァーク）は、ホストへ埋め込み、短い計算kernelを繰り返し実行するための小さな静的型付き言語です。
+スタンドアロンでも動きますが、入出力、filesystem、TeX、Unity、Lua等のobjectは言語へ暗黙に持ち込まず、
+ホストが公開した値・関数・Snapshot/Patch境界を通します。
+
+このrepositoryは開発中です。言語意味論の正本は
+[`docs/vaak/decisions.md`](docs/vaak/decisions.md)、木を辿る参照実装は
+[`src/interp.rs`](src/interp.rs)です。実験文書や別backendが食い違う場合は、この二つを優先します。
+
+## まず動かす
+
+RustとCargoを用意し、repository rootで実行します。
+
+```console
+cargo build --release --locked
+cargo run --release --locked -- examples/vaak/01-探索.vaak
+```
+
+結果は`4499`です。もう少し小さい例なら、`.vaak`ファイルの最上位へ値を一つ残します。
+
+```vaak
+let width := 6;
+let height := 7;
+width * height
+```
+
+構文、型、`paradox`、`;`、`??`、host APIは
+[`docs/reference.md`](docs/reference.md)から読めます。試験されている例は
+[`examples/vaak/README.md`](examples/vaak/README.md)にあります。
+
+## 実行系
+
+| 実行系 | 入口 | 位置づけ |
+|---|---|---|
+| 参照実装 | `vaak file.vaak` | 木を辿る意味の基準 |
+| bytecode VM | Rust API / embedding API | prepare once / run manyの主な埋め込み経路 |
+| STEEL | `steel file.vaak` | LLVM IRを生成する部分実装。native化には`clang`が必要 |
+| Portable | `portable` | WASIまたは素のWASM C ABIからVMを使う入口 |
+| LSP | `vaak-lsp` | 構文・名前・領域・型診断と編集支援 |
+
+STEELは未対応機能を別の意味へ読み替えず、compile errorとして拒否します。backendの対応範囲と
+コマンドは[`docs/reference.md`](docs/reference.md#9-ツールと実装範囲)を参照してください。
+
+## Rustへ埋め込む
+
+[`src/embedding.rs`](src/embedding.rs)は、次を一つの公開境界にまとめます。
+
+- `HostLayout`: host値とhost functionの名前・順序・型を固定するdescriptor
+- `PreparedProgram`: parse、check、type-check、VM compileを一度だけ行った結果
+- `EmbeddingRunner`: runnerとscratchを再利用し、layout/value/function不一致を実行前に拒否
+
+PraTeX型の埋め込み実験とSnapshot → command buffer → validate → commitの分担は
+[`docs/experiments/embedding.md`](docs/experiments/embedding.md)にあります。hostの逐次作用は後続の
+Vaak errorで巻き戻らないため、複数更新を原子的にしたい場合はowned Patchを返し、hostが全体検査後に
+一回だけcommitします。
+
+## pure Vaak標準ライブラリ
+
+任意選択ライブラリはcore意味論を増やさず、既存Vaakだけで書かれています。module/importはまだ無いため、
+hostが必要なsourceを利用者programの前へ依存順で連結してから一度だけprepareします。
+
+このcheckpointには、文字列、配列・探索・整列、DSU、Fenwick、heap/deque、segment tree、sparse table、
+ordered multiset、CSR graph/SCC/BFS/topological sort/2-SAT、一括ASCII整数I/O、UTF-8 JSON/JSONL等の
+試作があります。公開関数、境界条件、依存順は[`stdlib/README.md`](stdlib/README.md)、測定と棄却案は
+[`stdlib/BENCHMARK.md`](stdlib/BENCHMARK.md)を参照してください。
+
+JSON/JSONLをRust hostから使う場合は、次の順で前置きします。codecはfileやsocketを開きません。
+
+```rust
+let source = format!(
+    "{}\n{}\n{}\n{}",
+    vaak::stdlib::STRING,
+    vaak::stdlib::JSON_UTF8,
+    vaak::stdlib::JSONL_UTF8,
+    application,
+);
+```
+
+## IRON VAAK (.NET / Unity)
+
+`codex3/iron-vaak-dotnet` branchでは、IRON VAAKのC ABI、`.NET Standard 2.1` / `.NET 8` facade、
+Unity向けUPM source package、製品非依存Lua plan adapterを縦切りしています。同じimmutable Snapshotを
+VaakとLuaへ渡し、両runtimeが完全にreturnした後にowned Patchを検査・合成する境界です。同期的な
+Lua → Vaak → Lua再入は作りません。
+
+現状はLinux x64で接続可能性を検証したadapter候補であり、production runtimeやLVMINIBVS採用済み機能では
+ありません。hard fuel、完全なmemory accounting、typed hook codec、Unity Editor/Player・Mono/IL2CPP・
+対象OS matrix、artifact hardeningが採用gateに残ります。IRON JIT VAAKも長期候補であり、VM fallbackや
+同じ差分fixtureを迂回しません。
+
+## 検証
+
+全体ゲートは次です。
+
+```console
+cargo test --release --locked --no-fail-fast -- --test-threads=1
+```
+
+`codex3/stdlib-json-jsonl`の2026-08-25 checkpointでは833件中826 passed、6 failed、1 ignoredです。
+6件は既知のSTEEL native配列共有問題に由来するgraph 3件、heap 1件、ASCII I/O 1件、string 1件で、
+JSON/JSONLの新規24件と参照実装・VMの回帰試験は通過しています。既知失敗を成功扱いせず、backend修正時に
+同じfixtureで解消を確認します。
+
+## 文書の地図
+
+- [実用リファレンス](docs/reference.md)
+- [動く例](examples/vaak/README.md)
+- [形式構文](docs/vaak/16-形式構文.md)
+- [設計判断の正本](docs/vaak/decisions.md)
+- [理由を書かない反論用probe](docs/vaak/probe.md)
+- [pure Vaak標準ライブラリ](stdlib/README.md)
+- [LSP・Zed・VS Code](editors/README.md)
+- [ライセンス境界](docs/LICENSING.md)
+
+Vaak本体は[MIT License](LICENSE)です。GPLのPraTeX/rtexからVaakへ運ぶのは要求、測定値、設計判断だけで、
+sourceやtestを転記しません。
