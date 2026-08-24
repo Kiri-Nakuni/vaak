@@ -1,0 +1,353 @@
+%{ i64 添字の有向 CSR、反復 SCC、2-SAT。
+
+   module/import と generic callback を先取りせず、この一ファイルだけを前置きして使う。
+   頂点と変数の添字は 0 以上個数未満。不正な添字・壊れた公開欄は paradox。
+   2-SAT の充足不能は通常の TwoSatResultI64(false, []) であり paradox ではない。
+
+   CSR は頂点ごとに辺の追加順を保つ。SCC は再帰を使わない Kosaraju 法で、異なる
+   成分を結ぶ辺 u -> v には group_of[u] < group_of[v] となる番号を決定的に付ける。
+   CSR 構築と SCC は O(V + E)、2-SAT は O(variables + clauses)。 }%
+
+flow $graph_i64_return = $repeat(break, getdepth());
+
+struct CsrBuilderI64 {
+    var vertex_count : i64;
+    var from : i64 array;
+    var to : i64 array;
+};
+
+struct CsrI64 {
+    var start : i64 array;
+    var to : i64 array;
+};
+
+struct SccResultI64 {
+    var group_count : i64;
+    var group_of : i64 array;
+};
+
+struct TwoSatI64 {
+    var variable_count : i64;
+    var from : i64 array;
+    var to : i64 array;
+};
+
+struct TwoSatResultI64 {
+    var satisfiable : u1;
+    var assignment : u1 array;
+};
+
+% n + 1 を i64 で表せない個数も、構築前に paradox とする。%
+fn csr_i64_builder_new (n : i64) {
+    if (n < 0 || n == 9223372036854775807) $graph_i64_return; fi;
+    new CsrBuilderI64 (
+        vertex_count := n,
+        from := new i64 array(0, 0),
+        to := new i64 array(0, 0)
+    )
+} -> CsrBuilderI64;
+
+fn csr_i64_builder_is_valid (builder : CsrBuilderI64 alias) {
+    if (builder.vertex_count < 0 ||
+        builder.vertex_count == 9223372036854775807 ||
+        builder.from.len() != builder.to.len()) $graph_i64_return false; fi;
+    nfor (i, 0, builder.from.len()) {
+        let from := builder.from[i] ?? $graph_i64_return;
+        let to := builder.to[i] ?? $graph_i64_return;
+        if (from < 0 || from >= builder.vertex_count ||
+            to < 0 || to >= builder.vertex_count) $graph_i64_return false; fi;
+    };
+    true
+} -> u1;
+
+% 追加 hot path 用の O(1) 検査。既存の辺端点は build が一度だけ検査する。%
+fn csr_i64_builder__shape_is_valid (builder : CsrBuilderI64 alias) {
+    builder.vertex_count >= 0 &&
+    builder.vertex_count != 9223372036854775807 &&
+    builder.from.len() == builder.to.len()
+} -> u1;
+
+% 成功時 true。検査を終えてから変更する。%
+fn csr_i64_builder_add_directed (var builder : CsrBuilderI64 alias,
+                                 from : i64, to : i64) {
+    if (! csr_i64_builder__shape_is_valid(builder) ||
+        from < 0 || from >= builder.vertex_count ||
+        to < 0 || to >= builder.vertex_count) $graph_i64_return; fi;
+    builder.from.push(from);
+    builder.to.push(to);
+    true
+} -> u1;
+
+% 無向辺は両向きの二辺。self-loop も同じ向きの二辺を追加する。%
+fn csr_i64_builder_add_undirected (var builder : CsrBuilderI64 alias,
+                                   a : i64, b : i64) {
+    if (! csr_i64_builder__shape_is_valid(builder) ||
+        a < 0 || a >= builder.vertex_count ||
+        b < 0 || b >= builder.vertex_count) $graph_i64_return; fi;
+    builder.from.push(a);
+    builder.to.push(b);
+    builder.from.push(b);
+    builder.to.push(a);
+    true
+} -> u1;
+
+fn csr_i64_build (builder : CsrBuilderI64 alias) {
+    if (! csr_i64_builder_is_valid(builder)) $graph_i64_return; fi;
+    var start : i64 array := new i64 array(builder.vertex_count + 1, 0);
+    nfor (edge, 0, builder.from.len()) {
+        let from := builder.from[edge] ?? $graph_i64_return;
+        start[from + 1] += 1;
+    };
+    nfor (vertex, 0, builder.vertex_count) {
+        start[vertex + 1] += start[vertex] ?? $graph_i64_return;
+    };
+
+    var cursor : i64 array := new i64 array(builder.vertex_count, 0);
+    nfor (vertex, 0, builder.vertex_count) {
+        cursor[vertex] := start[vertex] ?? $graph_i64_return;
+    };
+    var to : i64 array := new i64 array(builder.to.len(), 0);
+    nfor (edge, 0, builder.from.len()) {
+        let from := builder.from[edge] ?? $graph_i64_return;
+        let position := cursor[from] ?? $graph_i64_return;
+        to[position] := builder.to[edge] ?? $graph_i64_return;
+        cursor[from] += 1;
+    };
+    new CsrI64 ( start := start, to := to )
+} -> CsrI64;
+
+% O(1) query用の外形検査。全offset・全端点の検査はcsr_i64_is_validが行う。%
+fn csr_i64__shape_is_valid (graph : CsrI64 alias) {
+    if (graph.start.len() == 0) $graph_i64_return false; fi;
+    (graph.start[0] ?? $graph_i64_return) == 0 &&
+    (graph.start[graph.start.len() - 1] ?? $graph_i64_return) == graph.to.len()
+} -> u1;
+
+% 公開欄を直接変更した後にも使える O(V + E) の構造検査。%
+fn csr_i64_is_valid (graph : CsrI64 alias) {
+    if (! csr_i64__shape_is_valid(graph)) $graph_i64_return false; fi;
+    let vertex_count := graph.start.len() - 1;
+    var previous := 0;
+    nfor (i, 1, graph.start.len() - 1) {
+        let next := graph.start[i] ?? $graph_i64_return;
+        if (next < previous || next > graph.to.len()) $graph_i64_return false; fi;
+        previous := next;
+    };
+    if (previous != graph.to.len()) $graph_i64_return false; fi;
+    nfor (edge, 0, graph.to.len()) {
+        let to := graph.to[edge] ?? $graph_i64_return;
+        if (to < 0 || to >= vertex_count) $graph_i64_return false; fi;
+    };
+    true
+} -> u1;
+
+fn csr_i64_vertex_count (graph : CsrI64 alias) {
+    if (! csr_i64__shape_is_valid(graph)) $graph_i64_return; fi;
+    graph.start.len() - 1
+} -> i64;
+
+fn csr_i64_edge_count (graph : CsrI64 alias) {
+    if (! csr_i64__shape_is_valid(graph)) $graph_i64_return; fi;
+    graph.to.len()
+} -> i64;
+
+fn csr_i64_begin (graph : CsrI64 alias, vertex : i64) {
+    if (! csr_i64__shape_is_valid(graph) ||
+        vertex < 0 || vertex >= graph.start.len() - 1) $graph_i64_return; fi;
+    let begin := graph.start[vertex] ?? $graph_i64_return;
+    if (begin < 0 || begin > graph.to.len()) $graph_i64_return; fi;
+    begin
+} -> i64;
+
+fn csr_i64_end (graph : CsrI64 alias, vertex : i64) {
+    if (! csr_i64__shape_is_valid(graph) ||
+        vertex < 0 || vertex >= graph.start.len() - 1) $graph_i64_return; fi;
+    let begin := graph.start[vertex] ?? $graph_i64_return;
+    let end := graph.start[vertex + 1] ?? $graph_i64_return;
+    if (begin < 0 || begin > end || end > graph.to.len()) $graph_i64_return; fi;
+    end
+} -> i64;
+
+fn csr_i64_degree (graph : CsrI64 alias, vertex : i64) {
+    let begin := csr_i64_begin(graph, vertex) ?? $graph_i64_return;
+    let end := csr_i64_end(graph, vertex) ?? $graph_i64_return;
+    end - begin
+} -> i64;
+
+% vertex の offset 番目の行先。範囲外は paradox。%
+fn csr_i64_neighbor (graph : CsrI64 alias, vertex : i64, offset : i64) {
+    let begin := csr_i64_begin(graph, vertex) ?? $graph_i64_return;
+    let end := csr_i64_end(graph, vertex) ?? $graph_i64_return;
+    if (offset < 0 || offset >= end - begin) $graph_i64_return; fi;
+    let to := graph.to[begin + offset] ?? $graph_i64_return;
+    if (to < 0 || to >= graph.start.len() - 1) $graph_i64_return; fi;
+    to
+} -> i64;
+
+fn csr_i64_reverse (graph : CsrI64 alias) {
+    if (! csr_i64_is_valid(graph)) $graph_i64_return; fi;
+    let vertex_count := graph.start.len() - 1;
+    var builder := csr_i64_builder_new(vertex_count) ?? $graph_i64_return;
+    nfor (from, 0, vertex_count) {
+        let begin := graph.start[from] ?? $graph_i64_return;
+        let end := graph.start[from + 1] ?? $graph_i64_return;
+        nfor (edge, begin, end - begin) {
+            csr_i64_builder_add_directed(builder,
+                graph.to[edge] ?? $graph_i64_return, from) ?? $graph_i64_return;
+        };
+    };
+    csr_i64_build(builder)
+} -> CsrI64;
+
+% 再帰を使わない Kosaraju 法。成分番号は condensation DAG の位相順。%
+fn scc_i64 (graph : CsrI64 alias) {
+    if (! csr_i64_is_valid(graph)) $graph_i64_return; fi;
+    let vertex_count := graph.start.len() - 1;
+    var seen : u1 array := new u1 array(vertex_count, false);
+    var order : i64 array := new i64 array(0, 0);
+    var stack_vertex : i64 array := new i64 array(0, 0);
+    var stack_edge : i64 array := new i64 array(0, 0);
+
+    nfor (root, 0, vertex_count) {
+        if (! (seen[root] ?? $graph_i64_return)) {
+            seen[root] := true;
+            stack_vertex.push(root);
+            stack_edge.push(graph.start[root] ?? $graph_i64_return);
+            while (stack_vertex.len() > 0) {
+                let top := stack_vertex.len() - 1;
+                let vertex := stack_vertex[top] ?? $graph_i64_return;
+                let edge := stack_edge[top] ?? $graph_i64_return;
+                let end := graph.start[vertex + 1] ?? $graph_i64_return;
+                if (edge < end) {
+                    stack_edge[top] := edge + 1;
+                    let to := graph.to[edge] ?? $graph_i64_return;
+                    if (! (seen[to] ?? $graph_i64_return)) {
+                        seen[to] := true;
+                        stack_vertex.push(to);
+                        stack_edge.push(graph.start[to] ?? $graph_i64_return);
+                    } fi;
+                } else {
+                    stack_vertex.pop() ?? $graph_i64_return;
+                    stack_edge.pop() ?? $graph_i64_return;
+                    order.push(vertex);
+                } fi;
+            };
+        } fi;
+    };
+
+    let reversed := csr_i64_reverse(graph) ?? $graph_i64_return;
+    var group_of : i64 array := new i64 array(vertex_count, 0 - 1);
+    var group_count := 0;
+    var position := order.len();
+    while (position > 0) {
+        position -= 1;
+        let root := order[position] ?? $graph_i64_return;
+        if ((group_of[root] ?? $graph_i64_return) < 0) {
+            group_of[root] := group_count;
+            stack_vertex.push(root);
+            while (stack_vertex.len() > 0) {
+                let vertex := stack_vertex.pop() ?? $graph_i64_return;
+                let begin := reversed.start[vertex] ?? $graph_i64_return;
+                let end := reversed.start[vertex + 1] ?? $graph_i64_return;
+                nfor (edge, begin, end - begin) {
+                    let to := reversed.to[edge] ?? $graph_i64_return;
+                    if ((group_of[to] ?? $graph_i64_return) < 0) {
+                        group_of[to] := group_count;
+                        stack_vertex.push(to);
+                    } fi;
+                };
+            };
+            group_count += 1;
+        } fi;
+    };
+    new SccResultI64 ( group_count := group_count, group_of := group_of )
+} -> SccResultI64;
+
+fn scc_i64_same (result : SccResultI64 alias, a : i64, b : i64) {
+    if (result.group_count < 0 ||
+        a < 0 || a >= result.group_of.len() ||
+        b < 0 || b >= result.group_of.len()) $graph_i64_return; fi;
+    let group_a := result.group_of[a] ?? $graph_i64_return;
+    let group_b := result.group_of[b] ?? $graph_i64_return;
+    if (group_a < 0 || group_a >= result.group_count ||
+        group_b < 0 || group_b >= result.group_count) $graph_i64_return; fi;
+    group_a == group_b
+} -> u1;
+
+fn two_sat_i64_new (variable_count : i64) {
+    if (variable_count < 0 ||
+        variable_count > 4611686018427387903) $graph_i64_return; fi;
+    new TwoSatI64 (
+        variable_count := variable_count,
+        from := new i64 array(0, 0),
+        to := new i64 array(0, 0)
+    )
+} -> TwoSatI64;
+
+fn two_sat_i64_is_valid (solver : TwoSatI64 alias) {
+    if (solver.variable_count < 0 ||
+        solver.variable_count > 4611686018427387903 ||
+        solver.from.len() != solver.to.len()) $graph_i64_return false; fi;
+    let node_count := solver.variable_count * 2;
+    nfor (edge, 0, solver.from.len()) {
+        let from := solver.from[edge] ?? $graph_i64_return;
+        let to := solver.to[edge] ?? $graph_i64_return;
+        if (from < 0 || from >= node_count ||
+            to < 0 || to >= node_count) $graph_i64_return false; fi;
+    };
+    true
+} -> u1;
+
+% clause 追加 hot path 用の O(1) 検査。既存端点は solve が一度だけ検査する。%
+fn two_sat_i64__shape_is_valid (solver : TwoSatI64 alias) {
+    solver.variable_count >= 0 &&
+    solver.variable_count <= 4611686018427387903 &&
+    solver.from.len() == solver.to.len()
+} -> u1;
+
+% (variable_i == value_i) OR (variable_j == value_j) を追加する。%
+fn two_sat_i64_add_clause (var solver : TwoSatI64 alias,
+                           variable_i : i64, value_i : u1,
+                           variable_j : i64, value_j : u1) {
+    if (! two_sat_i64__shape_is_valid(solver) ||
+        variable_i < 0 || variable_i >= solver.variable_count ||
+        variable_j < 0 || variable_j >= solver.variable_count) $graph_i64_return; fi;
+    let literal_i := variable_i * 2 + if (value_i) 1 else 0 fi;
+    let literal_j := variable_j * 2 + if (value_j) 1 else 0 fi;
+    let not_i := variable_i * 2 + if (value_i) 0 else 1 fi;
+    let not_j := variable_j * 2 + if (value_j) 0 else 1 fi;
+    solver.from.push(not_i);
+    solver.to.push(literal_j);
+    solver.from.push(not_j);
+    solver.to.push(literal_i);
+    true
+} -> u1;
+
+% variable == value を単位節として追加する。%
+fn two_sat_i64_set_value (var solver : TwoSatI64 alias,
+                          variable : i64, value : u1) {
+    two_sat_i64_add_clause(solver, variable, value, variable, value)
+} -> u1;
+
+fn two_sat_i64_solve (solver : TwoSatI64 alias) {
+    if (! two_sat_i64_is_valid(solver)) $graph_i64_return; fi;
+    var builder := csr_i64_builder_new(solver.variable_count * 2) ?? $graph_i64_return;
+    nfor (edge, 0, solver.from.len()) {
+        csr_i64_builder_add_directed(builder,
+            solver.from[edge] ?? $graph_i64_return,
+            solver.to[edge] ?? $graph_i64_return) ?? $graph_i64_return;
+    };
+    let graph := csr_i64_build(builder) ?? $graph_i64_return;
+    let components := scc_i64(graph) ?? $graph_i64_return;
+    var assignment : u1 array := new u1 array(solver.variable_count, false);
+    nfor (variable, 0, solver.variable_count) {
+        let false_group := components.group_of[variable * 2] ?? $graph_i64_return;
+        let true_group := components.group_of[variable * 2 + 1] ?? $graph_i64_return;
+        if (false_group == true_group) $graph_i64_return new TwoSatResultI64 (
+            satisfiable := false,
+            assignment := new u1 array(0, false)
+        ); fi;
+        assignment[variable] := false_group < true_group;
+    };
+    new TwoSatResultI64 ( satisfiable := true, assignment := assignment )
+} -> TwoSatResultI64;

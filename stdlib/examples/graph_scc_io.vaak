@@ -1,0 +1,48 @@
+%{ stdlib/io/ascii_i64.vaak と stdlib/graph/csr_scc_two_sat_i64.vaak を
+   この順序に依存せず前置きして使う例。
+
+   hostが競技入力全体をstrで渡し、Vaakが「n m、続いてm本の有向辺」を読み、
+   「成分数、続いて各頂点の成分番号」をstrで一括返す。stdin/stdoutの名前や
+   streamingをこの例で新設しない。 }%
+
+flow $graph_example_return = $repeat(break, getdepth());
+
+fn graph_example_scc_solve (input : str alias) {
+    var cursor := 0;
+    let vertex_count := io_ascii_i64_read(input, cursor) ?? $graph_example_return;
+    let edge_count := io_ascii_i64_read(input, cursor) ?? $graph_example_return;
+    if (edge_count < 0) $graph_example_return; fi;
+    var builder := csr_i64_builder_new(vertex_count) ?? $graph_example_return;
+    nfor (edge, 0, edge_count) {
+        let from := io_ascii_i64_read(input, cursor) ?? $graph_example_return;
+        let to := io_ascii_i64_read(input, cursor) ?? $graph_example_return;
+        csr_i64_builder_add_directed(builder, from, to) ?? $graph_example_return;
+    };
+    if (io_ascii_i64_has_next(input, cursor)) $graph_example_return; fi;
+
+    let graph := csr_i64_build(builder) ?? $graph_example_return;
+    let components := scc_i64(graph) ?? $graph_example_return;
+    var output := "";
+    io_ascii_i64_append(output, components.group_count) ?? $graph_example_return;
+    io_ascii_i64_append_newline(output) ?? $graph_example_return;
+    nfor (vertex, 0, vertex_count) {
+        if (vertex > 0) io_ascii_i64_append_space(output) ?? $graph_example_return; fi;
+        io_ascii_i64_append(output,
+            components.group_of[vertex] ?? $graph_example_return) ?? $graph_example_return;
+    };
+    io_ascii_i64_append_newline(output) ?? $graph_example_return;
+    output
+} -> str;
+
+% hostから渡すinputの代わりにliteralを置いた自己検査。%
+let sample := "5 6 0 1 1 0 1 2 2 3 3 4 4 3";
+let answer := graph_example_scc_solve(sample) ?? "";
+var answer_cursor := 0;
+let count := io_ascii_i64_read(answer, answer_cursor) ?? -1;
+let g0 := io_ascii_i64_read(answer, answer_cursor) ?? -1;
+let g1 := io_ascii_i64_read(answer, answer_cursor) ?? -1;
+let g2 := io_ascii_i64_read(answer, answer_cursor) ?? -1;
+let g3 := io_ascii_i64_read(answer, answer_cursor) ?? -1;
+let g4 := io_ascii_i64_read(answer, answer_cursor) ?? -1;
+if (count == 3 && g0 == g1 && g0 < g2 && g2 < g3 && g3 == g4 &&
+    ! io_ascii_i64_has_next(answer, answer_cursor)) 42 else 0 fi

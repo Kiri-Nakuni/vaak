@@ -115,6 +115,7 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/fenwick_i64_flat.vaak` | `fenwick_i64_flat_*` | 生の配列一本を受ける性能対照。入れ子の左辺を作らない |
 | `ds/heap_i64.vaak` | `MinHeapI64`, `MaxHeapI64`, `min_heap_i64_*`, `max_heap_i64_*` | 固定比較の二分heap。heapify、push/pop/peek/replace |
 | `ds/deque_i64.vaak` | `DequeI64`, `deque_i64_*` | 容量倍増ring buffer。両端push/popは償却O(1) |
+| `graph/csr_scc_two_sat_i64.vaak` | `CsrBuilderI64`, `CsrI64`, `SccResultI64`, `TwoSatI64` | 安定順序CSR、再帰なしSCC、2-SAT。添字はi64固定 |
 | `io/ascii_i64.vaak` | `io_ascii_i64_*` | hostが一括で渡す`str`の整数scannerと返却用`str` formatter。stdin/stdout自体は持たない |
 
 配列を値引数で受けると深い複製になるため、読み取りは `alias`、破壊は
@@ -137,3 +138,12 @@ heapのmin/maxもgeneric callbackを使わず比較をhot loopへ直接書いた
 `io/ascii_i64.vaak`はS-4のhost境界を変えない。hostがstdin等を一括で`str`として渡し、Vaakは
 cursorを明示して読む。出力は`str`へ追記し、最上位の値としてhostへ返す。標準host名、streaming、
 buffer flushは未決であり、このsourceはそれらを暗黙に導入しない。
+
+graph sourceは各頂点内で辺の追加順を保つCSRを一度構築し、そのflat表現を反復Kosaraju SCCと
+2-SATで共有する。SCCの成分番号は異なる成分間の辺`u -> v`に対して`group_of[u] < group_of[v]`と
+なる位相順である。空graph、self-loop、parallel edge、切断graphを通常入力として扱う。2-SATの
+充足不能は`TwoSatResultI64(satisfiable := false, assignment := [])`であり、不正添字のparadoxと分ける。
+
+[`examples/graph_scc_io.vaak`](examples/graph_scc_io.vaak)はgraph sourceと`io/ascii_i64.vaak`を前置きし、
+host-ownedな一括入力`str`から有向辺を読み、一括出力`str`を返す接続例である。stdin/stdoutやhost名を
+pure libraryへ持ち込まず、既存の競技入力層とgraph演算を組み合わせる。
