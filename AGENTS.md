@@ -7,10 +7,17 @@
 |---|---|---|
 | **Claude** | Vaak の言語意味論、決定記録、STEEL | `src/` `docs/` `examples/` `editors/` |
 | **Codex** | PraTeX 埋め込みの additive API | `src/embedding.rs`、対応する試験と引き継ぎ文書。必要な支援変更だけ |
+| **Codex** | **IRON VAAK**（.NET版）と Unity/.NET native FFI v0 の独立設計 | `docs/iron-vaak/`。実装は設計checkpointの合意後だけ |
 | **Codex** | [PraTeX](https://git.trap.jp/Suima/vaak-rtex)（別版方） | PraTeX の中だけ |
 
 Codex の枝は **`codex2/pratex-embedding-api`**（基点 `codex2/main`）。以後も
 `codex2/` 以下で作業する。Claude の枝と優先順位をこの枝から書き換えない。
+
+IRON VAAK / Unity設計の専用枝は **`codex2/iron-vaak-unity-native`**、基点は
+`origin/codex2/full`の`7c5ccd706e4dc466dad45baf275c0b550c8bc777`である。この枝では
+Vaakの意味論へUnityやLuaの型・object・callbackを足さない。C#、Unity、Lua等との接続は
+version付きのcopy/batch境界として`docs/iron-vaak/`に記録し、意味論判断が必要になった箇所は
+未決事項として返す。合意前に`decisions.md`へ新しい`S-n`を足さない。
 
 PraTeX 埋め込みのための追加 API は進めてよい。ただし、既存の Vaak プログラムの意味、
 参照実装・VM・STEEL の結果、C-n/S-n の解釈を変える必要が出たら実装を止め、Claude に
