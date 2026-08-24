@@ -45,6 +45,39 @@ Snapshot/Patch bulk codecまでであり、C export header/symbol、Command、�
 Unity Editor/PlayerとIL2CPP実機matrixは未実施。段階6はmanaged Lua contractとfake adapterまでで、
 PUC-Lua C adapterおよび公式support対象製品は未選定である。
 
+## 長期候補: IRON JIT VAAK
+
+**IRON JIT VAAK**を、IRON VAAKの同じprepared jobをより速く実行するoptional backendとして長期候補に置く。
+これは新しいVaak方言ではなく、参照実装・bytecode VM・STEELと同じ結果を返す実装である。既存の固定C ABI、
+managed `SafeHandle` facade、Snapshot/Patchのcopy-only境界は変えず、backend選択をhost側のfeature negotiationにする。
+
+```text
+Vaak source + HostLayout
+  -> prepare/check/type-check once
+  -> VM bytecode (全targetのfallback)
+  -> optional JIT artifact (許可されたtargetだけ)
+  -> 同じ Snapshot/Patch/Diagnostic ABI
+```
+
+Unity PlayerのIL2CPP、iOS、console等はruntime code generationや実行可能memoryの制約が異なるため、JITを
+必須経路にしない。一般.NET desktopとJITを許すUnity Editorを最初のprototype候補にし、Playerはbytecode VMまたは
+将来のAOT artifactへ確実にfallbackする。managed `Reflection.Emit` / `DynamicMethod`だけに依存する設計も採らない。
+
+長期gate:
+
+1. 同じprepared programとhost layoutをVM/JITで共有し、JIT有無をscriptから観測できる意味にしない。
+2. 参照実装・VM・STEELとの差分fixtureをJITにも全件通す。未対応命令は黙って意味を変えずVMへfallbackする。
+3. warm workloadでprepare費、compile費、steady-state、code size、allocationを別々に測り、JITの閾値を決める。
+4. target triple、CPU feature、Vaak/ABI version、host layout hashをartifact identityへ含める。
+5. W^X、unwind、panic/exception隔離、code cache上限、破損artifact拒否をnative release gateに入れる。
+6. generated codeへUnity object、managed pointer、`lua_State`、callbackを埋め込まない。host accessは既存の
+   index付きlayoutとowned value境界だけを通す。
+7. JITをfuel/cancellation/security sandboxの代用にしない。それらは別の公開契約として扱う。
+
+最初の調査sliceはbackendを実装せず、PraTeX/Unity型workloadのVM profile、hot命令、compile amortization、
+x64/arm64 desktopで使えるJIT基盤のlicense/AOT共存性を比較する。その測定でsteady-stateの利益がcompile費と
+配布・保守費を上回る範囲を確認してからprototypeへ進む。
+
 ## 実装開始前の停止線
 
 - 同期`HostFn`をUnity/Luaのcallbackへ直結しない。v0 safe profileはsnapshot→planだけである。
