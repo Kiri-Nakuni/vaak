@@ -1,0 +1,71 @@
+%{ i64 配列の半開区間を、その場で昇順に merge sort する。
+
+   bottom-up merge なので再帰深さを使わない。左列を同値時に先に取る。
+   空区間と一要素区間は成功。不正範囲は変更前に paradox。
+   時間 O(n log n)、作業配列 O(n)。 }%
+
+flow $array_i64_merge_sort_return = $repeat(break, getdepth());
+
+fn array_i64_merge_sort_range (var xs : i64 array alias,
+                               first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) {
+        $array_i64_merge_sort_return;
+    } fi;
+    let length := last - first;
+    if (length < 2) $array_i64_merge_sort_return true; fi;
+
+    var scratch : i64 array := new i64 array(length, 0);
+    var width := 1;
+    while (width < length) {
+        var run := 0;
+        while (run < length) {
+            let left := run;
+            var middle := left + width;
+            if (middle > length) middle := length; fi;
+            var end := middle + width;
+            if (end > length) end := length; fi;
+
+            var left_at := left;
+            var right_at := middle;
+            var out := left;
+            while (left_at < middle && right_at < end) {
+                let left_value := xs[first + left_at] ?? $array_i64_merge_sort_return;
+                let right_value := xs[first + right_at] ?? $array_i64_merge_sort_return;
+                if (left_value <= right_value) {
+                    scratch[out] := left_value;
+                    left_at += 1;
+                } else {
+                    scratch[out] := right_value;
+                    right_at += 1;
+                } fi;
+                out += 1;
+            };
+            while (left_at < middle) {
+                scratch[out] := xs[first + left_at] ?? $array_i64_merge_sort_return;
+                left_at += 1;
+                out += 1;
+            };
+            while (right_at < end) {
+                scratch[out] := xs[first + right_at] ?? $array_i64_merge_sort_return;
+                right_at += 1;
+                out += 1;
+            };
+
+            var copy := left;
+            while (copy < end) {
+                xs[first + copy] := scratch[copy] ?? $array_i64_merge_sort_return;
+                copy += 1;
+            };
+            run := end;
+        };
+
+        if (width > length - width) width := length;
+        else width *= 2;
+        fi;
+    };
+    true
+} -> u1;
+
+fn array_i64_merge_sort (var xs : i64 array alias) {
+    array_i64_merge_sort_range(xs, 0, xs.len())
+} -> u1;

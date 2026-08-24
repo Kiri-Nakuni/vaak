@@ -3,8 +3,8 @@
 > **状態：実験checkpointの参照記録。** この文書は外部APIをVaakの確定仕様へ昇格させず、
 > 外部実装をvendorする許可にもならない。
 
-- 調査日: 2026-08-24
-- 対象branch: `codex2/stdlib-heap-deque`
+- 調査日: 2026-08-24〜2026-08-25
+- 対象branch: `codex3/stdlib-ordering`（旧structure / graph checkpointを統合）
 - Vaak本体のlicense: [`docs/LICENSING.md`](../LICENSING.md)のとおりMIT
 - 規律: 公式仕様から契約・分類・計算量だけを調べ、source、test、解説文を転写・翻訳しない
 
@@ -29,6 +29,20 @@
 
 三つとも外部snippetを検索・採用せず、Vaakの既存array、alias、flow、i64算術だけから実装した。
 Rust側の`Vec`/graph/snapshot modelはtest oracleに限定し、配布APIやVaak sourceへ転写していない。
+
+## fixed i64 ordering checkpointで独立に定義したもの
+
+| Vaak source | 外部実装の入力 | 独立性を固定する試験 |
+|---|---|---|
+| `array/i64/sort/insertion.vaak` | なし | 固定seed列をRust `Vec::sort`の結果と全要素比較 |
+| `array/i64/sort/heap.vaak` | なし | 同じ列と半開区間を三backendで比較し、O(1)作業領域のmax heapを独立実装 |
+| `array/i64/sort/merge.vaak` | なし | 同じ列をRust oracleと比較し、同値時に左列を選ぶstable契約を固定 |
+| `array/i64/partition/sorted_unique.vaak` | なし | 昇順違反時の原子性、空、重複、i64両端を独立fixtureで比較 |
+| `array/i64/compress.vaak` | なし | Rust `Vec::sort` / `dedup` / `binary_search`だけをoracleに使い、unique値と全rankを比較 |
+
+2026-08-25のordering実装では外部repository、競プロblog、snippet、生成済みcodeを入力にしていない。
+Rust標準ライブラリの結果は`tests/array_ordering.rs`内のoracleに限り、Vaak側のalgorithm、API名、文書へ
+転写していない。既存のACL参照記録も今回のsort / unique / coordinate compression契約の由来とは扱わない。
 
 ## 今後の追記規則
 

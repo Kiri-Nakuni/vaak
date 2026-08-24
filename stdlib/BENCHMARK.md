@@ -117,3 +117,22 @@ Vaakの再帰上限へ探索深さを重ねない。
 
 この一標本はAPI採否や大規模性能の結論ではない。次は辺密度、成分形状、backend、flat引数版をpairedにし、
 BFS/topological sortを同じCSRへ追加した後も、parse/check/compileと外部I/Oを実行時間へ混ぜず比較する。
+
+## fixed i64 ordering checkpoint
+
+2026-08-25、Ubuntu clang 18.1.3を持つLinux x86_64環境で
+`ROUNDS=3 cargo run --release --locked --example bench_array_ordering`を実行した。一度暖機後の3回平均で、
+parse、静的検査、VM compileは計測外である。三種のsortは同じ256要素の決定列を実行ごとに生成し、
+同じ順序依存checksumを返す。入力生成だけのcaseも同じ表へ残す。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| 256要素の入力生成と順序checksum | 1.037 ms | 0.384 ms | 22 |
+| insertion sort 256 | 31.178 ms | 28.854 ms | 123 |
+| heap sort 256 | 12.249 ms | 9.594 ms | 123 |
+| merge sort 256 | **9.453 ms** | **7.264 ms** | 123 |
+| 512要素の座標圧縮 | 37.070 ms | 27.475 ms | 101 |
+
+この規模と分布ではmerge sortが三種で最短だったが、allocationを含む一標本であり、crossoverや永続的な
+性能保証ではない。insertion sortはO(n²)、heap/mergeはO(n log n)で、heapだけ追加領域O(1)、mergeと
+座標圧縮はO(n)の作業配列を持つ。要素数、既整列率、重複率を変えたpaired測定を次の判断材料にする。

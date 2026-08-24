@@ -98,8 +98,8 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 # pure Vaak ライブラリ試作
 
 これは未実装のモジュール構文を先取りしない、ソース単位のライブラリ試作である。
-必要な `.vaak` だけを利用者ソースの前に置く。各ファイルは単独で前置きでき、
-別ファイルの暗黙の読み込みを要求しない。
+必要な `.vaak` だけを利用者ソースの前に置く。単独sourceはそのまま前置きでき、複合sourceは
+冒頭に列挙した依存sourceも明示して前置きする。別ファイルの暗黙の読み込みは行わない。
 
 ## 第一段
 
@@ -110,6 +110,11 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `array/i64/search_binary.vaak` | `array_i64_lower_bound*`, `upper_bound*`, `binary_find*`, `binary_contains*` | 昇順が前提。境界探索は空区間の先頭を返す |
 | `array/i64/reverse.vaak` | `array_i64_reverse*` | `var alias` でその場更新。成功は true、不正範囲は paradox |
 | `array/i64/prefix_sum.vaak` | `array_i64_prefix_sum`, `array_i64_prefix_range_sum` | 結果は n + 1 要素。空区間の和は 0 |
+| `array/i64/sort/insertion.vaak` | `array_i64_insertion_sort*` | stable、in-place。O(n²)、追加領域O(1) |
+| `array/i64/sort/heap.vaak` | `array_i64_heap_sort*` | unstable、in-place。O(n log n)、追加領域O(1) |
+| `array/i64/sort/merge.vaak` | `array_i64_merge_sort*` | stable、bottom-up。O(n log n)、作業配列O(n) |
+| `array/i64/partition/sorted_unique.vaak` | `array_i64_sorted_unique_in_place` | 昇順を先に検査し、隣接重複をその場で除いて長さを返す |
+| `array/i64/compress.vaak` | `CoordinateCompressionI64`, `array_i64_coordinate_compress`, `coordinate_compression_i64_*` | 元配列を保ち、昇順unique値と0-based rankを返す。binary search・merge sort・sorted uniqueへ明示依存 |
 | `ds/dsu_i64.vaak` | `DsuI64`, `dsu_i64_*` | union by size + path compression。添字範囲外は paradox |
 | `ds/rollback_dsu_i64.vaak` | `RollbackDsuI64`, `rollback_dsu_i64_*` | successful mergeだけをsnapshotへ保存。rollback可能にするためpath compressionは使わない |
 | `ds/weighted_dsu_i64.vaak` | `WeightedDsuI64`, `weighted_dsu_i64_*` | i64折返し加法群のpotential差。不整合constraintはparadox |
@@ -126,6 +131,15 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 配列を値引数で受けると深い複製になるため、読み取りは `alias`、破壊は
 `var alias` に揃えた。subarray を別名にせず `(xs, first, last)` の半開区間を渡す。
 総和は Vaak の `i64` と同じく溢れたとき折り返す。
+
+三種のsortは配列全体版と`[first, last)`版を持つ。有効な空区間と一要素区間は成功し、負数、逆転、
+末尾越えは変更前にparadoxへする。insertion/mergeは同値要素を追い越さず、heapは安定性を保証しない。
+`sorted_unique`も昇順違反を全走査してから変更するため、不正入力を途中まで圧縮しない。
+
+座標圧縮は入力を複製してstable merge sortとsorted uniqueを適用し、元の各値をbinary searchでrankへ写す。
+空入力は空の`unique_values`と`ranks`を持つ通常結果で、欠損値の`rank_of`と範囲外`value_at`はparadox。
+公開欄を直接変えた後の外形は`coordinate_compression_i64_is_valid`で検査できるが、module privacyの代用となる
+新しい不変条件は導入しない。
 
 通常`DsuI64`はunion by sizeとpath compressionで償却O(alpha(n))、`RollbackDsuI64`はunion by sizeだけで
 leader/mergeがO(log n)である。rollback版の`snapshot`はsuccessful merge数を返し、同一集合mergeは履歴を

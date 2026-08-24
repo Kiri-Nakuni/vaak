@@ -150,6 +150,35 @@ reference / VM / STEELへ流す。外部仕様の参照範囲は
 2026-08-24のfocused gateは26 passed、全release gateは760 passed、0 failed、1 ignored。STEEL LLVM IR生成は
 成功し、このmachineにclangが無いためnative実行部分だけを既存方針どおりskipした。
 
+### 4.3 P1第一checkpoint: 固定i64 ordering
+
+module、generic比較、callbackを増やさず、配列の順序層を次の細粒度sourceへ分けた。
+
+| source | 公開操作 | 時間 | 追加領域・安定性 |
+|---|---|---:|---|
+| `array/i64/sort/insertion.vaak` | 全体 / 半開区間sort | O(n²) | O(1)、stable |
+| `array/i64/sort/heap.vaak` | 全体 / 半開区間sort | O(n log n) | O(1)、unstable |
+| `array/i64/sort/merge.vaak` | 全体 / 半開区間sort | O(n log n) | O(n)、stable |
+| `array/i64/partition/sorted_unique.vaak` | 昇順検査後のin-place unique | O(n) | O(1) |
+| `array/i64/compress.vaak` | unique値/rank構築、rank/value往復、外形検査 | 構築O(n log n) | O(n) |
+
+sortの範囲は`[first, last)`で、有効な空・一要素区間は成功する。負数、逆転、末尾越えは変更前にparadox。
+sorted uniqueも昇順を先に全検査し、不正列を部分的に短縮しない。座標圧縮は入力を保持し、昇順で重複のない
+`unique_values`と元要素ごとの0-based `ranks`を返す。空入力は空の通常結果、欠損値と範囲外rankはparadox。
+
+`compress.vaak`は既存binary search、今回のmerge sort、sorted uniqueを冒頭で明示依存にし、同じ判断を
+別sourceへ複製しない。`tests/array_ordering.rs`ではRust `Vec::sort` / `dedup` / `binary_search`を独立oracleにし、
+重複、空、不正範囲、`i64::MIN/MAX`、元配列保持をreference / VM / STEEL nativeへ同じsourceで流す。
+Ubuntu clang 18.1.3の2026-08-25 focused gateは10 passed、0 failed、inventoryの`tests/array_library.rs`は
+12 passed、0 failedだった。benchmarkのraw値は`stdlib/BENCHMARK.md`へ分離した。
+
+統合した旧checkpointはclang無しの環境でnative部分をskipしていた。現在のLinux環境での全release gateは
+776 passed、6 failed、1 ignored。失敗は今回未変更のnative試験だけで、旧`tests/graph_library.rs`の
+SCC I/Oとtopological sort二件がsignal終了、旧`tests/heap_deque.rs`の長いrandom heap列、
+`tests/io_ascii_i64.rs`のformatter/scanner往復、`tests/string_library.rs`のpure Vaak例がexit 0になった。
+各testのreference / VMは一致する。このP1ではcore・STEEL・旧sourceを変更せず、継承baselineとして残して
+意味論所有者の領域へ先回りしない。
+
 ## 5. flat graph checkpoint
 
 `stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
@@ -258,7 +287,7 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 | 順位 | まとまり | 具体的な順序 | 先に満たすgate |
 |---:|---|---|---|
 | P0 済 | 基準構造 | 通常/rollback/weighted DSU、通常/count Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 第三checkpointまでの差分試験とbench |
-| P1 | 静的range・順序・低alloc I/O | array sort/compress → sparse/disjoint sparse table → 圧縮済みordered multiset → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
+| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress済** → sparse/disjoint sparse table → 圧縮済みordered multiset → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
 | P2 | byte string・trie・基礎数値 | Z/prefix/KMP → flat byte trie → Aho-Corasick/Manacher → gcd/extgcd/isqrt/sieve/factorization →安全なmod算術 | `str`はbyte列、i64中間幅、allocation測定 |
 | P3 | flat graph | CSR → BFS/DFS/topological sort → SCC → 2-SAT → Dijkstra → LCA/HLD | graph/resultをflat化、決定的tie-break |
 | P4 | 高級構造・flow | wavelet matrix、persistent/rollback構造、Li Chao、maxflow、min-cost flow | memory上限、再帰深さ、overflow、backend差 |
@@ -266,7 +295,7 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 
 P1内では次の小checkpoint順にする。
 
-1. `array/i64`のinsertion/heap/merge sort、sorted unique、座標圧縮を先に置く。
+1. 完了: `array/i64`のinsertion/heap/merge sort、sorted unique、座標圧縮。
 2. `SparseMinI64` / `SparseMaxI64`のidempotent O(1) queryと、固定sum用disjoint sparse tableを比較する。
    `gcd`版は`i64::MIN`の符号・identity契約を先に決める。
 3. sorted uniqueなuniverseを構築時に受ける`OrderedMultisetI64`候補を、Fenwickのprefix countとk-th探索で作る。
@@ -291,7 +320,8 @@ divisor列挙、pow/mod inverse/CRT/floor sum、固定modulus組合せの順を�
 ### Phase A: 現行機能だけの基礎
 
 - range check、copy/fill/reverse/rotate、linear/binary search、prefix/difference
-- insertion/heap/merge sort、partition/select、coordinate compression、permutation
+- 実装済み: insertion/heap/merge sort、sorted unique、coordinate compression
+- 候補: partition/select、permutation
 - DSU、Fenwick、min/max heap、deque、bitset
 - gcd/lcm、pow_mod、inv_mod、crt、floor_sum
 - byte列のZ algorithm、prefix function

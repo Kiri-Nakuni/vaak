@@ -8,6 +8,11 @@ const LINEAR: &str = include_str!("../stdlib/array/i64/search_linear.vaak");
 const BINARY: &str = include_str!("../stdlib/array/i64/search_binary.vaak");
 const REVERSE: &str = include_str!("../stdlib/array/i64/reverse.vaak");
 const PREFIX: &str = include_str!("../stdlib/array/i64/prefix_sum.vaak");
+const INSERTION_SORT: &str = include_str!("../stdlib/array/i64/sort/insertion.vaak");
+const HEAP_SORT: &str = include_str!("../stdlib/array/i64/sort/heap.vaak");
+const MERGE_SORT: &str = include_str!("../stdlib/array/i64/sort/merge.vaak");
+const SORTED_UNIQUE: &str = include_str!("../stdlib/array/i64/partition/sorted_unique.vaak");
+const COMPRESS: &str = include_str!("../stdlib/array/i64/compress.vaak");
 const DSU: &str = include_str!("../stdlib/ds/dsu_i64.vaak");
 const ROLLBACK_DSU: &str = include_str!("../stdlib/ds/rollback_dsu_i64.vaak");
 const WEIGHTED_DSU: &str = include_str!("../stdlib/ds/weighted_dsu_i64.vaak");
@@ -65,7 +70,7 @@ fn both(parts: &[&str], body: &str, expected: &str) {
 }
 
 #[test]
-fn 各ソースは単独で前置きできる() {
+fn 各ソースは単独または明示した依存だけで前置きできる() {
     both(
         &[RANGE],
         "if (range_is_valid(3, 0, 3)) 42 else 0 fi",
@@ -90,6 +95,31 @@ fn 各ソースは単独で前置きできる() {
         &[PREFIX],
         "let xs := [42]; let p := array_i64_prefix_sum(xs) ?? [0]; p[1]",
         "値 42",
+    );
+    both(
+        &[INSERTION_SORT],
+        "var xs := [2, 1]; array_i64_insertion_sort(xs) ?? false; xs[0]",
+        "値 1",
+    );
+    both(
+        &[HEAP_SORT],
+        "var xs := [2, 1]; array_i64_heap_sort(xs) ?? false; xs[0]",
+        "値 1",
+    );
+    both(
+        &[MERGE_SORT],
+        "var xs := [2, 1]; array_i64_merge_sort(xs) ?? false; xs[0]",
+        "値 1",
+    );
+    both(
+        &[SORTED_UNIQUE],
+        "var xs := [1, 1]; array_i64_sorted_unique_in_place(xs) ?? 0",
+        "値 1",
+    );
+    both(
+        &[BINARY, MERGE_SORT, SORTED_UNIQUE, COMPRESS],
+        "let xs := [7, 3, 7]; let c := array_i64_coordinate_compress(xs) ?? new CoordinateCompressionI64(unique_values := [0], ranks := [0]); coordinate_compression_i64_len(c)",
+        "値 2",
     );
     both(
         &[DSU],
@@ -163,6 +193,22 @@ fn 各ソースはsteelにも単独で前置きできる() {
             "let xs := [42]; let p := array_i64_prefix_sum(xs) ?? [0]; p[1]",
         ),
         (
+            INSERTION_SORT,
+            "var xs := [2, 1]; array_i64_insertion_sort(xs) ?? false; xs[0]",
+        ),
+        (
+            HEAP_SORT,
+            "var xs := [2, 1]; array_i64_heap_sort(xs) ?? false; xs[0]",
+        ),
+        (
+            MERGE_SORT,
+            "var xs := [2, 1]; array_i64_merge_sort(xs) ?? false; xs[0]",
+        ),
+        (
+            SORTED_UNIQUE,
+            "var xs := [1, 1]; array_i64_sorted_unique_in_place(xs) ?? 0",
+        ),
+        (
             DSU,
             "let d := dsu_i64_new(3) ?? new DsuI64(parent_or_size := [0]); dsu_i64_len(d)",
         ),
@@ -212,6 +258,10 @@ fn 各ソースはsteelにも単独で前置きできる() {
         let prog = vaak::parser::parse(&src).expect("構文");
         vaak::steel::compile(&prog).unwrap_or_else(|e| panic!("{body}: STEEL: {}", e.msg));
     }
+    let body = "let xs := [7, 3, 7]; let c := array_i64_coordinate_compress(xs) ?? new CoordinateCompressionI64(unique_values := [0], ranks := [0]); coordinate_compression_i64_len(c)";
+    let src = checked(&[BINARY, MERGE_SORT, SORTED_UNIQUE, COMPRESS], body);
+    let prog = vaak::parser::parse(&src).expect("構文");
+    vaak::steel::compile(&prog).unwrap_or_else(|e| panic!("座標圧縮: STEEL: {}", e.msg));
 }
 
 #[test]
@@ -222,6 +272,11 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         BINARY,
         REVERSE,
         PREFIX,
+        INSERTION_SORT,
+        HEAP_SORT,
+        MERGE_SORT,
+        SORTED_UNIQUE,
+        COMPRESS,
         DSU,
         ROLLBACK_DSU,
         WEIGHTED_DSU,

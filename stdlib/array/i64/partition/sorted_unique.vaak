@@ -1,0 +1,33 @@
+%{ 昇順の i64 配列から隣接重複をその場で除く。
+
+   入力全体が昇順でなければ変更前に paradox。空配列は長さ 0。
+   成功時は縮めた後の長さを返す。時間 O(n)、追加領域 O(1)。 }%
+
+flow $array_i64_sorted_unique_return = $repeat(break, getdepth());
+
+fn array_i64_sorted_unique_in_place (var xs : i64 array alias) {
+    var check := 1;
+    while (check < xs.len()) {
+        if ((xs[check - 1] ?? $array_i64_sorted_unique_return) >
+            (xs[check] ?? $array_i64_sorted_unique_return)) {
+            $array_i64_sorted_unique_return;
+        } fi;
+        check += 1;
+    };
+    if (xs.len() == 0) $array_i64_sorted_unique_return 0; fi;
+
+    var write := 1;
+    var read := 1;
+    while (read < xs.len()) {
+        let value := xs[read] ?? $array_i64_sorted_unique_return;
+        if (value != (xs[write - 1] ?? $array_i64_sorted_unique_return)) {
+            xs[write] := value;
+            write += 1;
+        } fi;
+        read += 1;
+    };
+    while (xs.len() > write) {
+        xs.pop() ?? $array_i64_sorted_unique_return;
+    };
+    write
+} -> i64;

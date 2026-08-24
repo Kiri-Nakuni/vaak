@@ -1,0 +1,32 @@
+%{ i64 配列の半開区間を、その場で昇順に insertion sort する。
+
+   破壊対象は var alias。空区間と一要素区間は成功である。
+   不正範囲は変更前に paradox。時間 O(n^2)、追加領域 O(1)。
+   同値要素を追い越さない。 }%
+
+flow $array_i64_insertion_sort_return = $repeat(break, getdepth());
+
+fn array_i64_insertion_sort_range (var xs : i64 array alias,
+                                   first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) {
+        $array_i64_insertion_sort_return;
+    } fi;
+
+    var read := first + 1;
+    while (read < last) {
+        let value := xs[read] ?? $array_i64_insertion_sort_return;
+        var write := read;
+        while (write > first &&
+               (xs[write - 1] ?? $array_i64_insertion_sort_return) > value) {
+            xs[write] := xs[write - 1] ?? $array_i64_insertion_sort_return;
+            write -= 1;
+        };
+        xs[write] := value;
+        read += 1;
+    };
+    true
+} -> u1;
+
+fn array_i64_insertion_sort (var xs : i64 array alias) {
+    array_i64_insertion_sort_range(xs, 0, xs.len())
+} -> u1;

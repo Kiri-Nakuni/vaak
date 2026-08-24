@@ -1,0 +1,93 @@
+%{ i64 配列の座標圧縮。
+
+   前置き依存:
+   - array/i64/search_binary.vaak
+   - array/i64/sort/merge.vaak
+   - array/i64/partition/sorted_unique.vaak
+
+   元配列を変えず、昇順の unique_values と、元要素ごとの 0-based ranks を返す。
+   構築は O(n log n)、追加領域 O(n)。欠損値・範囲外rankは paradox。 }%
+
+flow $array_i64_compress_return = $repeat(break, getdepth());
+
+struct CoordinateCompressionI64 {
+    var unique_values : i64 array;
+    var ranks : i64 array;
+};
+
+fn array_i64_coordinate_compress (xs : i64 array alias) {
+    var unique_values := xs;
+    array_i64_merge_sort(unique_values) ?? $array_i64_compress_return;
+    array_i64_sorted_unique_in_place(unique_values) ?? $array_i64_compress_return;
+
+    var ranks : i64 array := new i64 array(xs.len(), 0);
+    nfor (i, 0, xs.len()) {
+        let value := xs[i] ?? $array_i64_compress_return;
+        let rank := array_i64_lower_bound(unique_values, value) ??
+            $array_i64_compress_return;
+        if (rank >= unique_values.len()) {
+            $array_i64_compress_return;
+        } fi;
+        if ((unique_values[rank] ?? $array_i64_compress_return) != value) {
+            $array_i64_compress_return;
+        } fi;
+        ranks[i] := rank;
+    };
+    new CoordinateCompressionI64 (
+        unique_values := unique_values,
+        ranks := ranks
+    )
+} -> CoordinateCompressionI64;
+
+fn coordinate_compression_i64_len (compression : CoordinateCompressionI64 alias) {
+    compression.unique_values.len()
+} -> i64;
+
+fn coordinate_compression_i64_rank_of (compression : CoordinateCompressionI64 alias,
+                                       value : i64) {
+    var lo := 0;
+    var hi := compression.unique_values.len();
+    while (lo < hi) {
+        let middle := lo + (hi - lo) / 2;
+        if ((compression.unique_values[middle] ?? $array_i64_compress_return) < value) {
+            lo := middle + 1;
+        } else {
+            hi := middle;
+        } fi;
+    };
+    let rank := lo;
+    if (rank >= compression.unique_values.len()) {
+        $array_i64_compress_return;
+    } fi;
+    if ((compression.unique_values[rank] ?? $array_i64_compress_return) != value) {
+        $array_i64_compress_return;
+    } fi;
+    rank
+} -> i64;
+
+fn coordinate_compression_i64_value_at (compression : CoordinateCompressionI64 alias,
+                                        rank : i64) {
+    if (rank < 0 || rank >= compression.unique_values.len()) {
+        $array_i64_compress_return;
+    } fi;
+    compression.unique_values[rank]
+} -> i64;
+
+% 公開欄を直接変更した後にも使える O(unique + ranks) の外形検査。%
+fn coordinate_compression_i64_is_valid (compression : CoordinateCompressionI64 alias) {
+    var i := 1;
+    while (i < compression.unique_values.len()) {
+        if ((compression.unique_values[i - 1] ?? $array_i64_compress_return) >=
+            (compression.unique_values[i] ?? $array_i64_compress_return)) {
+            $array_i64_compress_return false;
+        } fi;
+        i += 1;
+    };
+    nfor (rank_at, 0, compression.ranks.len()) {
+        let rank := compression.ranks[rank_at] ?? $array_i64_compress_return;
+        if (rank < 0 || rank >= compression.unique_values.len()) {
+            $array_i64_compress_return false;
+        } fi;
+    };
+    true
+} -> u1;

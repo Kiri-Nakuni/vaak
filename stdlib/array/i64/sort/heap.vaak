@@ -1,0 +1,82 @@
+%{ i64 配列の半開区間を、その場で昇順に heap sort する。
+
+   max heap を同じ区間内に作り、末尾へ最大値を確定する。
+   空区間と一要素区間は成功。不正範囲は変更前に paradox。
+   時間 O(n log n)、追加領域 O(1)、stable ではない。 }%
+
+flow $array_i64_heap_sort_return = $repeat(break, getdepth());
+
+fn array_i64_heap_sort_range (var xs : i64 array alias,
+                              first : i64, last : i64) {
+    if (first < 0 || first > last || last > xs.len()) {
+        $array_i64_heap_sort_return;
+    } fi;
+    let length := last - first;
+    if (length < 2) $array_i64_heap_sort_return true; fi;
+
+    var root := 0;
+    var sifting := true;
+    var left := 0;
+    var right := 0;
+    var child := 0;
+    var root_value := 0;
+    var child_value := 0;
+    var should_swap := false;
+    var parent := length / 2;
+    while (parent > 0) {
+        parent -= 1;
+        root := parent;
+        sifting := true;
+        while (sifting && root < length / 2) {
+            left := root * 2 + 1;
+            right := left + 1;
+            child := left;
+            if (right < length) {
+                if ((xs[first + right] ?? $array_i64_heap_sort_return) >
+                    (xs[first + left] ?? $array_i64_heap_sort_return)) {
+                    child := right;
+                } fi;
+            } fi;
+            root_value := xs[first + root] ?? $array_i64_heap_sort_return;
+            child_value := xs[first + child] ?? $array_i64_heap_sort_return;
+            should_swap := root_value < child_value;
+            if (should_swap) xs[first + root] := child_value; fi;
+            if (should_swap) xs[first + child] := root_value; fi;
+            if (should_swap) root := child; fi;
+            if (! should_swap) sifting := false; fi;
+        };
+    };
+
+    var remaining := length;
+    while (remaining > 1) {
+        remaining -= 1;
+        let saved := xs[first] ?? $array_i64_heap_sort_return;
+        xs[first] := xs[first + remaining] ?? $array_i64_heap_sort_return;
+        xs[first + remaining] := saved;
+        root := 0;
+        sifting := true;
+        while (sifting && root < remaining / 2) {
+            left := root * 2 + 1;
+            right := left + 1;
+            child := left;
+            if (right < remaining) {
+                if ((xs[first + right] ?? $array_i64_heap_sort_return) >
+                    (xs[first + left] ?? $array_i64_heap_sort_return)) {
+                    child := right;
+                } fi;
+            } fi;
+            root_value := xs[first + root] ?? $array_i64_heap_sort_return;
+            child_value := xs[first + child] ?? $array_i64_heap_sort_return;
+            should_swap := root_value < child_value;
+            if (should_swap) xs[first + root] := child_value; fi;
+            if (should_swap) xs[first + child] := root_value; fi;
+            if (should_swap) root := child; fi;
+            if (! should_swap) sifting := false; fi;
+        };
+    };
+    true
+} -> u1;
+
+fn array_i64_heap_sort (var xs : i64 array alias) {
+    array_i64_heap_sort_range(xs, 0, xs.len())
+} -> u1;
