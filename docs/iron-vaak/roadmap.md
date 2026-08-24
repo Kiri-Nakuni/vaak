@@ -1,6 +1,6 @@
 # IRON VAAK / Unity native連携 roadmap
 
-更新日: 2026-08-24
+更新日: 2026-08-25
 
 ## 位置づけ
 
@@ -44,6 +44,18 @@ Snapshot/Patch bulk codecまでであり、C export header/symbol、Command、�
 段階1--4のLinux x64縦切りはnative経由のmanaged smokeまで通った。段階5はUPM source layoutまでであり、
 Unity Editor/PlayerとIL2CPP実機matrixは未実施。段階6はmanaged Lua contractとfake adapterまでで、
 PUC-Lua C adapterおよび公式support対象製品は未選定である。
+
+### 2026-08-25 LVMINIBVS候補評価
+
+LVMINIBVS側の再観測では、Linux x64縦切りを再現でき、IRON VAAKを具体的なadapter候補として
+継続評価できるとされた。ただし、採用・接続・production保証ではない。hard fuelと完全なmemory
+accounting、typed hook codec、`SequentialFilter`と`IndependentPlans`の意味差、aggregate / Command /
+capability / Diagnostic wire、Unity Editor / Player・Mono / IL2CPP・対象OS matrix、Lua製品比較、
+artifact・license・fuzz・soakが採用gateに残る。
+
+観測範囲、非採用理由、先行pilotと判定条件は
+[`lvminibvs-candidate-evaluation.md`](lvminibvs-candidate-evaluation.md)へ、規範ではない外部評価として
+分離して残す。この評価をIRON VAAKやLVMINIBVSのAPI決定として引用しない。
 
 ## 長期候補: IRON JIT VAAK
 
