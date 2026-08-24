@@ -4,7 +4,7 @@
 > 外部実装をvendorする許可にもならない。
 
 - 調査日: 2026-08-24〜2026-08-25
-- 対象branch: `codex3/stdlib-ordered-multiset`（ordering / sparse / structure / graph checkpointを統合）
+- 対象branch: `codex3/stdlib-fenwick-range`（ordering / sparse / ordered multiset / structure / graph checkpointを統合）
 - Vaak本体のlicense: [`docs/LICENSING.md`](../LICENSING.md)のとおりMIT
 - 規律: 公式仕様から契約・分類・計算量だけを調べ、source、test、解説文を転写・翻訳しない
 
@@ -66,6 +66,17 @@ capacity overflow、公開欄検査はこのrepository内の既存stdlib規律�
 未知keyの照会とmutationの区別、空eraseのstatus、0-based k-th、overflow時の原子性は独立に定義した。
 Rust vector modelは`tests/ordered_multiset_i64.rs`の結果oracleだけに使い、Vaak sourceへ転写していない。
 `FenwickCountI64`とは公開型を合成せず、同じ非負count不変条件を単独source内のflat fieldへ独立に適用した。
+
+## range-update Fenwick checkpointで独立に定義したもの
+
+| Vaak source | 外部実装の入力 | 独立性を固定する試験 |
+|---|---|---|
+| `ds/fenwick_range_i64.vaak` | なし。ACL-FENWICK-1をpoint Fenwickの分類・計算量比較にだけ使用 | Rust `Vec<i64>`へ半開区間加算を直接適用し、260操作のpoint/prefix/range結果を照合 |
+
+外部repository、range-update Fenwick実装、解説code、snippet、test vectorは入力にしていない。一配列のdifference
+表現と二配列のindex係数式は、Vaakの既存i64折返し演算上で独立に導出した。Rust vector modelは
+`tests/fenwick_range_i64.rs`の結果oracleだけに使い、Vaak sourceへ転写していない。empty/paradox、公開欄検査、
+range違反時の更新前拒否はこのrepositoryの既存stdlib契約へ揃えた。
 
 ## 今後の追記規則
 

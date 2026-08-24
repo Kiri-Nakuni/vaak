@@ -172,3 +172,22 @@ insert後に`order_of_key`と0-based k-thを各2048回実行する。構築とin
 Fenwick queryはO(log n)だが、named functionと`set.fenwick[index]`の複合place費用は残る。単一の256-key分布、
 重複率、query比だけからcrossoverや永続的な性能を保証しない。universe規模、insert/erase比、偏った個数、
 flat引数版、compound place fast path後を同じchecksumでpairedにして再測定する。
+
+## range-update Fenwick checkpoint
+
+2026-08-25、同じLinux x86_64環境で
+`ROUNDS=3 cargo run --release --locked --example bench_fenwick_range`を実行した。一度暖機後の3回平均で、
+parse、静的検査、VM compileは計測外。全caseは256要素へ同じ2048本の64幅range addを行う。point pairは
+4096 point get、sum pairは2048本の48幅range sumを続け、構築・更新も計測へ含む。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| 生配列へrange addしてpoint get | **246.822 ms** | 203.986 ms | 242 |
+| `RangeAddPointFenwickI64`で同じpoint get | 584.952 ms | **180.567 ms** | 242 |
+| 生配列へrange addしてrange sum | **567.481 ms** | 382.244 ms | 157 |
+| `RangeAddSumFenwickI64`で同じrange sum | 820.061 ms | **253.662 ms** | 157 |
+
+現行の木を辿る実装ではpoint型が線形処理の約2.37倍、sum型が約1.45倍の時間を要した。VMでは逆にpoint型が
+約1.13倍、sum型が約1.51倍速い。FenwickのO(log n)操作でもnamed functionと一つまたは二つのcompound field
+更新費用は消えないため、これを永続的なcrossoverやbackend保証にしない。要素数、range幅、update/query比、
+flat引数版、compound place fast path後を同じchecksumでpairedにして再測定する。

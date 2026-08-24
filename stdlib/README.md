@@ -121,6 +121,7 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/fenwick_i64.vaak` | `FenwickI64`, `fenwick_i64_*` | i64 加算に固定。point add と半開区間 sum |
 | `ds/fenwick_count_i64.vaak` | `FenwickCountI64`, `fenwick_count_i64_*` | 非負point/total上限を保ち、prefix/rangeと累積個数`lower_bound` |
 | `ds/fenwick_i64_flat.vaak` | `fenwick_i64_flat_*` | 生の配列一本を受ける性能対照。入れ子の左辺を作らない |
+| `ds/fenwick_range_i64.vaak` | `RangeAddPointFenwickI64`, `RangeAddSumFenwickI64`と各prefix API | i64折返しrange add。point getは一配列、range sumは二配列 |
 | `ds/heap_i64.vaak` | `MinHeapI64`, `MaxHeapI64`, `min_heap_i64_*`, `max_heap_i64_*` | 固定比較の二分heap。heapify、push/pop/peek/replace |
 | `ds/deque_i64.vaak` | `DequeI64`, `deque_i64_*` | 容量倍増ring buffer。両端push/popは償却O(1) |
 | `ds/segtree_i64.vaak` | `SumSegtreeI64`, `MinSegtreeI64`, `MaxSegtreeI64`と各prefix API | O(n) build、point set/get、半開区間prod/all_prod。空区間は各identity |
@@ -158,6 +159,16 @@ leader/mergeがO(log n)である。rollback版の`snapshot`はsuccessful merge�
 `1 <= target <= total`だけを受け、`prefix(index + 1) >= target`となる最小の0-based indexを返す。
 module privacy未完成のため各struct欄は見えるが、直接変更後のDSU parent/history/potentialやcount Fenwickの
 非負/total不変条件は保証しない。公開関数で構築・更新した値を契約対象とし、opaque fieldを新しい意味論で装わない。
+
+`RangeAddPointFenwickI64`はdifference列を一つのFenwickに持ち、range addとpoint getをO(log n)で行う。
+`RangeAddSumFenwickI64`はdifference `d[index]`と`d[index] * index`の二本を持ち、
+`prefix(last) = last * D(last) - W(last)`によりprefix/range sumもO(log n)で返す。二型の`from`はO(n)、
+追加領域はそれぞれO(n)とO(2n)である。
+
+演算はVaakのi64と同じ2の冪を法とする折返しで、range更新の値や係数積のoverflowだけをparadoxへ変えない。
+有効な空区間は更新成功・sum 0、負数・逆転・末尾越えは更新前にparadox。任意deltaによりprefixは単調でないため
+順位選択を提供しない。二配列型の公開欄を直接壊した値は契約対象外だが、`range_add_sum_fenwick_i64_is_valid`が
+長さと係数対応をO(n log n)で再検査する。
 
 現段階では generic、第一級 callback、sum 型、`match` を要求しない。比較や加算を
 hot loop へ直接書く固定演算版を基準にし、将来のモジュール機構ではこのファイル境界を

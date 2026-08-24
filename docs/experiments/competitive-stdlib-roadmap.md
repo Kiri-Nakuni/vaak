@@ -5,7 +5,8 @@
 > [`modules-and-library.md`](modules-and-library.md)を変更するものでもない。
 
 - 調査・実測日: 2026-08-24〜2026-08-25
-- branch: `codex3/stdlib-ordered-multiset`
+- branch: `codex3/stdlib-fenwick-range`
+- integrated ordered multiset checkpoint: `codex3/stdlib-ordered-multiset` = `3e2eeef2202a4ede6394675bd8d8942cb9a0b0eb`
 - integrated sparse checkpoint: `codex3/stdlib-sparse-table` = `2ea12164647d232c2a451274f80439526db9c057`
 - integrated ordering checkpoint: `codex3/stdlib-ordering` = `0f22c4899d2692fe785a8f0de8f8652bb8cc3006`
 - integrated structure checkpoint: `codex2/stdlib-heap-deque` = `4a31a5fb4810e67a37e82c658cfd913a0446c0e2`
@@ -227,6 +228,30 @@ STEEL nativeで5 passed、0 failed。inventoryは12 passed、0 failedで、単�
 raw値を`stdlib/BENCHMARK.md`へ残した。
 全release gateは787 passed、6 failed、1 ignoredで、失敗6件は4.3に列挙した未変更のnative baselineと同じ。
 
+### 4.6 P1第四checkpoint: range-update Fenwick
+
+既存`FenwickI64`のpoint-add契約を変えず、range updateの用途を一source内の二型へ分けた。
+
+| 型 | build | update | query | field |
+|---|---:|---:|---:|---:|
+| `RangeAddPointFenwickI64` | O(n) | range add O(log n) | point get O(log n) | difference Fenwick一本 |
+| `RangeAddSumFenwickI64` | O(n) | range add O(log n) | point/prefix/range sum O(log n) | differenceとindex係数の二本 |
+
+二配列型はzero-based difference `d`について`D(last) = sum(d[0..last])`、
+`W(last) = sum(d[index] * index)`を持ち、`prefix(last) = last * D(last) - W(last)`を使う。これはi64の
+2の冪を法とする加算・乗算でも成立するため、overflowだけを別のparadoxへしない。任意deltaを許すのでprefixの
+単調性を仮定するlower-boundは提供せず、非負順位には既存`FenwickCountI64`を使う。
+
+有効な空区間は更新成功・sum 0、負数・逆転・末尾越えは全fieldを触る前にparadox。二配列型は公開欄のshapeと
+`weighted[index] == delta[index] * index`をO(n log n)で検査できる。`tests/fenwick_range_i64.rs`はi64両端、
+零長、不正範囲、公開欄破損、入力複製と260操作のRust vector oracleをreference / VM / STEEL nativeへ流し、
+5 passed、0 failed。inventoryは12 passed、0 failedで、単独前置きと全source名衝突も通った。
+
+`examples/bench_fenwick_range.rs`は256要素への2048 range updateとpoint/range queryを生配列の線形処理と
+pairedにし、raw値を`stdlib/BENCHMARK.md`へ残した。現行の木を辿る実装では二型とも線形処理より遅く、VMでは
+point型が約1.13倍、sum型が約1.51倍速い一標本だった。計算量とcompound fieldの定数費用を分けて扱う。
+全release gateは792 passed、6 failed、1 ignoredで、失敗6件は4.3に列挙した未変更のnative baselineと同じ。
+
 ## 5. flat graph checkpoint
 
 `stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
@@ -335,7 +360,7 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 | 順位 | まとまり | 具体的な順序 | 先に満たすgate |
 |---:|---|---|---|
 | P0 済 | 基準構造 | 通常/rollback/weighted DSU、通常/count Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 第三checkpointまでの差分試験とbench |
-| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress・sparse/disjoint・圧縮済みordered multiset済** → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
+| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress・sparse/disjoint・圧縮済みordered multiset・Fenwick range派生済** → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
 | P2 | byte string・trie・基礎数値 | Z/prefix/KMP → flat byte trie → Aho-Corasick/Manacher → gcd/extgcd/isqrt/sieve/factorization →安全なmod算術 | `str`はbyte列、i64中間幅、allocation測定 |
 | P3 | flat graph | CSR → BFS/DFS/topological sort → SCC → 2-SAT → Dijkstra → LCA/HLD | graph/resultをflat化、決定的tie-break |
 | P4 | 高級構造・flow | wavelet matrix、persistent/rollback構造、Li Chao、maxflow、min-cost flow | memory上限、再帰深さ、overflow、backend差 |
@@ -349,8 +374,8 @@ P1内では次の小checkpoint順にする。
 3. 完了: sorted uniqueなuniverseを構築時に受ける`OrderedMultisetI64`を、flat Fenwickのprefix countと
    k-th探索で作った。universe外mutationはparadox、空eraseはfalse、未知keyのcount/rankは通常queryとした。
    任意keyをonline追加するbalanced treeや乱数priorityは別候補とする。
-4. rollback DSU、weighted/potential DSU、prefix countのlower-boundは第三checkpointで別sourceとして完了。
-   Fenwickのrange-add/point-getとrange-add/range-sumは、折返し演算と必要配列数を明記して次の派生候補にする。
+4. 完了: rollback DSU、weighted/potential DSU、prefix countのlower-boundに加え、Fenwickの
+   range-add/point-get（一配列）とrange-add/range-sum（二配列）を別型にした。全演算はi64で折り返す。
 5. I/Oはhost名を増やさず、現行scannerの一token一時文字列0を保つ。`read_n_into`候補で一つの関数frameから
    caller-owned `i64 array`へ埋め、formatterは各整数ごとの`reversed : u8 array`確保をcaller-owned 20-byte
    scratchまたはbulk appendで除く。`str.reserve`、zero-copy host view、stdin/stdout runnerは未決のまま分ける。
@@ -370,7 +395,7 @@ divisor列挙、pow/mod inverse/CRT/floor sum、固定modulus組合せの順を�
 - range check、copy/fill/reverse/rotate、linear/binary search、prefix/difference
 - 実装済み: insertion/heap/merge sort、sorted unique、coordinate compression
 - 候補: partition/select、permutation
-- DSU、Fenwick、min/max heap、deque、bitset
+- DSU、point/count/range-update Fenwick、min/max heap、deque、bitset
 - 実装済み: 圧縮済みi64 ordered multiset
 - gcd/lcm、pow_mod、inv_mod、crt、floor_sum
 - byte列のZ algorithm、prefix function

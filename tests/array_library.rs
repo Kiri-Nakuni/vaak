@@ -19,6 +19,7 @@ const WEIGHTED_DSU: &str = include_str!("../stdlib/ds/weighted_dsu_i64.vaak");
 const FENWICK: &str = include_str!("../stdlib/ds/fenwick_i64.vaak");
 const FENWICK_COUNT: &str = include_str!("../stdlib/ds/fenwick_count_i64.vaak");
 const FENWICK_FLAT: &str = include_str!("../stdlib/ds/fenwick_i64_flat.vaak");
+const FENWICK_RANGE: &str = include_str!("../stdlib/ds/fenwick_range_i64.vaak");
 const HEAP: &str = include_str!("../stdlib/ds/heap_i64.vaak");
 const DEQUE: &str = include_str!("../stdlib/ds/deque_i64.vaak");
 const SEGTREE: &str = include_str!("../stdlib/ds/segtree_i64.vaak");
@@ -155,6 +156,11 @@ fn 各ソースは単独または明示した依存だけで前置きできる()
         "値 3",
     );
     both(
+        &[FENWICK_RANGE],
+        "var f := range_add_point_fenwick_i64_new(3) ?? new RangeAddPointFenwickI64(data := []); range_add_point_fenwick_i64_range_add(f, 0, 3, 7) ?? false; range_add_point_fenwick_i64_get(f, 2)",
+        "値 7",
+    );
+    both(
         &[HEAP],
         "var h := min_heap_i64_new() ?? new MinHeapI64(data := [0]); min_heap_i64_push(h, 7) ?? false; min_heap_i64_peek(h)",
         "値 7",
@@ -251,6 +257,10 @@ fn 各ソースはsteelにも単独で前置きできる() {
             "let f := fenwick_i64_flat_new(3) ?? [0]; f.len()",
         ),
         (
+            FENWICK_RANGE,
+            "var f := range_add_sum_fenwick_i64_new(3) ?? new RangeAddSumFenwickI64(delta := [], weighted := []); range_add_sum_fenwick_i64_range_add(f, 0, 3, 7) ?? false; range_add_sum_fenwick_i64_prefix_sum(f, 3)",
+        ),
+        (
             HEAP,
             "var h := max_heap_i64_new() ?? new MaxHeapI64(data := [0]); max_heap_i64_push(h, 7) ?? false; max_heap_i64_peek(h)",
         ),
@@ -313,6 +323,7 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         FENWICK,
         FENWICK_COUNT,
         FENWICK_FLAT,
+        FENWICK_RANGE,
         HEAP,
         DEQUE,
         SEGTREE,

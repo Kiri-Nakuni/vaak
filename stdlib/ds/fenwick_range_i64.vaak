@@ -1,0 +1,237 @@
+%{ i64折返し加算のrange-update Fenwick tree。
+
+   RangeAddPointFenwickI64は一つのdifference Fenwickを持ち、
+   range addとpoint getをO(log n)で行う。
+
+   RangeAddSumFenwickI64はdifferenceとindex係数の二つを持ち、
+   range add、prefix/range sum、point getをO(log n)で行う。
+   buildはO(n)。有効な空区間は成功し、不正範囲はparadox。 }%
+
+flow $fenwick_range_i64_return = $repeat(break, getdepth());
+
+struct RangeAddPointFenwickI64 {
+    var data : i64 array;
+};
+
+struct RangeAddSumFenwickI64 {
+    var delta : i64 array;
+    var weighted : i64 array;
+};
+
+fn range_add_point_fenwick_i64_new (length : i64) {
+    if (length < 0) $fenwick_range_i64_return; fi;
+    new RangeAddPointFenwickI64(data := new i64 array(length, 0))
+} -> RangeAddPointFenwickI64;
+
+fn range_add_point_fenwick_i64_from (values : i64 array alias) {
+    var tree := range_add_point_fenwick_i64_new(values.len()) ??
+        $fenwick_range_i64_return;
+    var previous := 0;
+    nfor (index, 0, values.len()) {
+        let current := values[index] ?? $fenwick_range_i64_return;
+        tree.data[index] := current - previous;
+        previous := current;
+    };
+
+    var i := 1;
+    while (i <= tree.data.len()) {
+        let parent := i + (i & (0 - i));
+        if (parent <= tree.data.len()) {
+            tree.data[parent - 1] += tree.data[i - 1] ??
+                $fenwick_range_i64_return;
+        } fi;
+        i += 1;
+    };
+    tree
+} -> RangeAddPointFenwickI64;
+
+fn range_add_point_fenwick_i64_len (tree : RangeAddPointFenwickI64 alias) {
+    tree.data.len()
+} -> i64;
+
+fn range_add_point_fenwick_i64_range_add (
+    var tree : RangeAddPointFenwickI64 alias,
+    first : i64,
+    last : i64,
+    value : i64
+) {
+    if (first < 0 || first > last || last > tree.data.len()) {
+        $fenwick_range_i64_return;
+    } fi;
+    if (first == last) $fenwick_range_i64_return true; fi;
+
+    var i := first + 1;
+    while (i <= tree.data.len()) {
+        tree.data[i - 1] += value;
+        i += i & (0 - i);
+    };
+    if (last < tree.data.len()) {
+        let reverse := 0 - value;
+        i := last + 1;
+        while (i <= tree.data.len()) {
+            tree.data[i - 1] += reverse;
+            i += i & (0 - i);
+        };
+    } fi;
+    true
+} -> u1;
+
+fn range_add_point_fenwick_i64_get (
+    tree : RangeAddPointFenwickI64 alias,
+    index : i64
+) {
+    if (index < 0 || index >= tree.data.len()) $fenwick_range_i64_return; fi;
+    var value := 0;
+    var i := index + 1;
+    while (i > 0) {
+        value += tree.data[i - 1] ?? $fenwick_range_i64_return;
+        i -= i & (0 - i);
+    };
+    value
+} -> i64;
+
+fn range_add_sum_fenwick_i64_new (length : i64) {
+    if (length < 0) $fenwick_range_i64_return; fi;
+    new RangeAddSumFenwickI64(
+        delta := new i64 array(length, 0),
+        weighted := new i64 array(length, 0)
+    )
+} -> RangeAddSumFenwickI64;
+
+fn range_add_sum_fenwick_i64_from (values : i64 array alias) {
+    var tree := range_add_sum_fenwick_i64_new(values.len()) ??
+        $fenwick_range_i64_return;
+    var previous := 0;
+    nfor (index, 0, values.len()) {
+        let current := values[index] ?? $fenwick_range_i64_return;
+        let difference := current - previous;
+        tree.delta[index] := difference;
+        tree.weighted[index] := difference * index;
+        previous := current;
+    };
+
+    var i := 1;
+    while (i <= tree.delta.len()) {
+        let parent := i + (i & (0 - i));
+        if (parent <= tree.delta.len()) {
+            tree.delta[parent - 1] += tree.delta[i - 1] ??
+                $fenwick_range_i64_return;
+            tree.weighted[parent - 1] += tree.weighted[i - 1] ??
+                $fenwick_range_i64_return;
+        } fi;
+        i += 1;
+    };
+    tree
+} -> RangeAddSumFenwickI64;
+
+fn range_add_sum_fenwick_i64_is_valid (tree : RangeAddSumFenwickI64 alias) {
+    if (tree.delta.len() != tree.weighted.len()) {
+        $fenwick_range_i64_return false;
+    } fi;
+
+    var previous_delta := 0;
+    var previous_weighted := 0;
+    var index := 0;
+    while (index < tree.delta.len()) {
+        var delta_prefix := 0;
+        var weighted_prefix := 0;
+        var i := index + 1;
+        while (i > 0) {
+            delta_prefix += tree.delta[i - 1] ?? $fenwick_range_i64_return false;
+            weighted_prefix += tree.weighted[i - 1] ??
+                $fenwick_range_i64_return false;
+            i -= i & (0 - i);
+        };
+        let delta := delta_prefix - previous_delta;
+        let weighted := weighted_prefix - previous_weighted;
+        if (weighted != delta * index) $fenwick_range_i64_return false; fi;
+        previous_delta := delta_prefix;
+        previous_weighted := weighted_prefix;
+        index += 1;
+    };
+    true
+} -> u1;
+
+fn range_add_sum_fenwick_i64_len (tree : RangeAddSumFenwickI64 alias) {
+    if (tree.delta.len() != tree.weighted.len()) $fenwick_range_i64_return; fi;
+    tree.delta.len()
+} -> i64;
+
+fn range_add_sum_fenwick_i64_range_add (
+    var tree : RangeAddSumFenwickI64 alias,
+    first : i64,
+    last : i64,
+    value : i64
+) {
+    if (tree.delta.len() != tree.weighted.len() ||
+        first < 0 || first > last || last > tree.delta.len()) {
+        $fenwick_range_i64_return;
+    } fi;
+    if (first == last) $fenwick_range_i64_return true; fi;
+
+    let first_weighted := value * first;
+    var i := first + 1;
+    while (i <= tree.delta.len()) {
+        tree.delta[i - 1] += value;
+        tree.weighted[i - 1] += first_weighted;
+        i += i & (0 - i);
+    };
+    if (last < tree.delta.len()) {
+        let reverse := 0 - value;
+        let last_weighted := reverse * last;
+        i := last + 1;
+        while (i <= tree.delta.len()) {
+            tree.delta[i - 1] += reverse;
+            tree.weighted[i - 1] += last_weighted;
+            i += i & (0 - i);
+        };
+    } fi;
+    true
+} -> u1;
+
+fn range_add_sum_fenwick_i64_prefix_sum (
+    tree : RangeAddSumFenwickI64 alias,
+    last : i64
+) {
+    if (tree.delta.len() != tree.weighted.len() ||
+        last < 0 || last > tree.delta.len()) {
+        $fenwick_range_i64_return;
+    } fi;
+
+    var delta := 0;
+    var weighted := 0;
+    var i := last;
+    while (i > 0) {
+        delta += tree.delta[i - 1] ?? $fenwick_range_i64_return;
+        weighted += tree.weighted[i - 1] ?? $fenwick_range_i64_return;
+        i -= i & (0 - i);
+    };
+    last * delta - weighted
+} -> i64;
+
+fn range_add_sum_fenwick_i64_range_sum (
+    tree : RangeAddSumFenwickI64 alias,
+    first : i64,
+    last : i64
+) {
+    if (tree.delta.len() != tree.weighted.len() ||
+        first < 0 || first > last || last > tree.delta.len()) {
+        $fenwick_range_i64_return;
+    } fi;
+    let right := range_add_sum_fenwick_i64_prefix_sum(tree, last) ??
+        $fenwick_range_i64_return;
+    let left := range_add_sum_fenwick_i64_prefix_sum(tree, first) ??
+        $fenwick_range_i64_return;
+    right - left
+} -> i64;
+
+fn range_add_sum_fenwick_i64_get (
+    tree : RangeAddSumFenwickI64 alias,
+    index : i64
+) {
+    if (index < 0 || index >= tree.delta.len() ||
+        tree.delta.len() != tree.weighted.len()) {
+        $fenwick_range_i64_return;
+    } fi;
+    range_add_sum_fenwick_i64_range_sum(tree, index, index + 1)
+} -> i64;
