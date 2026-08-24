@@ -9,6 +9,13 @@ pub const MAX_NAME_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_WIRE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_RECORDS: u32 = u16::MAX as u32;
 
+pub mod feature {
+    pub const PREPARE_RUN_MANY: u64 = 1 << 0;
+    pub const SNAPSHOT_PATCH: u64 = 1 << 1;
+    pub const DIAGNOSTIC_COPY: u64 = 1 << 2;
+    pub const THREAD_SAFE_HANDLES: u64 = 1 << 3;
+}
+
 /// C関数の戻り値に対応するtransport status。
 ///
 /// C enumの幅には依存せず、公開面では常に`u32`として扱う。
@@ -49,6 +56,22 @@ pub mod value_tag {
     pub const BYTES: u32 = 10;
 }
 
+pub mod program_status {
+    pub const COMPLETED: u16 = 1;
+    pub const PROGRAM_ERROR: u16 = 2;
+    pub const HOST_CONTRACT_ERROR: u16 = 3;
+    pub const INTERNAL_PANIC: u16 = 4;
+}
+
+pub mod top_level_kind {
+    pub const NONE: u16 = 0;
+    pub const AKASHA: u16 = 1;
+    pub const VALUE: u16 = 2;
+    pub const PARADOX: u16 = 3;
+    pub const ESCAPE: u16 = 4;
+    pub const UNSUPPORTED_AGGREGATE: u16 = 5;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AbiInfoV0 {
@@ -67,7 +90,10 @@ impl Default for AbiInfoV0 {
             struct_size: size_of::<Self>() as u32,
             abi_major: ABI_MAJOR,
             abi_minor: ABI_MINOR,
-            supported_features: 0,
+            supported_features: feature::PREPARE_RUN_MANY
+                | feature::SNAPSHOT_PATCH
+                | feature::DIAGNOSTIC_COPY
+                | feature::THREAD_SAFE_HANDLES,
             required_alignment: 8,
             max_wire_bytes: MAX_WIRE_BYTES,
             reserved: [0; 4],
@@ -228,6 +254,50 @@ pub struct PatchRecordV0 {
     pub value_aux_or_length: u64,
 }
 
+/// `RunnerReportV0`の固定幅部分。可変長のtop-level bytes、Patch、診断は別copy APIで得る。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunnerReportInfoV0 {
+    pub struct_size: u32,
+    pub program_status: u16,
+    pub top_level_kind: u16,
+    pub top_level_value_type: u32,
+    pub flags: u32,
+    pub top_level_scalar_bits: u64,
+    pub top_level_span_start: u64,
+    pub top_level_span_length: u64,
+    pub patch_bytes: u64,
+    pub top_level_bytes: u64,
+    pub diagnostic_count: u64,
+}
+
+impl RunnerReportInfoV0 {
+    pub fn empty() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            ..Self::default()
+        }
+    }
+}
+
+/// 一つのnative API instanceを指すopaque token。
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ContextHandleV0(pub u64);
+
+impl ContextHandleV0 {
+    pub const INVALID: Self = Self(0);
+}
+
+/// prepare/transport診断のnative-owned setを指すopaque token。
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct DiagnosticsHandleV0(pub u64);
+
+impl DiagnosticsHandleV0 {
+    pub const INVALID: Self = Self(0);
+}
+
 /// C側から中身をdereferenceしない世代付きprepared token。
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -265,6 +335,9 @@ const _: [(); 56] = [(); size_of::<HostLayoutEntryV0>()];
 const _: [(); 32] = [(); size_of::<ValueNodeV0>()];
 const _: [(); 48] = [(); size_of::<SnapshotRecordV0>()];
 const _: [(); 48] = [(); size_of::<PatchRecordV0>()];
+const _: [(); 64] = [(); size_of::<RunnerReportInfoV0>()];
+const _: [(); 8] = [(); size_of::<ContextHandleV0>()];
+const _: [(); 8] = [(); size_of::<DiagnosticsHandleV0>()];
 const _: [(); 8] = [(); size_of::<PreparedHandleV0>()];
 const _: [(); 8] = [(); size_of::<RunnerHandleV0>()];
 const _: [(); 8] = [(); align_of::<AbiInfoV0>()];
@@ -283,6 +356,7 @@ mod tests {
         assert_eq!(size_of::<ValueNodeV0>(), 32);
         assert_eq!(size_of::<SnapshotRecordV0>(), 48);
         assert_eq!(size_of::<PatchRecordV0>(), 48);
+        assert_eq!(size_of::<RunnerReportInfoV0>(), 64);
         assert_eq!(align_of::<SnapshotRecordV0>(), 8);
         assert_eq!(offset_of!(HostLayoutEntryV0, entity_id), 16);
         assert_eq!(offset_of!(HostLayoutEntryV0, name_offset), 32);
@@ -295,6 +369,7 @@ mod tests {
         let info = AbiInfoV0::default();
         assert_eq!(info.abi_major, 0);
         assert_eq!(info.required_alignment, 8);
+        assert_ne!(info.supported_features & feature::THREAD_SAFE_HANDLES, 0);
         assert_eq!(info.reserved, [0; 4]);
     }
 }

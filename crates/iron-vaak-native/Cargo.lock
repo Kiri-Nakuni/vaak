@@ -10,5 +10,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "iron-vaak-native"
+version = "0.1.0"
+dependencies = [
+ "iron-vaak-ffi",
+]
+
+[[package]]
 name = "vaak"
 version = "0.1.0"

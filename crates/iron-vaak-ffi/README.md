@@ -20,12 +20,11 @@ IRON VAAKのUnity/.NET native境界について、raw pointerをsafe sliceへ変
 
 ## 意図的にまだ接続しないもの
 
-- raw C pointerを受けるexport shim。safe sliceへ変換する最小箇所には監査済みの小さな`unsafe`
-  または別のinterop実装が必要なので、このsafe-only checkpointではABI symbolを公開しない
+- raw C pointerを受けるexport shimは、safe coreを保つため兄弟crate `iron-vaak-native`へ隔離した
 - `HostFn`、nativeからmanaged/Luaへのcallback、suspend/resume、fuel/cancellation
 - Unity object pointer、managed pointer、Lua state/stack index/value
 - PatchのUnity main-thread apply。runtime error時にapplyするかdiscardするかもhost policyの未決事項
-- `PreparedProgram`/runnerのcross-thread公開保証
+- 同じrunnerへの同時entry（cross-threadの逐次移送と別runner並行実行は接続済み）
 - aggregate value、GameCommand、capability grant、完全なExecutionReport wire
 
 このcrateが生成するPatchは未適用のtransaction候補であり、Unity状態を直接変更しない。

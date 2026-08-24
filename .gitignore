@@ -1,5 +1,13 @@
 /target
 crates/*/target/
+dotnet/**/bin/
+dotnet/**/obj/
+dotnet/native/runtimes/*/native/*
+packages/com.kiri-nakuni.iron-vaak/Runtime/Plugins/**/*.so
+packages/com.kiri-nakuni.iron-vaak/Runtime/Plugins/**/*.dll
+packages/com.kiri-nakuni.iron-vaak/Runtime/Plugins/**/*.dylib
+packages/com.kiri-nakuni.iron-vaak/Runtime/Plugins/**/*.a
+packages/com.kiri-nakuni.iron-vaak/Runtime/Plugins/**/*.bundle
 legacy/reod-tier1/target/
 node_modules/
 .git-frozen/

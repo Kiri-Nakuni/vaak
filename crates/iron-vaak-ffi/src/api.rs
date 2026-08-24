@@ -9,10 +9,9 @@ use crate::codec::{
     decode_snapshot, encode_patch, CodecError, CodecErrorKind, PatchBatchV0, PatchEntryV0,
     SnapshotBatchV0, WireValueV0,
 };
-use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use vaak::ast::{HostItem, ValueType};
 use vaak::embedding::{
     prepare, EmbeddingRunner, HostLayout, PrepareStage, PreparedProgram, PreparedRunError,
@@ -117,10 +116,10 @@ pub struct RunnerReportV0 {
 
 /// raw pointerを扱うC shimより内側の、safeなnative API。
 ///
-/// `Rc`/`RefCell`を意図的に用い、v0 checkpointではcross-thread共有を公開保証しない。
-/// managed facadeは一つのinstanceを専用serial executorへ束縛する。
+/// Registryはthread-safeだが、一つのrunnerへ同時には入れない。
+/// managed facadeはrunnerごとに直列化し、別runnerだけを並行実行できる。
 pub struct NativeApi {
-    registry: RefCell<Registry>,
+    registry: Mutex<Registry>,
 }
 
 impl Default for NativeApi {
@@ -132,7 +131,7 @@ impl Default for NativeApi {
 impl NativeApi {
     pub fn new() -> Self {
         Self {
-            registry: RefCell::new(Registry::default()),
+            registry: Mutex::new(Registry::default()),
         }
     }
 
@@ -163,7 +162,8 @@ impl NativeApi {
                 );
             }
             self.registry
-                .borrow_mut()
+                .lock()
+                .expect("native registry mutexがpoisonされた")
                 .prepared
                 .remove_idempotent(handle.0, PREPARED_KIND);
             ApiResult::ok(())
@@ -174,9 +174,12 @@ impl NativeApi {
     pub fn runner_new(&self, prepared: PreparedHandleV0) -> ApiResult<RunnerHandleV0> {
         boundary(|| {
             let prepared = {
-                let registry = self.registry.borrow();
+                let registry = self
+                    .registry
+                    .lock()
+                    .expect("native registry mutexがpoisonされた");
                 match registry.prepared.get(prepared.0, PREPARED_KIND) {
-                    Some(prepared) => Rc::clone(prepared),
+                    Some(prepared) => Arc::clone(prepared),
                     None => {
                         return ApiResult::transport_error(
                             status::STALE_HANDLE,
@@ -185,7 +188,7 @@ impl NativeApi {
                     }
                 }
             };
-            let runner = Rc::new(RefCell::new(RunnerRecord {
+            let runner = Arc::new(Mutex::new(RunnerRecord {
                 prepared,
                 runner: EmbeddingRunner::new(),
                 state: RunnerState::Idle,
@@ -193,7 +196,8 @@ impl NativeApi {
             }));
             let raw = self
                 .registry
-                .borrow_mut()
+                .lock()
+                .expect("native registry mutexがpoisonされた")
                 .runners
                 .insert(runner, RUNNER_KIND);
             ApiResult::ok(RunnerHandleV0(raw))
@@ -213,24 +217,29 @@ impl NativeApi {
                 );
             }
             let runner = {
-                let registry = self.registry.borrow();
+                let registry = self
+                    .registry
+                    .lock()
+                    .expect("native registry mutexがpoisonされた");
                 registry.runners.get(handle.0, RUNNER_KIND).cloned()
             };
             let Some(runner) = runner else {
                 return ApiResult::ok(());
             };
-            let guard = match runner.try_borrow_mut() {
+            let guard = match runner.try_lock() {
                 Ok(guard) => guard,
-                Err(_) => {
+                Err(TryLockError::WouldBlock) => {
                     return ApiResult::transport_error(
                         status::BUSY,
                         "実行中のrunnerはdestroyできない",
                     )
                 }
+                Err(TryLockError::Poisoned(error)) => error.into_inner(),
             };
             drop(guard);
             self.registry
-                .borrow_mut()
+                .lock()
+                .expect("native registry mutexがpoisonされた")
                 .runners
                 .remove_idempotent(handle.0, RUNNER_KIND);
             ApiResult::ok(())
@@ -258,12 +267,18 @@ impl NativeApi {
                 Ok(runner) => runner,
                 Err(error) => return error.into_result(),
             };
-            let runner = match runner.try_borrow() {
+            let runner = match runner.try_lock() {
                 Ok(runner) => runner,
-                Err(_) => {
+                Err(TryLockError::WouldBlock) => {
                     return ApiResult::transport_error(
                         status::BUSY,
                         "実行中のrunnerからreportをcopyできない",
+                    )
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return ApiResult::transport_error(
+                        status::POISONED,
+                        "runner mutexがpanicでpoisonされている",
                     )
                 }
             };
@@ -287,12 +302,18 @@ impl NativeApi {
                 Ok(runner) => runner,
                 Err(error) => return error.into_result(),
             };
-            let mut runner = match runner.try_borrow_mut() {
+            let mut runner = match runner.try_lock() {
                 Ok(runner) => runner,
-                Err(_) => {
+                Err(TryLockError::WouldBlock) => {
                     return ApiResult::transport_error(
                         status::BUSY,
                         "実行中のrunner reportはclearできない",
+                    )
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return ApiResult::transport_error(
+                        status::POISONED,
+                        "runner mutexがpanicでpoisonされている",
                     )
                 }
             };
@@ -368,10 +389,11 @@ impl NativeApi {
         };
         match prepare(source, &layout) {
             Ok(program) => {
-                let prepared = Rc::new(PreparedRecord { program, bindings });
+                let prepared = Arc::new(PreparedRecord { program, bindings });
                 let raw = self
                     .registry
-                    .borrow_mut()
+                    .lock()
+                    .expect("native registry mutexがpoisonされた")
                     .prepared
                     .insert(prepared, PREPARED_KIND);
                 ApiResult::ok(PrepareReplyV0 {
@@ -417,12 +439,18 @@ impl NativeApi {
             Ok(runner) => runner,
             Err(error) => return error.into_result(),
         };
-        let mut runner = match runner.try_borrow_mut() {
+        let mut runner = match runner.try_lock() {
             Ok(runner) => runner,
-            Err(_) => {
+            Err(TryLockError::WouldBlock) => {
                 return ApiResult::transport_error(
                     status::BUSY,
                     "同じrunnerへの同時runまたは再入はできない",
+                )
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                return ApiResult::transport_error(
+                    status::POISONED,
+                    "runner mutexがpanicでpoisonされている",
                 )
             }
         };
@@ -460,9 +488,12 @@ impl NativeApi {
         }
     }
 
-    fn runner_cell(&self, handle: RunnerHandleV0) -> Result<Rc<RefCell<RunnerRecord>>, ApiFailure> {
+    fn runner_cell(&self, handle: RunnerHandleV0) -> Result<Arc<Mutex<RunnerRecord>>, ApiFailure> {
         let runner = {
-            let registry = self.registry.borrow();
+            let registry = self
+                .registry
+                .lock()
+                .expect("native registry mutexがpoisonされた");
             registry.runners.get(handle.0, RUNNER_KIND).cloned()
         };
         runner.ok_or_else(|| {
@@ -471,9 +502,10 @@ impl NativeApi {
     }
 
     #[cfg(test)]
-    fn runner_cell_for_test(&self, handle: RunnerHandleV0) -> Rc<RefCell<RunnerRecord>> {
+    fn runner_cell_for_test(&self, handle: RunnerHandleV0) -> Arc<Mutex<RunnerRecord>> {
         self.registry
-            .borrow()
+            .lock()
+            .expect("native registry mutexがpoisonされた")
             .runners
             .get(handle.0, RUNNER_KIND)
             .cloned()
@@ -487,7 +519,7 @@ impl NativeApi {
                 Ok(runner) => runner,
                 Err(error) => return error.into_result(),
             };
-            let mut runner = runner.borrow_mut();
+            let mut runner = runner.lock().expect("runner mutex");
             runner.state = RunnerState::Running;
             let caught = catch_unwind(AssertUnwindSafe(|| panic!("test panic")));
             assert!(caught.is_err());
@@ -504,7 +536,7 @@ impl NativeApi {
 }
 
 fn execute_run(
-    runner: &mut RefMut<'_, RunnerRecord>,
+    runner: &mut MutexGuard<'_, RunnerRecord>,
     snapshot_wire: &[u8],
     run_id: [u8; 16],
     transaction_id: [u8; 16],
@@ -517,7 +549,7 @@ fn execute_run(
         .program
         .host_values(snapshot_values.values)
         .map_err(|error| ApiFailure::new(status::MALFORMED_WIRE, error.to_string()))?;
-    let prepared = Rc::clone(&runner.prepared);
+    let prepared = Arc::clone(&runner.prepared);
     let run_result = runner
         .runner
         .run_values_without_functions(&prepared.program, &mut host_values)
@@ -581,13 +613,8 @@ fn snapshot_values(
     prepared: &PreparedRecord,
     snapshot: &SnapshotBatchV0,
 ) -> Result<SnapshotValues, String> {
-    if snapshot.entries.len() != prepared.bindings.len() {
-        return Err(format!(
-            "snapshotは{} property必要だが{} propertyだった",
-            prepared.bindings.len(),
-            snapshot.entries.len()
-        ));
-    }
+    // 同じimmutable snapshotをVaakとLua等へ渡せるよう、layout外のpropertyは見えないまま許す。
+    // layoutに必要なpropertyの欠落と型違いは、下のlookupで引き続き拒否する。
     let by_key: HashMap<_, _> = snapshot
         .entries
         .iter()
@@ -884,7 +911,7 @@ enum RunnerState {
 }
 
 struct RunnerRecord {
-    prepared: Rc<PreparedRecord>,
+    prepared: Arc<PreparedRecord>,
     runner: EmbeddingRunner,
     state: RunnerState,
     report: Option<RunnerReportV0>,
@@ -892,8 +919,8 @@ struct RunnerRecord {
 
 #[derive(Default)]
 struct Registry {
-    prepared: SlotTable<Rc<PreparedRecord>>,
-    runners: SlotTable<Rc<RefCell<RunnerRecord>>>,
+    prepared: SlotTable<Arc<PreparedRecord>>,
+    runners: SlotTable<Arc<Mutex<RunnerRecord>>>,
 }
 
 struct Slot<T> {
@@ -1052,6 +1079,44 @@ mod tests {
     }
 
     #[test]
+    fn layout外のsnapshot_propertyは他runtimeとの共有用として不可視のまま許す() {
+        let api = NativeApi::new();
+        let prepared = prepare_increment(&api);
+        let runner = api.runner_new(prepared).value.expect("runner");
+        let bytes = encode_snapshot(&SnapshotBatchV0 {
+            schema_id: [1; 16],
+            session_id: [2; 16],
+            snapshot_revision: 3,
+            entries: vec![
+                SnapshotEntryV0 {
+                    entity_id: 0,
+                    property_id: 10,
+                    property_revision: 4,
+                    value: WireValueV0::I64(9),
+                },
+                SnapshotEntryV0 {
+                    entity_id: 0,
+                    property_id: 11,
+                    property_revision: 5,
+                    value: WireValueV0::Utf8("Luaだけが読む".into()),
+                },
+            ],
+        })
+        .expect("snapshot");
+        assert_eq!(
+            api.runner_run(runner, &bytes, [7; 16], [8; 16])
+                .envelope
+                .transport_status,
+            status::OK
+        );
+        let report = api.runner_report(runner).value.expect("report");
+        let patch = decode_patch(&report.patch_wire).expect("patch");
+        assert_eq!(patch.entries.len(), 1);
+        assert_eq!(patch.entries[0].property_id, 10);
+        assert_eq!(patch.entries[0].value, WireValueV0::I64(10));
+    }
+
+    #[test]
     fn preparedを先にdestroyしてもrunnerのstrong参照で走る() {
         let api = NativeApi::new();
         let prepared = prepare_increment(&api);
@@ -1105,9 +1170,27 @@ mod tests {
         let prepared = prepare_increment(&api);
         let runner = api.runner_new(prepared).value.expect("runner");
         let cell = api.runner_cell_for_test(runner);
-        let _running = cell.borrow_mut();
+        let _running = cell.lock().expect("runner mutex");
         let result = api.runner_run(runner, &snapshot(1), [0; 16], [0; 16]);
         assert_eq!(result.envelope.transport_status, status::BUSY);
+    }
+
+    #[test]
+    fn runnerは同時でなければthread間を移送できる() {
+        let api = Arc::new(NativeApi::new());
+        let prepared = prepare_increment(&api);
+        let runner = api.runner_new(prepared).value.expect("runner");
+        let worker_api = Arc::clone(&api);
+        let worker = std::thread::spawn(move || {
+            worker_api.runner_run(runner, &snapshot(9), [1; 16], [2; 16])
+        });
+        assert_eq!(
+            worker.join().expect("worker").envelope.transport_status,
+            status::OK
+        );
+        let report = api.runner_report(runner).value.expect("report");
+        let patch = decode_patch(&report.patch_wire).expect("patch");
+        assert_eq!(patch.entries[0].value, WireValueV0::I64(10));
     }
 
     #[test]

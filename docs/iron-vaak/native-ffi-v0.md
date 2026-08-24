@@ -4,6 +4,17 @@
 基点: `7c5ccd706e4dc466dad45baf275c0b550c8bc777`  
 調査日: 2026-08-24
 
+## 2026-08-25 codex3 implementation override
+
+この文書の以下は初期設計と未採用案を残す記録である。現在実装されている公開契約の一次資料は
+`crates/iron-vaak-ffi/include/iron_vaak_v0.h`、実装状況と停止線は`docs/iron-vaak/dotnet-api.md`である。
+提案段階のexport名や一括report案を、実装済みsymbolとして読まないこと。
+
+`codex3/iron-vaak-dotnet`ではraw pointer処理を`iron-vaak-native`へ隔離し、16個の
+`iron_vaak_v0_*` C exportを実装した。safe coreは`Arc/Mutex`によるthread-safe handle registryとなり、
+`.NET Standard 2.1` facade、UPM source、copy APIまで接続済みである。Vaak意味論、参照実装、C-n/S-nは
+変更していない。
+
 ## 2026-08-24 safe core scaffold checkpoint
 
 `crates/iron-vaak-ffi`に、既存`vaak::embedding`公開APIだけを使うsafe core scaffoldを置いた。

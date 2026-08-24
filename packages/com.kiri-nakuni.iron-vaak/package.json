@@ -1,0 +1,17 @@
+{
+  "name": "com.kiri-nakuni.iron-vaak",
+  "version": "0.1.0",
+  "displayName": "IRON VAAK",
+  "description": "Vaak prepare-once/run-many runtime and script-plan adapters for Unity.",
+  "unity": "6000.0",
+  "author": {
+    "name": "Arimura Akihiro"
+  },
+  "license": "MIT",
+  "keywords": [
+    "vaak",
+    "scripting",
+    "lua",
+    "il2cpp"
+  ]
+}

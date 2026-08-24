@@ -53,7 +53,7 @@ fn set_out(s: String) {
 ///
 /// `ptr` から `len` バイトが有効な UTF-8 でなければならない。
 /// **呼び出し側が守る**——線形メモリの中身を知っているのは呼び出し側だけである。
-#[no_mangle]
+#[cfg_attr(feature = "portable-exports", no_mangle)]
 pub unsafe extern "C" fn vaak_run(ptr: *const u8, len: usize) -> i32 {
     let src = match std::str::from_utf8(std::slice::from_raw_parts(ptr, len)) {
         Ok(s) => s,
@@ -105,13 +105,13 @@ fn run_str(src: &str) -> i32 {
 }
 
 /// 最後の表示への番地。**NUL 終端。** 次に走らせるまで有効。
-#[no_mangle]
+#[cfg_attr(feature = "portable-exports", no_mangle)]
 pub extern "C" fn vaak_last_output() -> *const u8 {
     OUT.with(|o| o.borrow().as_ptr())
 }
 
 /// 線形メモリを借りる。**返した番地は [`vaak_free`] に返すこと。**
-#[no_mangle]
+#[cfg_attr(feature = "portable-exports", no_mangle)]
 pub extern "C" fn vaak_alloc(len: usize) -> *mut u8 {
     let mut v = Vec::<u8>::with_capacity(len);
     let p = v.as_mut_ptr();
@@ -122,7 +122,7 @@ pub extern "C" fn vaak_alloc(len: usize) -> *mut u8 {
 /// # 安全性
 ///
 /// `ptr` と `len` は [`vaak_alloc`] が返したものでなければならない。
-#[no_mangle]
+#[cfg_attr(feature = "portable-exports", no_mangle)]
 pub unsafe extern "C" fn vaak_free(ptr: *mut u8, len: usize) {
     drop(Vec::from_raw_parts(ptr, 0, len));
 }

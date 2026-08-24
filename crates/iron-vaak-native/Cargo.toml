@@ -1,0 +1,14 @@
+[package]
+name = "iron-vaak-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Audited C ABI shim for IRON VAAK"
+
+[lib]
+name = "iron_vaak_native"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+iron-vaak-ffi = { path = "../iron-vaak-ffi" }

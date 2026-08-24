@@ -3,6 +3,29 @@
 Codex 側で確認できた事実と、衝突を避けるために見てほしい枝を時系列で追記する。
 決定の記録は引き続き `docs/vaak/decisions.md` が唯一であり、このファイルは決定書ではない。
 
+## 2026-08-24: IRON VAAK .NET/Unity縦切り
+
+依頼者の担当更新により、`codex3/iron-vaak-dotnet`でIRON VAAKを優先した。Vaakの意味論、参照実装、
+C-n/S-nは変更していない。既存`codex2/iron-vaak-unity-native`を基点に、safe coreの外へraw C shim、
+`.NET Standard 2.1` facade、UPM source package、managed Lua plan adapterを足した。
+
+safe coreの`NativeApi`は`Rc/RefCell`から`Arc/Mutex`へ移し、prepared共有、異なるrunnerの並行実行、
+同一runnerの`BUSY`、SafeHandle finalizer threadからの解放を可能にした。外部SnapshotはHostLayoutの
+必要propertyを全て含めば、layout外propertyも不可視のまま保持できる。これはVaak/Luaへ同じimmutable
+snapshotを渡すhost wire policyで、Vaak programの観測結果は変えない。
+
+rootのportable C exportは`portable-exports` default featureで既存buildを保ち、IRON依存だけ
+default featureを切った。これは`iron-vaak-native`からportable用`vaak_*` symbolを漏らさないためで、
+`src/portable.rs`の関数本体と通常のroot build/exportは変えていない。
+
+詳細と未完了gateは`docs/iron-vaak/dotnet-api.md`、公開C ABIは
+`crates/iron-vaak-ffi/include/iron_vaak_v0.h`にある。
+
+全体回帰では`tests/string_library.rs`の`steelでもpure_vaak実装をnative実行できる`だけが
+`Some(0)`対`Some(42)`で失敗した。変更前の`codex2/iron-vaak-unity-native` exact `49b536c`を
+一時worktreeで単独実行しても同じ失敗を再現したため、IRON VAAK差分の回帰ではない。
+環境はUbuntu clang 18.1.3。STEEL/意味論の所有境界によりこの枝では直していない。
+
 ## 2026-08-23: PraTeX embedding API の第一段
 
 依頼者の許可により、`codex2/main` を基点とする `codex2/pratex-embedding-api` で、

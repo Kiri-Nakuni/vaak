@@ -1,6 +1,6 @@
 [package]
 name = "iron-vaak-ffi"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -11,5 +11,4 @@ name = "iron_vaak_ffi"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
-vaak = { path = "../.." }
-
+vaak = { path = "../..", default-features = false }

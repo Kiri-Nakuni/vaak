@@ -30,6 +30,21 @@ WASMはsandboxed kernelやWeb向けの別経路として残すが、Unity/.NET�
 Snapshot/Patch bulk codecまでであり、C export header/symbol、Command、完全なDiagnostic/ExecutionReport、
 .NET/Unity packageは未着手である。このslice単体を段階1--3の完了とは数えない。
 
+### 2026-08-24 codex3 checkpoint
+
+`codex3/iron-vaak-dotnet`で上のsafe coreを実際の外部経路へ接続した。
+
+- raw pointerだけを隔離した`iron-vaak-native` C export shim
+- thread-safe context/prepared/runner handleと、同一runnerの`BUSY`
+- `.NET Standard 2.1` / `net8.0`の`SafeHandle` facade
+- UPM source package、managed Snapshot/Patch codec、main-thread apply scheduler
+- 特定製品非依存の`ILuaPlanExecutor` / `LuaScriptAdapter`
+- VaakとLuaを同一immutable snapshotから独立実行するstrict plan composition
+
+段階1--4のLinux x64縦切りはnative経由のmanaged smokeまで通った。段階5はUPM source layoutまでであり、
+Unity Editor/PlayerとIL2CPP実機matrixは未実施。段階6はmanaged Lua contractとfake adapterまでで、
+PUC-Lua C adapterおよび公式support対象製品は未選定である。
+
 ## 実装開始前の停止線
 
 - 同期`HostFn`をUnity/Luaのcallbackへ直結しない。v0 safe profileはsnapshot→planだけである。

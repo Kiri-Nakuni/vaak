@@ -5,5 +5,6 @@ int main(void) {
     IronVaakHostLayoutEntryV0 layout = {0};
     IronVaakSnapshotRecordV0 snapshot = {0};
     IronVaakPatchRecordV0 patch = {0};
-    return (int)(info.struct_size + layout.slot_index + snapshot.property_id + patch.property_id);
+    IronVaakRunnerReportInfoV0 report = {0};
+    return (int)(info.struct_size + layout.slot_index + snapshot.property_id + patch.property_id + report.program_status);
 }

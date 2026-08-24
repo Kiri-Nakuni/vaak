@@ -8,6 +8,10 @@ name = "vaak"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
+[features]
+default = ["portable-exports"]
+portable-exports = []
+
 [[bin]]
 name = "vaak"
 path = "src/main.rs"

@@ -1,5 +1,12 @@
 # 作業の分担
 
+## 2026-08-24 依頼者によるCodex担当の更新
+
+Codexは以後`codex3/`以下で作業する。現在の優先はIRON VAAK（.NET/Unity、Lua等とのscript-plan連携）で、
+PraTeX embedding APIはその次である。参照実装`src/interp.rs`、C-n/S-n、Vaak言語意味論は引き続き
+意味論所有者の領分とし変更しない。それ以外のruntime、VM周辺、FFI、codec、package、test、文書は、
+既存意味との一致を保つ限りIRON VAAKの支援変更を進めてよい。
+
 **この版方は二人以上の担い手で進めている。** 衝突しないように、まず担当と意味論の
 所有者を確かめること。
 

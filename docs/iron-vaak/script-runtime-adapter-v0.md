@@ -3,6 +3,17 @@
 状態: implementation前のadapter contract  
 調査日: 2026-08-24
 
+## 2026-08-25 codex3 implementation override
+
+以下は製品別adapterまでを見据えた初期設計記録である。現在の実装名は`IScriptPlanRuntime`、
+`ScriptInvocation`、`ScriptPlan`、`ILuaPlanExecutor`、`LuaScriptAdapter`、`ScriptPlanCoordinator`である。
+`ScriptPlanCoordinator`の実装済みv0 policyは、同一immutable Snapshotから得た全planをall-or-noneで扱い、
+同じpropertyへの複数writeを値が同じでもrejectするstrict mergeである。将来のstaged mode、Command、
+PUC-Lua C adapter、製品別managed Lua adapterは未実装であり、以下の未決事項を残す。
+
+外部assemblyはpublic `ScriptPlan(runtimeId, succeeded, patch)`からgeneric runtimeのcanonical planを返せる。
+Lua固有runtimeは`ILuaPlanExecutor`からowned Patch wireを返し、identity/canonical検査後に同じ合成経路へ入る。
+
 ## 結論
 
 Unity内でVaakとLua等を併用するときも、runtime同士をcallbackで直結しない。
@@ -399,4 +410,3 @@ Lua 5.4自体はMIT licenseだが、採用するbinary配布物とmanaged Lua製
 - Unity: [Scripting restrictions](https://docs.unity3d.com/ja/current/Manual/scripting-restrictions.html)
 - Unity: [Awaitable main-thread continuation](https://docs.unity3d.com/ja/current/Manual/async-awaitable-continuations.html)
 - Microsoft: [Native interop best practices](https://learn.microsoft.com/en-us/dotnet/standard/native-interop/best-practices)
-

@@ -14,8 +14,9 @@ pub mod api;
 pub mod codec;
 
 pub use abi::{
-    status, AbiInfoV0, CallEnvelopeV0, DiagnosticEnvelopeV0, HostLayoutEntryV0, PatchRecordV0,
-    PreparedHandleV0, RunnerHandleV0, SnapshotRecordV0, ValueNodeV0,
+    status, AbiInfoV0, CallEnvelopeV0, ContextHandleV0, DiagnosticEnvelopeV0, DiagnosticsHandleV0,
+    HostLayoutEntryV0, PatchRecordV0, PreparedHandleV0, RunnerHandleV0, RunnerReportInfoV0,
+    SnapshotRecordV0, ValueNodeV0,
 };
 pub use api::{
     ApiResult, DiagnosticV0, NativeApi, PrepareReplyV0, ProgramStatusV0, RunnerReportV0,
