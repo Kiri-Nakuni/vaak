@@ -47,6 +47,7 @@ def _canonical_name(raw: str, *, owner: str) -> str:
     if (
         not value
         or value == "なし"
+        or value != path.as_posix()
         or path.is_absolute()
         or "\\" in value
         or any(part in ("", ".", "..") for part in path.parts)
