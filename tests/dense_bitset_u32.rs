@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use vaak::interp::Eval;
 
 const BITSET: &str = include_str!("../stdlib/ds/dense_bitset_u32.vaak");
+const NEGATIVE_CONSTRUCTOR_FALLBACK: &str =
+    "let negative := dense_bitset_u32_new(-1) ?? new DenseBitSetU32(length := -7, words := []); if (negative.length == -7) 42 else 0 fi";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn source(body: &str) -> String {
@@ -188,10 +190,14 @@ fn 不正入力と長さ違いは変更前に拒否する() {
         "let set := dense_bitset_u32_new(3) ?? new DenseBitSetU32(length := 0, words := []); dense_bitset_u32_contains(set, 3)",
         "paradox",
     );
-    reference_and_vm(
-        "let negative := dense_bitset_u32_new(-1) ?? new DenseBitSetU32(length := -7, words := []); if (negative.length == -7) 42 else 0 fi",
-        "値 42",
-    );
+    reference_and_vm(NEGATIVE_CONSTRUCTOR_FALLBACK, "値 42");
+}
+
+#[test]
+#[ignore = "STEEL nativeは負長constructorのcoalesceで現在42でなく48を返す"]
+fn steelの負長constructor回収は参照実装とvmに一致していない() {
+    reference_and_vm(NEGATIVE_CONSTRUCTOR_FALLBACK, "値 42");
+    steel_native(NEGATIVE_CONSTRUCTOR_FALLBACK, 42);
 }
 
 #[test]

@@ -324,18 +324,28 @@ application固有adapterより先にpure Vaakで共有するため、`stdlib/ds/
 paradoxにする。二項mutationは両operandを先に検査してから更新し、末尾paddingを常に0へ保つ。
 sourceは他libraryへ依存せず、`vaak::stdlib::DENSE_BITSET_U32`として明示前置きできる。
 
-`tests/dense_bitset_u32.rs`の7試験は、0/1/31/32/33境界、deep copy、padding、変更前拒否に加え、
+`tests/dense_bitset_u32.rs`の7通常試験は、0/1/31/32/33境界、deep copy、padding、変更前拒否に加え、
 TeX ASCII文字class、12候補のLVMINIBVS有限解釈mask、70要素の競プロ集合を同一sourceで通す。
 固定seed 97-bit・240操作はRust `Vec<bool>`を結果oracleにし、通常値の全fixtureを参照実装・VM・
-STEEL clang `-O2` nativeで照合した。focused gateは7 passed、0 failed、inventory gateは12 passed、0 failed。
-全release gateは833 passed、6 failed、1 ignoredで、失敗は4.3に列挙した未変更のgraph 3件、heap、
-ASCII I/O、stringのSTEEL native baselineと同じである。
+STEEL clang `-O2` nativeで照合した。focused gateは7 passed、0 failed、1 ignored、inventory gateは
+12 passed、0 failed。全release gateは833 passed、6 failed、2 ignoredで、失敗は4.3に列挙した未変更の
+graph 3件、heap、ASCII I/O、stringのSTEEL native baselineと同じである。二つ目のignoredは次の既知STEEL
+error-path reproducerであり、通常値の三backend一致から除外した範囲を実行可能な形で固定する。
 
 故意に公開fieldを壊した値と負長constructorのparadox回収は参照実装・VMでも確認した。一方、負長を
 `??`でfallbackへ回収するisolated sourceをSTEEL nativeへ通すと期待終了値42に対し48となったため、
-そのerror-pathを三backend一致の主張へ含めない。valid-valueのmutation・長さ違い拒否はSTEEL nativeでも
-一致している。これは既存STEELのparadox/fallback経路の観測として残し、pure library checkpointからcoreや
-言語意味を変更しない。意味論・STEEL所有者が直した後に同じfixtureをnative gateへ昇格する。
+`steelの負長constructor回収は参照実装とvmに一致していない`を`#[ignore]` reproducerにした。そのerror-pathを
+三backend一致の主張へ含めず、valid-valueのmutation・長さ違い拒否はSTEEL nativeでも一致している。
+これは既存STEELのparadox/fallback経路の観測として残し、pure library checkpointからcoreや言語意味を
+変更しない。意味論・STEEL所有者が直した後に同じfixtureを通常native gateへ昇格する。
+
+```bash
+cargo test --release --locked --test dense_bitset_u32 \
+  'steelの負長constructor回収は参照実装とvmに一致していない' -- \
+  --ignored --exact --test-threads=1
+```
+
+2026-08-25の明示実行は`left: Some(48)`、`right: Some(42)`で失敗することを確認した。
 
 2051 bit・集合演算128回ではu8-per-bit案が融合packed flat案より木28.152倍、VM28.295倍遅く、payloadも
 7.888倍大きかったため棄却した。同じ三走査のflat u32に対してもnamed型は木4.723倍、VM2.667倍の時間を
