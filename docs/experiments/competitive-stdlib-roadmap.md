@@ -169,6 +169,46 @@ formatterも`i64::MIN`を正のi64へ反転せず処理する。各整数はO(�
 
 APIの綴りではなく、現行Vaakで意味と性能を一段ずつ検証できる順にする。
 
+競技プログラミングはこの枝の主要用途の一つであり、最終inventoryは最小構成に絞らない。array、
+data structure、graph、string、数値を異様なほど広く揃える。ただし各項目は、固定型source、独立oracle、
+reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照元/license記録が揃って初めて
+「実装済み」とする。module/generic/callbackや新しいhost意味をroadmap上の数だけで先取りしない。
+
+### 次のcheckpoint優先順位
+
+| 順位 | まとまり | 具体的な順序 | 先に満たすgate |
+|---:|---|---|---|
+| P0 済 | 基準構造 | DSU、Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 現checkpointの差分試験とbench |
+| P1 | 静的range・順序・低alloc I/O | array sort/compress → sparse/disjoint sparse table → 圧縮済みordered multiset → rollback DSU/Fenwick派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
+| P2 | byte string・trie・基礎数値 | Z/prefix/KMP → flat byte trie → Aho-Corasick/Manacher → gcd/extgcd/isqrt/sieve/factorization →安全なmod算術 | `str`はbyte列、i64中間幅、allocation測定 |
+| P3 | flat graph | CSR → BFS/DFS/topological sort → SCC → 2-SAT → Dijkstra → LCA/HLD | graph/resultをflat化、決定的tie-break |
+| P4 | 高級構造・flow | wavelet matrix、persistent/rollback構造、Li Chao、maxflow、min-cost flow | memory上限、再帰深さ、overflow、backend差 |
+| P5 | 数値・string加速 | modint、組合せ、matrix、NTT/convolution、suffix array/LCP上級版 | wideningまたは安全な純Vaak基準、accelerated backend契約 |
+
+P1内では次の小checkpoint順にする。
+
+1. `array/i64`のinsertion/heap/merge sort、sorted unique、座標圧縮を先に置く。
+2. `SparseMinI64` / `SparseMaxI64`のidempotent O(1) queryと、固定sum用disjoint sparse tableを比較する。
+   `gcd`版は`i64::MIN`の符号・identity契約を先に決める。
+3. sorted uniqueなuniverseを構築時に受ける`OrderedMultisetI64`候補を、Fenwickのprefix countとk-th探索で作る。
+   `insert`、一個erase、count、`order_of_key`、k-thを対象にし、universe外keyと空eraseのstatus/paradoxを
+   試験で決める。任意keyをonline追加するbalanced treeや乱数priorityは別候補とする。
+4. rollback DSU、Fenwickのrange-add/point-getとrange-add/range-sum、prefix countのlower-boundを、基準版と
+   別sourceで加える。weighted/potential DSUは差のoverflowと非整合制約の返し方を決めてからにする。
+5. I/Oはhost名を増やさず、現行scannerの一token一時文字列0を保つ。`read_n_into`候補で一つの関数frameから
+   caller-owned `i64 array`へ埋め、formatterは各整数ごとの`reversed : u8 array`確保をcaller-owned 20-byte
+   scratchまたはbulk appendで除く。`str.reserve`、zero-copy host view、stdin/stdout runnerは未決のまま分ける。
+
+P2のtrie/stringはUnicodeを暗黙に扱わない。最初のtrie候補はnode/edge/label/terminalをparallel arrayにした
+byte版で、遷移O(degree)のmutable基準と、build後にedgeをsortしてbinary searchするfrozen版を比較する。
+固定26文字版を作る場合も`AsciiLowerTrie`のようにalphabetを名前へ出す。prefix search、語数、erase、
+Aho-Corasick failure linkを段階化し、書記素trieとは呼ばない。
+
+基礎数値は、`gcd` / `lcm` / extended gcd、integer sqrt、prime sieve、smallest-prime-factor、factorization、
+divisor列挙、pow/mod inverse/CRT/floor sum、固定modulus組合せの順を候補とする。現行Vaakに`u64`/`i128`が
+無いため、乗算がi64を越えうるAPIは「折返した積をmodする」実装にしない。加算倍化による安全な
+`mul_mod`、入力modulus制限、backend wideningの三案を同じvectorで比較してから公開契約を選ぶ。
+
 ### Phase A: 現行機能だけの基礎
 
 - range check、copy/fill/reverse/rotate、linear/binary search、prefix/difference
@@ -248,6 +288,11 @@ AtCoder公式repositoryはAC Libraryを公式libraryと説明し、`atcoder` hea
 内部algorithm、test、document本文を転写・翻訳しない。今回のheap/deque/I/O sourceは公式仕様を見て独立に
 書いたもので、AC Libraryにheap/deque/scanner APIがあると主張もしない。
 
+ACLはordered multiset、trie、scanner、rollback/weighted DSUのAPIを提供する資料として扱わない。それらは
+Vaakの既存配列・Fenwick・byte列から契約を独立に定義し、Rust等の標準containerを使う場合もtest oracleに
+限定する。今後の各checkpointは、実装前に「URL、版またはcommit、取得日、license、参照した契約、転写して
+いない範囲」をこの節か専用ledgerへ追記する。license不明のsnippetや競プロ解説codeを入力sourceにしない。
+
 CC0であっても、どの契約を参照したかをこの文書に残す。production docsは制約違反をundefinedとするが、
 Vaak libraryはそれをそのまま採らず、paradox/status/runtime errorを各APIで明記する。Vaak repository自体の
 licenseは`docs/LICENSING.md`どおりMITである。
@@ -265,5 +310,8 @@ licenseは`docs/LICENSING.md`どおりMITである。
 8. modintのmodulus identityとconvolutionのwidening数値設計。
 9. accelerated backendとpure reference sourceの選択・feature query。
 10. ACL風のall-in-one facadeを持つか。未使用module除去と再export決定前には置かない。
+11. ordered multisetを圧縮済みuniverseだけにするか、online arbitrary key構造まで標準範囲にするか。
+12. byte trieのmutable/frozen表現、alphabet固定版の数、public field不変条件をどこまで保証するか。
+13. bulk scanner/output scratchの所有者と大きさ。host streaming、reserve、標準stdin/stdoutとは別に決める。
 
 どれもこのcheckpointでは新しいS-nや言語意味へ昇格させない。

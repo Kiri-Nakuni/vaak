@@ -18,6 +18,10 @@ Codex の枝は **`codex2/pratex-embedding-api`**（基点 `codex2/main`）。�
 `7c5ccd706e4dc466dad45baf275c0b550c8bc777`を基点とする。この枝では既存機能だけで書ける
 細粒度libraryと差分試験を追加してよい。module/generic/callback、I/O primitive、host capability、
 empty/paradoxの新しい一般則、S-nは確定せず、必要なら未決事項として意味論の所有者へ返す。
+この枝では競技プログラミングを主要用途の一つとし、データ構造・graph・string・数値algorithmを
+意図的に広く揃える。ただし豊富さを理由に固定variantを無秩序に増やさず、現行意味で書ける型別実装、
+独立oracle、計算量・空・overflow契約、実測benchを一checkpointずつ揃える。競技I/Oはまず既存`str`上の
+no-token-allocation scannerとcaller-owned bufferを使うpure層を育て、標準stdin/stdout名は確定しない。
 
 PraTeX 埋め込みのための追加 API は進めてよい。ただし、既存の Vaak プログラムの意味、
 参照実装・VM・STEEL の結果、C-n/S-n の解釈を変える必要が出たら実装を止め、Claude に
