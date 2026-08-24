@@ -5,6 +5,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use vaak::interp::Eval;
 
+const NORMAL: &str = include_str!("../stdlib/ds/dsu_i64.vaak");
 const ROLLBACK: &str = include_str!("../stdlib/ds/rollback_dsu_i64.vaak");
 const WEIGHTED: &str = include_str!("../stdlib/ds/weighted_dsu_i64.vaak");
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -214,6 +215,64 @@ impl Deterministic {
             .wrapping_add(1_442_695_040_888_963_407);
         self.0
     }
+}
+
+#[test]
+fn 通常dsuの決定的random列を独立oracleと三backendで照合する() {
+    const N: usize = 13;
+    let mut random = Deterministic(0x5641_414b_4e4f_524d);
+    let mut model = Model::new(N);
+    let mut body = String::from(
+        "var dsu := dsu_i64_new(13) ?? new DsuI64(parent_or_size := [0]);\n\
+         var ok := true;\n",
+    );
+
+    for step in 0..160 {
+        let a = (random.next() % N as u64) as usize;
+        let b = (random.next() % N as u64) as usize;
+        match random.next() % 6 {
+            0..=2 => {
+                model.merge(a, b);
+                writeln!(body, "dsu_i64_merge(dsu, {a}, {b}) ?? -1;").unwrap();
+            }
+            3 => {
+                let expected = model.same(a, b);
+                writeln!(
+                    body,
+                    "if ((dsu_i64_same(dsu, {a}, {b}) ?? false) != {expected}) ok := false; fi;"
+                )
+                .unwrap();
+            }
+            4 => {
+                let expected = model.component_size(a);
+                writeln!(
+                    body,
+                    "if ((dsu_i64_size(dsu, {a}) ?? -1) != {expected}) ok := false; fi;"
+                )
+                .unwrap();
+            }
+            _ => {
+                let expected = model.leader(a);
+                writeln!(
+                    body,
+                    "if ((dsu_i64_leader(dsu, {a}) ?? -1) != {expected}) ok := false; fi;"
+                )
+                .unwrap();
+            }
+        }
+        if step % 11 == 0 {
+            let expected = model.group_count();
+            writeln!(
+                body,
+                "if ((dsu_i64_group_count(dsu) ?? -1) != {expected}) ok := false; fi;"
+            )
+            .unwrap();
+        }
+    }
+    body.push_str("if (ok) 42 else 0 fi");
+
+    reference_and_vm(&[NORMAL], &body, "値 42");
+    steel_native(&[NORMAL], &body, 42);
 }
 
 #[test]

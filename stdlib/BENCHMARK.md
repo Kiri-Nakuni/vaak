@@ -74,3 +74,23 @@ VMで約7.5倍遅い。再帰named functionと`data`/`lazy`のcompound accessが
 range-add-sumの意味・計算量試験を否定しないが、range assign等のvariantを同じ表現のまま増やす根拠にも
 しない。第一checkpointのheap/ringの遅さも同じpaired表へ残した。最終判断は要素数crossover、flat表現、
 compound place fast path後の再測定を必要とする。
+
+## DSU / Fenwick派生checkpoint
+
+2026-08-24、`ROUNDS=3 cargo run --release --locked --example bench_dsu_fenwick`を同じWindows環境で
+実行した一度暖機後の3回平均である。parse、静的検査、VM compileは計測外。各programは構造を一度確保し、
+query loop中には新しいVaak arrayを作らない。rollback workloadだけは最初のmerge/rollbackでhistoryを
+必要長まで伸ばし、以後8 cycleでその容量を再利用する。この初回伸長も計測値に含む。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| 通常DSUを256要素へ構築し4,096 find | 170.46 ms | 18.85 ms | 5 |
+| rollback DSUの127 merge/rollbackを8 cycle | 145.68 ms | 93.60 ms | 20 |
+| weighted DSUを128要素へ構築し2,048 diff | 169.04 ms | 38.53 ms | 0 |
+| 256 countを線形走査して1,024 k-th | **101.18 ms** | 64.72 ms | 145 |
+| `FenwickCountI64`で同じ1,024 k-th | 132.06 ms | **29.10 ms** | 145 |
+
+累積順位の二caseは同じchecksumである。256要素ではcount Fenwickが線形走査に対して木で約1.31倍遅く、
+VMで約2.22倍速い。O(log n)であってもnamed function/compound placeの定数費用は木を辿る実装で残るため、
+これを永続的な性能保証やcrossoverとしない。要素数別のpaired測定とflat表現、place fast path後の再測定を
+続ける。測定中allocationが少ないことはAPIのmemory上限を意味せず、各構築の配列とrollback historyはO(n)。

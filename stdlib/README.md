@@ -111,7 +111,10 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `array/i64/reverse.vaak` | `array_i64_reverse*` | `var alias` でその場更新。成功は true、不正範囲は paradox |
 | `array/i64/prefix_sum.vaak` | `array_i64_prefix_sum`, `array_i64_prefix_range_sum` | 結果は n + 1 要素。空区間の和は 0 |
 | `ds/dsu_i64.vaak` | `DsuI64`, `dsu_i64_*` | union by size + path compression。添字範囲外は paradox |
+| `ds/rollback_dsu_i64.vaak` | `RollbackDsuI64`, `rollback_dsu_i64_*` | successful mergeだけをsnapshotへ保存。rollback可能にするためpath compressionは使わない |
+| `ds/weighted_dsu_i64.vaak` | `WeightedDsuI64`, `weighted_dsu_i64_*` | i64折返し加法群のpotential差。不整合constraintはparadox |
 | `ds/fenwick_i64.vaak` | `FenwickI64`, `fenwick_i64_*` | i64 加算に固定。point add と半開区間 sum |
+| `ds/fenwick_count_i64.vaak` | `FenwickCountI64`, `fenwick_count_i64_*` | 非負point/total上限を保ち、prefix/rangeと累積個数`lower_bound` |
 | `ds/fenwick_i64_flat.vaak` | `fenwick_i64_flat_*` | 生の配列一本を受ける性能対照。入れ子の左辺を作らない |
 | `ds/heap_i64.vaak` | `MinHeapI64`, `MaxHeapI64`, `min_heap_i64_*`, `max_heap_i64_*` | 固定比較の二分heap。heapify、push/pop/peek/replace |
 | `ds/deque_i64.vaak` | `DequeI64`, `deque_i64_*` | 容量倍増ring buffer。両端push/popは償却O(1) |
@@ -122,6 +125,21 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 配列を値引数で受けると深い複製になるため、読み取りは `alias`、破壊は
 `var alias` に揃えた。subarray を別名にせず `(xs, first, last)` の半開区間を渡す。
 総和は Vaak の `i64` と同じく溢れたとき折り返す。
+
+通常`DsuI64`はunion by sizeとpath compressionで償却O(alpha(n))、`RollbackDsuI64`はunion by sizeだけで
+leader/mergeがO(log n)である。rollback版の`snapshot`はsuccessful merge数を返し、同一集合mergeは履歴を
+増やさない。`undo`は最後のsuccessful mergeを、`rollback_to(snapshot)`はそれ以降を戻す。
+
+`WeightedDsuI64.merge(a, b, difference)`は`potential(b) - potential(a) == difference`をi64の
+折返し加法群上で課す。整合する重複constraintは成功し、矛盾はparadox。非連結`diff`もparadoxである。
+通常版やrollback版と意味を混ぜず、potential版はpath compressionを使うためrollbackを提供しない。
+
+`FenwickI64`の任意deltaとsumはi64で折り返すため、prefixの大小は単調とは限らず順位選択を提供しない。
+`FenwickCountI64`は各pointとtotalを`0..=i64::MAX`へ保ち、違反する更新を変更前にparadoxへする専用型である。
+`from_counts`はO(n)、point add・prefix/range/get・`lower_bound(target)`はO(log n)。順位選択は
+`1 <= target <= total`だけを受け、`prefix(index + 1) >= target`となる最小の0-based indexを返す。
+module privacy未完成のため各struct欄は見えるが、直接変更後のDSU parent/history/potentialやcount Fenwickの
+非負/total不変条件は保証しない。公開関数で構築・更新した値を契約対象とし、opaque fieldを新しい意味論で装わない。
 
 現段階では generic、第一級 callback、sum 型、`match` を要求しない。比較や加算を
 hot loop へ直接書く固定演算版を基準にし、将来のモジュール機構ではこのファイル境界を

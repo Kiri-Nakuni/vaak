@@ -9,7 +9,10 @@ const BINARY: &str = include_str!("../stdlib/array/i64/search_binary.vaak");
 const REVERSE: &str = include_str!("../stdlib/array/i64/reverse.vaak");
 const PREFIX: &str = include_str!("../stdlib/array/i64/prefix_sum.vaak");
 const DSU: &str = include_str!("../stdlib/ds/dsu_i64.vaak");
+const ROLLBACK_DSU: &str = include_str!("../stdlib/ds/rollback_dsu_i64.vaak");
+const WEIGHTED_DSU: &str = include_str!("../stdlib/ds/weighted_dsu_i64.vaak");
 const FENWICK: &str = include_str!("../stdlib/ds/fenwick_i64.vaak");
+const FENWICK_COUNT: &str = include_str!("../stdlib/ds/fenwick_count_i64.vaak");
 const FENWICK_FLAT: &str = include_str!("../stdlib/ds/fenwick_i64_flat.vaak");
 const HEAP: &str = include_str!("../stdlib/ds/heap_i64.vaak");
 const DEQUE: &str = include_str!("../stdlib/ds/deque_i64.vaak");
@@ -94,8 +97,23 @@ fn 各ソースは単独で前置きできる() {
         "値 3",
     );
     both(
+        &[ROLLBACK_DSU],
+        "let d := rollback_dsu_i64_new(3) ?? new RollbackDsuI64(parent_or_size := [0], history := [0]); rollback_dsu_i64_len(d)",
+        "値 3",
+    );
+    both(
+        &[WEIGHTED_DSU],
+        "let d := weighted_dsu_i64_new(3) ?? new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]); weighted_dsu_i64_len(d)",
+        "値 3",
+    );
+    both(
         &[FENWICK],
         "let f := fenwick_i64_new(3) ?? new FenwickI64(data := [0]); fenwick_i64_len(f)",
+        "値 3",
+    );
+    both(
+        &[FENWICK_COUNT],
+        "let f := fenwick_count_i64_new(3) ?? new FenwickCountI64(data := [0], total := 0); fenwick_count_i64_len(f)",
         "値 3",
     );
     both(
@@ -149,8 +167,20 @@ fn 各ソースはsteelにも単独で前置きできる() {
             "let d := dsu_i64_new(3) ?? new DsuI64(parent_or_size := [0]); dsu_i64_len(d)",
         ),
         (
+            ROLLBACK_DSU,
+            "let d := rollback_dsu_i64_new(3) ?? new RollbackDsuI64(parent_or_size := [0], history := [0]); rollback_dsu_i64_len(d)",
+        ),
+        (
+            WEIGHTED_DSU,
+            "let d := weighted_dsu_i64_new(3) ?? new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]); weighted_dsu_i64_len(d)",
+        ),
+        (
             FENWICK,
             "let f := fenwick_i64_new(3) ?? new FenwickI64(data := [0]); fenwick_i64_len(f)",
+        ),
+        (
+            FENWICK_COUNT,
+            "let f := fenwick_count_i64_new(3) ?? new FenwickCountI64(data := [0], total := 0); fenwick_count_i64_len(f)",
         ),
         (
             FENWICK_FLAT,
@@ -193,7 +223,10 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         REVERSE,
         PREFIX,
         DSU,
+        ROLLBACK_DSU,
+        WEIGHTED_DSU,
         FENWICK,
+        FENWICK_COUNT,
         FENWICK_FLAT,
         HEAP,
         DEQUE,

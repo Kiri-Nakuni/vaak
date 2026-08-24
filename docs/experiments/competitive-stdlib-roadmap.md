@@ -123,6 +123,31 @@ LLVM IR生成まで成功し、このmachineにはclangが無いためnative実�
 `max_right` / `min_left`はpredicateの単調性とidentity条件を要求する。generic callbackが未完成の間に
 `>= threshold`等の固定predicate variantを乱造せず、callback/module specializationのAPI候補として保留する。
 
+### 4.2 第三checkpoint: DSU派生と非負count Fenwick
+
+通常の`DsuI64` / `FenwickI64`と意味を混ぜず、次の三sourceを独立型として加えた。
+
+| source / 型 | 公開操作 | 計算量 | 意味上の境界 |
+|---|---|---|---|
+| `rollback_dsu_i64.vaak` / `RollbackDsuI64` | merge/same/size/group_count、snapshot/undo/rollback_to | leader/merge O(log n)、snapshot O(1)、rollback O(戻すsuccessful merge数) | union by sizeだけ。path compressionをせず、同一集合mergeは履歴を増やさない |
+| `weighted_dsu_i64.vaak` / `WeightedDsuI64` | merge/same/diff/size/group_count | 償却O(alpha(n)) | `potential(b)-potential(a)`をi64折返し加法群で課し、矛盾と非連結diffはparadox |
+| `fenwick_count_i64.vaak` / `FenwickCountI64` | O(n) build、point add、prefix/range/get、total、lower_bound | build O(n)、query/update O(log n)、total O(1) | point/totalを非負i64へ保ち、違反更新を原子的にparadoxへする |
+
+rollbackとweightedを一型のflagで切り替えない。前者のrollback可能性はpath compression無しという計算量を、
+後者のpotential queryはpath compressionと加法群を要求するためである。weightedの`difference`を通常の順序付き
+整数差とは呼ばず、`i64::MAX + 1 == i64::MIN`となる2の冪剰余の群演算まで差分試験へ固定した。
+
+任意deltaを許す`FenwickI64`はprefixが単調でないため`lower_bound`を追加しない。順位選択が必要な場合だけ
+非負count専用型を使い、`1 <= target <= total`で`prefix(index + 1) >= target`となる最初の0-based indexを返す。
+overflow、point underflow、範囲外、空木の順位選択は、部分更新せずparadoxになる。
+
+`tests/dsu_variants.rs`はrollbackをRustのDSU state snapshot、weightedを独立constraint graph/DFSへ照合する。
+`tests/fenwick_variants.rs`は非負`Vec<i64>`の線形prefix/range/k-th oracleへ照合する。どちらも固定seedの操作列を
+reference / VM / STEELへ流す。外部仕様の参照範囲は
+[`competitive-stdlib-license-ledger.md`](competitive-stdlib-license-ledger.md)へ分離した。
+2026-08-24のfocused gateは26 passed、全release gateは760 passed、0 failed、1 ignored。STEEL LLVM IR生成は
+成功し、このmachineにclangが無いためnative実行部分だけを既存方針どおりskipした。
+
 ## 5. 標準入力・scanner・outputの現状
 
 ### 5.1 既存host APIで分かったこと
@@ -178,8 +203,8 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 
 | 順位 | まとまり | 具体的な順序 | 先に満たすgate |
 |---:|---|---|---|
-| P0 済 | 基準構造 | DSU、Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 現checkpointの差分試験とbench |
-| P1 | 静的range・順序・低alloc I/O | array sort/compress → sparse/disjoint sparse table → 圧縮済みordered multiset → rollback DSU/Fenwick派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
+| P0 済 | 基準構造 | 通常/rollback/weighted DSU、通常/count Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 第三checkpointまでの差分試験とbench |
+| P1 | 静的range・順序・低alloc I/O | array sort/compress → sparse/disjoint sparse table → 圧縮済みordered multiset → Fenwick range派生 → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
 | P2 | byte string・trie・基礎数値 | Z/prefix/KMP → flat byte trie → Aho-Corasick/Manacher → gcd/extgcd/isqrt/sieve/factorization →安全なmod算術 | `str`はbyte列、i64中間幅、allocation測定 |
 | P3 | flat graph | CSR → BFS/DFS/topological sort → SCC → 2-SAT → Dijkstra → LCA/HLD | graph/resultをflat化、決定的tie-break |
 | P4 | 高級構造・flow | wavelet matrix、persistent/rollback構造、Li Chao、maxflow、min-cost flow | memory上限、再帰深さ、overflow、backend差 |
@@ -193,8 +218,8 @@ P1内では次の小checkpoint順にする。
 3. sorted uniqueなuniverseを構築時に受ける`OrderedMultisetI64`候補を、Fenwickのprefix countとk-th探索で作る。
    `insert`、一個erase、count、`order_of_key`、k-thを対象にし、universe外keyと空eraseのstatus/paradoxを
    試験で決める。任意keyをonline追加するbalanced treeや乱数priorityは別候補とする。
-4. rollback DSU、Fenwickのrange-add/point-getとrange-add/range-sum、prefix countのlower-boundを、基準版と
-   別sourceで加える。weighted/potential DSUは差のoverflowと非整合制約の返し方を決めてからにする。
+4. rollback DSU、weighted/potential DSU、prefix countのlower-boundは第三checkpointで別sourceとして完了。
+   Fenwickのrange-add/point-getとrange-add/range-sumは、折返し演算と必要配列数を明記して次の派生候補にする。
 5. I/Oはhost名を増やさず、現行scannerの一token一時文字列0を保つ。`read_n_into`候補で一つの関数frameから
    caller-owned `i64 array`へ埋め、formatterは各整数ごとの`reversed : u8 array`確保をcaller-owned 20-byte
    scratchまたはbulk appendで除く。`str.reserve`、zero-copy host view、stdin/stdout runnerは未決のまま分ける。
@@ -291,7 +316,9 @@ AtCoder公式repositoryはAC Libraryを公式libraryと説明し、`atcoder` hea
 ACLはordered multiset、trie、scanner、rollback/weighted DSUのAPIを提供する資料として扱わない。それらは
 Vaakの既存配列・Fenwick・byte列から契約を独立に定義し、Rust等の標準containerを使う場合もtest oracleに
 限定する。今後の各checkpointは、実装前に「URL、版またはcommit、取得日、license、参照した契約、転写して
-いない範囲」をこの節か専用ledgerへ追記する。license不明のsnippetや競プロ解説codeを入力sourceにしない。
+いない範囲」を専用の
+[`competitive-stdlib-license-ledger.md`](competitive-stdlib-license-ledger.md)へ追記する。license不明の
+snippetや競プロ解説codeを入力sourceにしない。
 
 CC0であっても、どの契約を参照したかをこの文書に残す。production docsは制約違反をundefinedとするが、
 Vaak libraryはそれをそのまま採らず、paradox/status/runtime errorを各APIで明記する。Vaak repository自体の
