@@ -4,6 +4,33 @@
 基点: `7c5ccd706e4dc466dad45baf275c0b550c8bc777`  
 調査日: 2026-08-24
 
+## 2026-08-24 safe core scaffold checkpoint
+
+`crates/iron-vaak-ffi`に、既存`vaak::embedding`公開APIだけを使うsafe core scaffoldを置いた。
+このcheckpointは設計文書の全C ABIを完成したものではなく、raw pointerをsafe sliceへ変換した後の
+再利用可能な中核である。
+
+- packageは`iron-vaak-ffi`、成果物種別は`rlib` / `cdylib` / `staticlib`。
+- crate全体を`#![forbid(unsafe_code)]`で検査する。世代・kind付き64-bit tokenをopaque handleとして
+  registryへ結び、zero/staleの反復destroyをno-opにする。runnerはpreparedを`Rc`で保持するため、
+  preparedを先にdestroyしても既存runnerは有効である。
+- `HostLayoutEntryV0`は56 byte、`ValueNodeV0`は32 byte、snapshot/patch recordは各48 byte、
+  ABI/call/diagnostic envelopeは各64 byteに固定し、RustとC11/C++17 headerの`sizeof`/`offsetof`で固定した。
+- sourceとlayout名はstrict UTF-8、全offset/lengthはoverflow/range check後にcopyする。Unity safe profileは
+  scalar、UTF8/BYTESのhost value slotだけで、`HostFn`を作る入口は無い。
+- snapshot/patchは一property一callにせず、共通header、section table、固定幅record、value node、payloadを
+  一つのlittle-endian byte列としてdecode/encodeする。C structのmemory imageをwireへcastしない。
+- runnerは`Idle / Running / ReportReady / Poisoned`を持つ。同じrunnerの重複mutable accessは`BUSY`、
+  panicはrunner内外の`catch_unwind`で`INTERNAL_PANIC`へ変換し、そのrunnerをpoisonする。
+- runtime errorでも既存C-2/S-22のafter-stateをPatchとしてreportへ保持する。これをUnityへapplyするか
+  discardするかは決めず、native scaffold自身はhost状態へ作用しない。
+- Patchへ入るcapability table indexはprepare時HostLayoutからcopyするだけであり、authority objectではない。
+  grantのscope/generation/resource limit検査はまだhost apply側の未実装gateである。
+
+raw pointerを受けるC export shimはまだ無い。可変長P/Invoke入力をRust sliceへ変換するには小さな
+監査済み`unsafe`または別interop層が必要であり、safe Rustだけというこのcheckpointの条件から外した。
+したがって現段階の`cdylib/staticlib`を配布可能なv0 ABI完成品とは呼ばない。
+
 ## 結論
 
 Unity/.NETの主経路は、**C ABIの同期bulk call**とする。C#は入力をcaller-owned byte列へ写し、
@@ -471,4 +498,3 @@ managed facadeはreflectionを必須にせず、P/Invoke methodを静的に参�
 - Android: [JNI tips](https://developer.android.com/ndk/guides/jni-tips)
 - Rust: [FFI](https://doc.rust-lang.org/nomicon/ffi.html)
 - Rust: [`catch_unwind`](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html)
-

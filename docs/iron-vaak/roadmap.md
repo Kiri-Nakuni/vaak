@@ -23,6 +23,13 @@ WASMはsandboxed kernelやWeb向けの別経路として残すが、Unity/.NET�
 | 6. generic script adapters | fake adapter、Lua C API adapter、managed Lua adapterのoptional package | C#↔Vaak↔Luaの相互再入0、Lua無しのcore build成功 |
 | 7. hardening | fuzz、sanitizer、native symbol、package reproducibility、resource limits | ABI compatibility fixtureと配布物hashをrelease gateへ入れる |
 
+### 2026-08-24 checkpoint
+
+`crates/iron-vaak-ffi`で段階1--3のうち、safe Rustだけで閉じる共通中核を先行実装した。
+固定幅record、世代付きhandle、prepare once/run many、再入`BUSY`、panic poison、scalar/UTF8/BYTESの
+Snapshot/Patch bulk codecまでであり、C export header/symbol、Command、完全なDiagnostic/ExecutionReport、
+.NET/Unity packageは未着手である。このslice単体を段階1--3の完了とは数えない。
+
 ## 実装開始前の停止線
 
 - 同期`HostFn`をUnity/Luaのcallbackへ直結しない。v0 safe profileはsnapshot→planだけである。
@@ -43,4 +50,3 @@ WASMはsandboxed kernelやWeb向けの別経路として残すが、Unity/.NET�
 | iOS | IL2CPP、device arm64、simulator arm64+x64、static link `__Internal` | P0 |
 | Android 32-bit | armeabi-v7a | P2。需要とRust/Unity supportを確認後 |
 | Web | WebAssembly | このroadmapの主経路外 |
-
