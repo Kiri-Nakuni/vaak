@@ -1,4 +1,5 @@
-% stdlib/string.vaak を前置きして走らせる利用例。%
+%{ stdlib/string.vaak を前置きして走らせる利用例。
+   依存: stdlib/string.vaak }%
 
 let input := "  Apple,banana,,APPLE  ";
 let trimmed := str_trim_ascii(input) ?? "";
