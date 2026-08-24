@@ -226,6 +226,14 @@ fn validate_host_type_descriptor(
     ty: &ValueType,
     visited: &mut usize,
 ) -> Result<(), HostTypeDescriptorError> {
+    if value_type_has_no_children(ty) {
+        *visited += 1;
+        return if *visited > MAX_HOST_TYPE_DESCRIPTOR_NODES {
+            Err(HostTypeDescriptorError::TooLarge)
+        } else {
+            Ok(())
+        };
+    }
     let mut pending = vec![(ty, 0usize)];
     while let Some((ty, depth)) = pending.pop() {
         if depth > MAX_HOST_TYPE_DESCRIPTOR_DEPTH {
@@ -1221,6 +1229,9 @@ fn validate_actual_type_descriptor(
 }
 
 fn value_types_equal(left: &ValueType, right: &ValueType) -> bool {
+    if value_type_has_no_children(left) || value_type_has_no_children(right) {
+        return childless_value_types_equal(left, right);
+    }
     let mut pending = vec![(left, right)];
     while let Some((left, right)) = pending.pop() {
         match (left, right) {
@@ -1247,6 +1258,30 @@ fn value_types_equal(left: &ValueType, right: &ValueType) -> bool {
         }
     }
     true
+}
+
+fn value_type_has_no_children(ty: &ValueType) -> bool {
+    !matches!(
+        ty,
+        ValueType::Array(_) | ValueType::Map(_, _) | ValueType::Hash(_, _)
+    )
+}
+
+fn childless_value_types_equal(left: &ValueType, right: &ValueType) -> bool {
+    match (left, right) {
+        (ValueType::U1, ValueType::U1)
+        | (ValueType::U8, ValueType::U8)
+        | (ValueType::U16, ValueType::U16)
+        | (ValueType::U32, ValueType::U32)
+        | (ValueType::I32, ValueType::I32)
+        | (ValueType::I64, ValueType::I64)
+        | (ValueType::F32, ValueType::F32)
+        | (ValueType::F64, ValueType::F64)
+        | (ValueType::F80, ValueType::F80)
+        | (ValueType::Str, ValueType::Str) => true,
+        (ValueType::Named(left), ValueType::Named(right)) => left == right,
+        _ => false,
+    }
 }
 
 const MAX_HOST_VALUE_VALIDATION_DEPTH: usize = MAX_HOST_TYPE_DESCRIPTOR_DEPTH;
@@ -1299,6 +1334,15 @@ fn validate_host_value(
     if value_type_is_leaf(expected) {
         return Ok(());
     }
+    if let (Value::Array(actual), ValueType::Array(element)) = (value, expected) {
+        if value_type_is_leaf(element) {
+            ensure_validation_room(1, 0, actual.items.len())?;
+            for value in actual.items.iter().rev() {
+                validate_inner_value(value, element, &mut descriptor_nodes)?;
+            }
+            return Ok(());
+        }
+    }
     validate_value_tasks(vec![(value, expected, 0, true)], schema, descriptor_nodes)
 }
 
@@ -1319,6 +1363,25 @@ fn validate_partial_array(
             "部分読みは配列にしか使えない".into(),
         ));
     };
+    if value_type_is_leaf(element) {
+        let mut visited = 0usize;
+        for &index in indices.iter().rev() {
+            let Ok(index) = usize::try_from(index) else {
+                continue;
+            };
+            let Some(value) = actual.items.get(index) else {
+                continue;
+            };
+            visited += 1;
+            if visited > MAX_HOST_VALUE_VALIDATION_NODES {
+                return Err(ValueValidationError::Malformed(format!(
+                    "値の要素数が検査上限{MAX_HOST_VALUE_VALIDATION_NODES}を越える"
+                )));
+            }
+            validate_inner_value(value, element, &mut descriptor_nodes)?;
+        }
+        return Ok(());
+    }
     let mut tasks = Vec::with_capacity(indices.len().min(actual.items.len()));
     for &index in indices {
         let Ok(index) = usize::try_from(index) else {
@@ -1349,13 +1412,11 @@ fn validate_value_tasks<'value, 'schema>(
                 "値の深さが検査上限{MAX_HOST_VALUE_VALIDATION_DEPTH}を越える"
             )));
         }
-        if !type_already_checked && !value_matches_type(value, expected, &mut descriptor_nodes)? {
-            return Err(ValueValidationError::Malformed(format!(
-                "内部値の型が合わない（{expected:?} が必要、{:?}）",
-                host_value_kind(value)
-            )));
+        if type_already_checked {
+            validate_finite_scalar(value)?;
+        } else {
+            validate_inner_value(value, expected, &mut descriptor_nodes)?;
         }
-        validate_finite_scalar(value)?;
         let child_depth = depth + 1;
         match (value, expected) {
             (Value::Array(actual), ValueType::Array(element)) => {
@@ -1456,6 +1517,20 @@ fn validate_value_tasks<'value, 'schema>(
         }
     }
     Ok(())
+}
+
+fn validate_inner_value(
+    value: &Value,
+    expected: &ValueType,
+    descriptor_nodes: &mut usize,
+) -> Result<(), ValueValidationError> {
+    if !value_matches_type(value, expected, descriptor_nodes)? {
+        return Err(ValueValidationError::Malformed(format!(
+            "内部値の型が合わない（{expected:?} が必要、{:?}）",
+            host_value_kind(value)
+        )));
+    }
+    validate_finite_scalar(value)
 }
 
 fn ensure_validation_room(

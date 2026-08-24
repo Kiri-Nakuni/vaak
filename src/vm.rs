@@ -2773,6 +2773,7 @@ impl<'a> Vm<'a> {
                         self.stack.push(Slot::Value(v));
                     }
                 }
+                self.pool.push(f.cells);
             }
             Op::RegionBegin => {
                 let b = self.stack.len();
@@ -3090,12 +3091,14 @@ impl<'a> Vm<'a> {
             let f = self.frames.pop().unwrap();
             self.stack.truncate(f.stack_base);
             self.frozen.truncate(f.frozen_base);
+            let self_cell = f.self_cell;
+            self.pool.push(f.cells);
             if self.frames.is_empty() {
                 return Ok(Some(out));
             }
             if !crossing {
                 self.stack.push(out);
-                if let Some(c) = f.self_cell {
+                if let Some(c) = self_cell {
                     if let Some(v) = self.arena.get(c).cloned() {
                         self.stack.push(Slot::Value(v));
                     }
@@ -3275,4 +3278,50 @@ fn find_loop_body(ops: &[Op], from: usize) -> usize {
         i += 1;
     }
     i
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::{compile, Runner};
+    use crate::interp::Eval;
+
+    fn integer(eval: Eval) -> i128 {
+        let Eval::Value(value) = eval else {
+            panic!("値が必要: {eval:?}");
+        };
+        value.as_int().expect("整数")
+    }
+
+    #[test]
+    fn 正常終了した枠のセル表をrunnerへ戻して再利用する() {
+        let syntax = crate::parser::parse("let x := 41; x + 1").expect("parse");
+        let program = compile(&syntax).expect("compile");
+        let mut runner = Runner::new();
+
+        let (first, _) = runner.run(&program, Vec::new()).expect("first run");
+        assert_eq!(integer(first), 42);
+        assert_eq!(runner.pool.len(), 1);
+        assert!(runner.pool[0].capacity() > 0);
+        let buffer = runner.pool[0].as_ptr();
+
+        let (second, _) = runner.run(&program, Vec::new()).expect("second run");
+        assert_eq!(integer(second), 42);
+        assert_eq!(runner.pool.len(), 1);
+        assert_eq!(runner.pool[0].as_ptr(), buffer);
+    }
+
+    #[test]
+    fn 脱出で終わった関数のセル表もrunnerへ戻す() {
+        let syntax = crate::parser::parse(
+            "fn f (x : i64) { break x + 1; } -> i64; f(41)",
+        )
+        .expect("parse");
+        let program = compile(&syntax).expect("compile");
+        let mut runner = Runner::new();
+
+        let (eval, _) = runner.run(&program, Vec::new()).expect("run");
+        assert_eq!(integer(eval), 42);
+        assert_eq!(runner.pool.len(), 2);
+        assert!(runner.pool.iter().any(|cells| cells.capacity() > 0));
+    }
 }
