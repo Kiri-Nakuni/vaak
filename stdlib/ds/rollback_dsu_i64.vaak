@@ -1,0 +1,113 @@
+%{ rollback 可能な i64 添字 DSU。
+
+   union by sizeだけを使い、path compressionをしない。通常DsuI64とは
+   別型であり、leader/same/size/mergeは O(log n)。snapshotは O(1)、
+   rollback_toは取り消す成功merge数に線形である。
+
+   historyは成功して二集合を結んだmergeだけを数える。同一集合の
+   mergeはleaderを返すがhistoryを増やさない。 }%
+
+flow $rollback_dsu_i64_return = $repeat(break, getdepth());
+
+struct RollbackDsuI64 {
+    var parent_or_size : i64 array;
+    var history : i64 array;
+};
+
+% n < 0、または最大history長をi64で表せないnはparadox。n == 0は有効。%
+fn rollback_dsu_i64_new (n : i64) {
+    if (n < 0 || n > 2305843009213693952) $rollback_dsu_i64_return; fi;
+    new RollbackDsuI64 (
+        parent_or_size := new i64 array(n, 0 - 1),
+        history := new i64 array(0, 0)
+    )
+} -> RollbackDsuI64;
+
+fn rollback_dsu_i64_len (dsu : RollbackDsuI64 alias) {
+    dsu.parent_or_size.len()
+} -> i64;
+
+% path compressionをしないread-only query。範囲外はparadox。O(log n)。%
+fn rollback_dsu_i64_leader (dsu : RollbackDsuI64 alias, a : i64) {
+    if (a < 0 || a >= dsu.parent_or_size.len()) $rollback_dsu_i64_return; fi;
+    var root := a;
+    while ((dsu.parent_or_size[root] ?? $rollback_dsu_i64_return) >= 0) {
+        root := dsu.parent_or_size[root] ?? $rollback_dsu_i64_return;
+    };
+    root
+} -> i64;
+
+%{
+   範囲外はparadox。同一集合なら既存leaderを返してhistoryを増やさない。
+   成功mergeは二rootのindexと以前の値をhistoryへ4整数で積む。O(log n)。
+}%
+fn rollback_dsu_i64_merge (var dsu : RollbackDsuI64 alias, a : i64, b : i64) {
+    var x := rollback_dsu_i64_leader(dsu, a) ?? $rollback_dsu_i64_return;
+    var y := rollback_dsu_i64_leader(dsu, b) ?? $rollback_dsu_i64_return;
+    if (x == y) $rollback_dsu_i64_return x; fi;
+
+    if ((dsu.parent_or_size[x] ?? $rollback_dsu_i64_return) >
+        (dsu.parent_or_size[y] ?? $rollback_dsu_i64_return)) {
+        let saved := x;
+        x := y;
+        y := saved;
+    } fi;
+    let old_x := dsu.parent_or_size[x] ?? $rollback_dsu_i64_return;
+    let old_y := dsu.parent_or_size[y] ?? $rollback_dsu_i64_return;
+    dsu.history.push(x);
+    dsu.history.push(old_x);
+    dsu.history.push(y);
+    dsu.history.push(old_y);
+    dsu.parent_or_size[x] := old_x + old_y;
+    dsu.parent_or_size[y] := x;
+    x
+} -> i64;
+
+fn rollback_dsu_i64_same (dsu : RollbackDsuI64 alias, a : i64, b : i64) {
+    let x := rollback_dsu_i64_leader(dsu, a) ?? $rollback_dsu_i64_return;
+    let y := rollback_dsu_i64_leader(dsu, b) ?? $rollback_dsu_i64_return;
+    x == y
+} -> u1;
+
+fn rollback_dsu_i64_size (dsu : RollbackDsuI64 alias, a : i64) {
+    let root := rollback_dsu_i64_leader(dsu, a) ?? $rollback_dsu_i64_return;
+    0 - (dsu.parent_or_size[root] ?? $rollback_dsu_i64_return)
+} -> i64;
+
+fn rollback_dsu_i64_group_count (dsu : RollbackDsuI64 alias) {
+    var count := 0;
+    nfor (i, 0, dsu.parent_or_size.len()) {
+        if ((dsu.parent_or_size[i] ?? $rollback_dsu_i64_return) < 0) count += 1; fi;
+    };
+    count
+} -> i64;
+
+% 成功merge数を表すcheckpoint。historyが壊れていればparadox。O(1)。%
+fn rollback_dsu_i64_snapshot (dsu : RollbackDsuI64 alias) {
+    if ((dsu.history.len() mod 4) != 0) $rollback_dsu_i64_return; fi;
+    dsu.history.len() / 4
+} -> i64;
+
+% 0 <= snapshot <= currentだけが有効。成功はtrue。O(current - snapshot)。%
+fn rollback_dsu_i64_rollback_to (var dsu : RollbackDsuI64 alias, snapshot : i64) {
+    let current := rollback_dsu_i64_snapshot(dsu) ?? $rollback_dsu_i64_return;
+    if (snapshot < 0 || snapshot > current) $rollback_dsu_i64_return; fi;
+    var remaining := current;
+    while (remaining > snapshot) {
+        let old_y := dsu.history.pop() ?? $rollback_dsu_i64_return;
+        let y := dsu.history.pop() ?? $rollback_dsu_i64_return;
+        let old_x := dsu.history.pop() ?? $rollback_dsu_i64_return;
+        let x := dsu.history.pop() ?? $rollback_dsu_i64_return;
+        dsu.parent_or_size[x] := old_x;
+        dsu.parent_or_size[y] := old_y;
+        remaining -= 1;
+    };
+    true
+} -> u1;
+
+% 最後の成功mergeを一つ戻す。historyが空ならparadox。%
+fn rollback_dsu_i64_undo (var dsu : RollbackDsuI64 alias) {
+    let current := rollback_dsu_i64_snapshot(dsu) ?? $rollback_dsu_i64_return;
+    if (current == 0) $rollback_dsu_i64_return; fi;
+    rollback_dsu_i64_rollback_to(dsu, current - 1)
+} -> u1;
