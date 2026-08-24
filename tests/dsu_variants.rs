@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use vaak::interp::Eval;
 
 const ROLLBACK: &str = include_str!("../stdlib/ds/rollback_dsu_i64.vaak");
+const WEIGHTED: &str = include_str!("../stdlib/ds/weighted_dsu_i64.vaak");
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn source(parts: &[&str], body: &str) -> String {
@@ -291,4 +292,204 @@ fn rollback_dsuの決定的random列を独立snapshot_oracleと三backendで照�
 
     reference_and_vm(&[ROLLBACK], &body, "値 42");
     steel_native(&[ROLLBACK], &body, 42);
+}
+
+#[test]
+fn weighted_dsuは加法potential差と矛盾を分ける() {
+    let body = r#"
+        var dsu := weighted_dsu_i64_new(5) ??
+            new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]);
+        weighted_dsu_i64_merge(dsu, 0, 1, 5) ?? -1;
+        weighted_dsu_i64_merge(dsu, 1, 2, -3) ?? -1;
+        let consistent := weighted_dsu_i64_merge(dsu, 0, 2, 2) ?? -1;
+        let contradictory := weighted_dsu_i64_merge(dsu, 0, 2, 3) ?? -99;
+        if (consistent >= 0 && contradictory == -99 &&
+            weighted_dsu_i64_diff(dsu, 0, 2) == 2 &&
+            weighted_dsu_i64_diff(dsu, 2, 0) == -2 &&
+            weighted_dsu_i64_same(dsu, 0, 2) &&
+            ! weighted_dsu_i64_same(dsu, 0, 4) &&
+            weighted_dsu_i64_size(dsu, 1) == 3 &&
+            weighted_dsu_i64_group_count(dsu) == 3) 42 else 0 fi
+    "#;
+    reference_and_vm(&[WEIGHTED], body, "値 42");
+    steel_native(&[WEIGHTED], body, 42);
+}
+
+#[test]
+fn weighted_dsuはi64折返しを加法群として保つ() {
+    reference_and_vm(
+        &[WEIGHTED],
+        r#"var dsu := weighted_dsu_i64_new(3) ??
+               new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]);
+           weighted_dsu_i64_merge(dsu, 0, 1, 9223372036854775807) ?? -1;
+           weighted_dsu_i64_merge(dsu, 1, 2, 1) ?? -1;
+           let wrapped := weighted_dsu_i64_diff(dsu, 0, 2) ?? 0;
+           let consistent := weighted_dsu_i64_merge(
+               dsu, 0, 2, 0 - 9223372036854775807 - 1
+           ) ?? -1;
+           if (wrapped == (0 - 9223372036854775807 - 1) && consistent >= 0) 42 else 0 fi"#,
+        "値 42",
+    );
+}
+
+#[test]
+fn weighted_dsuの零長と非連結diffと範囲外はparadoxになる() {
+    reference_and_vm(
+        &[WEIGHTED],
+        r#"let dsu := weighted_dsu_i64_new(0) ??
+               new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]);
+           if (weighted_dsu_i64_len(dsu) == 0 &&
+               weighted_dsu_i64_group_count(dsu) == 0) 42 else 0 fi"#,
+        "値 42",
+    );
+    for body in [
+        "weighted_dsu_i64_new(-1)",
+        "var dsu := weighted_dsu_i64_new(2) ?? new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]); weighted_dsu_i64_diff(dsu, 0, 1)",
+        "var dsu := weighted_dsu_i64_new(2) ?? new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]); weighted_dsu_i64_merge(dsu, 0, 2, 1)",
+    ] {
+        reference_and_vm(&[WEIGHTED], body, "paradox");
+    }
+}
+
+#[derive(Clone)]
+struct WeightedGraph {
+    edges: Vec<Vec<(usize, i64)>>,
+}
+
+impl WeightedGraph {
+    fn new(n: usize) -> Self {
+        Self {
+            edges: vec![Vec::new(); n],
+        }
+    }
+
+    fn difference(&self, source: usize, target: usize) -> Option<i64> {
+        let mut seen = vec![false; self.edges.len()];
+        let mut potential = vec![0i64; self.edges.len()];
+        let mut stack = vec![source];
+        seen[source] = true;
+        while let Some(node) = stack.pop() {
+            if node == target {
+                return Some(potential[node]);
+            }
+            for &(next, edge) in &self.edges[node] {
+                if !seen[next] {
+                    seen[next] = true;
+                    potential[next] = potential[node].wrapping_add(edge);
+                    stack.push(next);
+                }
+            }
+        }
+        None
+    }
+
+    fn add_constraint(&mut self, a: usize, b: usize, difference: i64) {
+        self.edges[a].push((b, difference));
+        self.edges[b].push((a, difference.wrapping_neg()));
+    }
+
+    fn component_size(&self, source: usize) -> usize {
+        (0..self.edges.len())
+            .filter(|&target| self.difference(source, target).is_some())
+            .count()
+    }
+
+    fn group_count(&self) -> usize {
+        let mut seen = vec![false; self.edges.len()];
+        let mut groups = 0;
+        for source in 0..self.edges.len() {
+            if seen[source] {
+                continue;
+            }
+            groups += 1;
+            let mut stack = vec![source];
+            seen[source] = true;
+            while let Some(node) = stack.pop() {
+                for &(next, _) in &self.edges[node] {
+                    if !seen[next] {
+                        seen[next] = true;
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        groups
+    }
+}
+
+#[test]
+fn weighted_dsuの決定的random列を独立graph_oracleと三backendで照合する() {
+    const N: usize = 11;
+    const MISSING: i64 = -9_000_000_000_000_000_000;
+    let mut random = Deterministic(0x5641_414b_5745_4947);
+    let mut model = WeightedGraph::new(N);
+    let mut body = String::from(
+        "var dsu := weighted_dsu_i64_new(11) ??\n\
+         new WeightedDsuI64(parent_or_size := [0], weight_to_parent := [0]);\n\
+         var ok := true;\n",
+    );
+
+    for step in 0..160 {
+        let a = (random.next() % N as u64) as usize;
+        let b = (random.next() % N as u64) as usize;
+        match random.next() % 8 {
+            0..=3 => {
+                let existing = model.difference(a, b);
+                let candidate = if let Some(value) = existing {
+                    if random.next() % 4 == 0 {
+                        value.wrapping_add(1)
+                    } else {
+                        value
+                    }
+                } else {
+                    (random.next() % 2_000_001) as i64 - 1_000_000
+                };
+                let should_succeed = existing.is_none_or(|value| value == candidate);
+                if existing.is_none() {
+                    model.add_constraint(a, b, candidate);
+                }
+                writeln!(
+                    body,
+                    "if ((((weighted_dsu_i64_merge(dsu, {a}, {b}, {candidate}) ?? {MISSING}) != {MISSING})) != {should_succeed}) ok := false; fi;"
+                )
+                .unwrap();
+            }
+            4 => {
+                let expected = model.difference(a, b).unwrap_or(MISSING);
+                writeln!(
+                    body,
+                    "if ((weighted_dsu_i64_diff(dsu, {a}, {b}) ?? {MISSING}) != {expected}) ok := false; fi;"
+                )
+                .unwrap();
+            }
+            5 => {
+                let expected = model.difference(a, b).is_some();
+                writeln!(
+                    body,
+                    "if ((weighted_dsu_i64_same(dsu, {a}, {b}) ?? false) != {expected}) ok := false; fi;"
+                )
+                .unwrap();
+            }
+            _ => {
+                let expected = model.component_size(a);
+                writeln!(
+                    body,
+                    "if ((weighted_dsu_i64_size(dsu, {a}) ?? -1) != {expected}) ok := false; fi;"
+                )
+                .unwrap();
+            }
+        }
+        if step % 13 == 0 {
+            let expected = model.group_count();
+            writeln!(
+                body,
+                "if ((weighted_dsu_i64_group_count(dsu) ?? -1) != {expected}) ok := false; fi;"
+            )
+            .unwrap();
+        }
+    }
+    body.push_str("if (ok) 42 else 0 fi");
+
+    reference_and_vm(&[WEIGHTED], &body, "値 42");
+    steel_native(&[WEIGHTED], &body, 42);
 }

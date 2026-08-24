@@ -1,0 +1,117 @@
+%{ i64折返し加法群上のpotential差を持つDSU。
+
+   merge(a, b, difference)は potential(b) - potential(a) == difference
+   を 2^64 を法とするi64加減算で課す。通常DsuI64、RollbackDsuI64とは
+   別型であり、rollback意味は持たない。
+
+   union by sizeとpath compressionを使い、操作は償却 O(alpha(n))。
+   同一集合へ矛盾するdifferenceを課すとparadox、整合する場合は既存leaderを返す。 }%
+
+flow $weighted_dsu_i64_return = $repeat(break, getdepth());
+
+struct WeightedDsuI64 {
+    var parent_or_size : i64 array;
+    % 非rootでは potential(node) - potential(parent)。rootでは0。%
+    var weight_to_parent : i64 array;
+};
+
+% n < 0はparadox。n == 0は有効。%
+fn weighted_dsu_i64_new (n : i64) {
+    if (n < 0) $weighted_dsu_i64_return; fi;
+    new WeightedDsuI64 (
+        parent_or_size := new i64 array(n, 0 - 1),
+        weight_to_parent := new i64 array(n, 0)
+    )
+} -> WeightedDsuI64;
+
+fn weighted_dsu_i64_len (dsu : WeightedDsuI64 alias) {
+    dsu.parent_or_size.len()
+} -> i64;
+
+%{
+   範囲外はparadox。経路を圧縮し、各nodeのweightを
+   potential(node) - potential(root)へ更新する。
+}%
+fn weighted_dsu_i64_leader (var dsu : WeightedDsuI64 alias, a : i64) {
+    if (a < 0 || a >= dsu.parent_or_size.len()) $weighted_dsu_i64_return; fi;
+    var root := a;
+    var total := 0;
+    while ((dsu.parent_or_size[root] ?? $weighted_dsu_i64_return) >= 0) {
+        total += dsu.weight_to_parent[root] ?? $weighted_dsu_i64_return;
+        root := dsu.parent_or_size[root] ?? $weighted_dsu_i64_return;
+    };
+
+    var node := a;
+    var remaining := total;
+    while (node != root) {
+        let next := dsu.parent_or_size[node] ?? $weighted_dsu_i64_return;
+        let edge := dsu.weight_to_parent[node] ?? $weighted_dsu_i64_return;
+        dsu.parent_or_size[node] := root;
+        dsu.weight_to_parent[node] := remaining;
+        remaining -= edge;
+        node := next;
+    };
+    root
+} -> i64;
+
+%{
+   potential(b) - potential(a) == differenceを課す。
+   範囲外または既存constraintとの矛盾はparadox。整合時はleaderを返す。
+}%
+fn weighted_dsu_i64_merge (
+    var dsu : WeightedDsuI64 alias,
+    a : i64,
+    b : i64,
+    difference : i64
+) {
+    var x := weighted_dsu_i64_leader(dsu, a) ?? $weighted_dsu_i64_return;
+    var y := weighted_dsu_i64_leader(dsu, b) ?? $weighted_dsu_i64_return;
+    let weight_a := dsu.weight_to_parent[a] ?? $weighted_dsu_i64_return;
+    let weight_b := dsu.weight_to_parent[b] ?? $weighted_dsu_i64_return;
+    var root_difference := difference + weight_a - weight_b;
+
+    if (x == y) {
+        if (weight_b - weight_a != difference) $weighted_dsu_i64_return; fi;
+        $weighted_dsu_i64_return x;
+    } fi;
+
+    if ((dsu.parent_or_size[x] ?? $weighted_dsu_i64_return) >
+        (dsu.parent_or_size[y] ?? $weighted_dsu_i64_return)) {
+        let saved := x;
+        x := y;
+        y := saved;
+        root_difference := 0 - root_difference;
+    } fi;
+    dsu.parent_or_size[x] += dsu.parent_or_size[y] ?? $weighted_dsu_i64_return;
+    dsu.parent_or_size[y] := x;
+    dsu.weight_to_parent[y] := root_difference;
+    x
+} -> i64;
+
+fn weighted_dsu_i64_same (var dsu : WeightedDsuI64 alias, a : i64, b : i64) {
+    let x := weighted_dsu_i64_leader(dsu, a) ?? $weighted_dsu_i64_return;
+    let y := weighted_dsu_i64_leader(dsu, b) ?? $weighted_dsu_i64_return;
+    x == y
+} -> u1;
+
+% 同一集合なら potential(b) - potential(a)。非連結または範囲外はparadox。%
+fn weighted_dsu_i64_diff (var dsu : WeightedDsuI64 alias, a : i64, b : i64) {
+    let x := weighted_dsu_i64_leader(dsu, a) ?? $weighted_dsu_i64_return;
+    let y := weighted_dsu_i64_leader(dsu, b) ?? $weighted_dsu_i64_return;
+    if (x != y) $weighted_dsu_i64_return; fi;
+    (dsu.weight_to_parent[b] ?? $weighted_dsu_i64_return) -
+    (dsu.weight_to_parent[a] ?? $weighted_dsu_i64_return)
+} -> i64;
+
+fn weighted_dsu_i64_size (var dsu : WeightedDsuI64 alias, a : i64) {
+    let root := weighted_dsu_i64_leader(dsu, a) ?? $weighted_dsu_i64_return;
+    0 - (dsu.parent_or_size[root] ?? $weighted_dsu_i64_return)
+} -> i64;
+
+fn weighted_dsu_i64_group_count (dsu : WeightedDsuI64 alias) {
+    var count := 0;
+    nfor (i, 0, dsu.parent_or_size.len()) {
+        if ((dsu.parent_or_size[i] ?? $weighted_dsu_i64_return) < 0) count += 1; fi;
+    };
+    count
+} -> i64;
