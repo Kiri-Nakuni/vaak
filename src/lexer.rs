@@ -15,7 +15,8 @@ pub enum Tok {
     /// ソースの表現のまま。型が決まるまで解釈しない。
     Int(String),
     Float(String),
-    Str(String),
+    /// source上の通常文字はUTF-8 bytes、escapeは規定されたbytesへ解いたもの。
+    Str(Vec<u8>),
 
     // --- 鍵語 ---
     Var,
@@ -363,32 +364,40 @@ impl<'a> Lexer<'a> {
 
     fn string(&mut self, start: usize) -> Result<(), LexError> {
         self.pos += 1; // "
-        let mut out = String::new();
+        let mut out = Vec::new();
+        let mut chunk_start = self.pos;
         loop {
             let Some(c) = self.peek() else {
                 return self.err("文字列が閉じていない", start);
             };
             match c {
                 b'"' => {
+                    if chunk_start < self.pos {
+                        out.extend_from_slice(&self.bytes[chunk_start..self.pos]);
+                    }
                     self.pos += 1;
                     self.push(Tok::Str(out), start);
                     return Ok(());
                 }
                 b'\\' => {
+                    if chunk_start < self.pos {
+                        out.extend_from_slice(&self.bytes[chunk_start..self.pos]);
+                    }
                     self.pos += 1;
                     let Some(e) = self.peek() else {
                         return self.err("文字列が閉じていない", start);
                     };
                     self.pos += 1;
                     match e {
-                        b'n' => out.push('\n'),
-                        b't' => out.push('\t'),
-                        b'\\' => out.push('\\'),
-                        b'"' => out.push('"'),
-                        b'0' => out.push('\0'),
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b't' => out.push(b'\t'),
+                        b'\\' => out.push(b'\\'),
+                        b'"' => out.push(b'"'),
+                        b'0' => out.push(b'\0'),
                         b'x' => {
                             let h = self.take_hex(2, start)?;
-                            out.push(h as u8 as char);
+                            out.push(h as u8);
                         }
                         b'u' => {
                             if self.peek() != Some(b'{') {
@@ -420,14 +429,15 @@ impl<'a> Lexer<'a> {
                             let Some(ch) = char::from_u32(v) else {
                                 return self.err("符号位置ではない", start);
                             };
-                            out.push(ch);
+                            let mut encoded = [0; 4];
+                            out.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
                         }
                         _ => return self.err("知らないエスケープ", start),
                     }
+                    chunk_start = self.pos;
                 }
                 _ => {
                     let ch = self.peek_char().unwrap();
-                    out.push(ch);
                     self.pos += ch.len_utf8();
                 }
             }

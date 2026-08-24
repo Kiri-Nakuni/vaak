@@ -21,7 +21,8 @@ pub enum ExprKind {
     Float(String),
     /// `true` / `false`。**型は `u1` で確定している**——文脈を見ない（C-97）
     Bool(bool),
-    Str(String),
+    /// 通常文字のUTF-8 bytesと、字句層で解いたescape bytes。
+    Str(Vec<u8>),
     Name(String),
 
     /// `( E@0* )` — 領域を作る。スコープでも脱出段でもない。

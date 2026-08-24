@@ -196,6 +196,18 @@ fn u8配列の一引数構築は長さを失わず零で埋める() {
 }
 
 #[test]
+fn 文字列escapeはbyteとunicodeの違いを保つ() {
+    same_value(
+        r#"let bytes := "\x80\r";
+           let unicode := "\u{80}";
+           if (bytes.len() == 2 && bytes[0] == 0x80 && bytes[1] == 0x0d &&
+               unicode.len() == 2 && unicode[0] == 0xc2 && unicode[1] == 0x80)
+               42 else 0 fi"#,
+        "42",
+    );
+}
+
+#[test]
 fn 文脈で決まった数値型まで同じになる() {
     same_value("var x : u8 := 0; x := 300; x", "44");
     same_value(

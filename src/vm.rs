@@ -607,7 +607,7 @@ impl Compiler {
                 self.emit(Op::Const(k));
             }
             ExprKind::Str(s) => {
-                let k = self.konst(Value::str(s.as_bytes().to_vec()));
+                let k = self.konst(Value::str(s.clone()));
                 self.emit(Op::Const(k));
             }
             &ExprKind::Bool(b) => {

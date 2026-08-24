@@ -376,7 +376,7 @@ impl Interp {
             // 演算の途中でも同じである（C-100）
             ExprKind::Int(s) => Ok(Eval::Value(coerce_lit(parse_int(s, e.span)?, &want))),
             ExprKind::Float(s) => Ok(Eval::Value(coerce_lit(parse_float(s, e.span)?, &want))),
-            ExprKind::Str(s) => Ok(Eval::Value(Value::str(s.as_bytes().to_vec()))),
+            ExprKind::Str(s) => Ok(Eval::Value(Value::str(s.clone()))),
             ExprKind::Bool(b) => Ok(Eval::Value(Value::U1(*b))),
 
             // **注釈はその領域の値の型を決める**（C-30）。

@@ -195,6 +195,12 @@ t!(値で受ければ元は変わらない,
 t!(配列を返す, "fn mk () { [ 3, 1, 4 ] } -> i64 array; let a := mk(); a[0] + a[2]");
 t!(文字列の長さ, "let s := \"abcd\"; s.len()");
 t!(文字列の要素, "let s := \"abcd\"; s[1] -> i64");
+t!(文字列escapeはbyteとunicodeの違いを保つ,
+   r#"let bytes := "\x80\r";
+      let unicode := "\u{80}";
+      if (bytes.len() == 2 && bytes[0] == 0x80 && bytes[1] == 0x0d &&
+          unicode.len() == 2 && unicode[0] == 0xc2 && unicode[1] == 0x80)
+          42 else 0 fi"#);
 t!(文字列も深く複製する, "var s := \"ab\"; var t := s; t[0] := 122; s[0] -> i64");
 t!(u8の配列, "var a : u8 array := new u8 array(3, 200); (a[0] -> i64) + 1");
 t!(真偽の配列, "var a : bool array := new bool array(3, true); if (a[1]) 7 else 8 fi");

@@ -7576,3 +7576,55 @@ outward = 作用素の印 | (被演算子の印 << 左の深さ)
 段数が実行時に決まっても、**被演算子の分は組み立て時に分かる**ので、
 `switch` の腕を「合計 = 回数 × 作用素 ＋ 被演算子」で割り当てるだけでよい。
 
+
+## S-24. 文字列 escape は byte を作る——`\x80` と `\u{80}` は違う
+
+**依頼者の指示**：文字列 escape の意味は未確定なので、独立枝で木を辿る実装・bytecode VM・STEELを
+同時に直してよい。性能も確認する。
+
+### 決めたもの
+
+| source | `str`へ入るbyte列 |
+|---|---|
+| 通常文字 | sourceのUTF-8 byte列 |
+| `\n` `\r` `\t` | `0a` `0d` `09` |
+| `\\` `\"` `\0` | `5c` `22` `00` |
+| `\xHH` | **ちょうど一byte** `HH` |
+| `\u{H...}` | Unicode scalarをUTF-8へ符号化した1〜4 bytes |
+
+`\r`を許可集合へ足す。知らないescape、不正な16進表記、Unicode scalarでない値は字句の誤りである。
+RustやLuaのescape集合を暗黙に丸ごと輸入せず、ここに列挙したものだけをVaakのsourceとして扱う。
+
+### `\x`をUnicode文字として扱わない
+
+以前のlexerはpayloadをRustの`String`で持ち、`\x80`をU+0080へ変えていた。その後、実行時にもう一度UTF-8へ
+したため、`str`には`c2 80`の二byteが入った。これはC-7/C-77の「`str`はbyte列」と食い違い、任意byte列を
+持てるLua文字列との受け渡しでも`\xHH`を使えなくする。
+
+`\x80`は`80`、`\u{80}`は`c2 80`とする。source上でbyteを言う綴りとUnicode scalarを言う綴りを分ければ、
+どちらを選んだかが字面に残る。C-78で文字列リテラルの型は`str`に確定しているので、字句層がこのbyte列を
+作っても「型が決まる前に別の文字列型へ解釈する」ことにはならない。
+
+### decodeは一箇所だけ
+
+`Tok::Str`と`ExprKind::Str`は`Vec<u8>`を持つ。lexerだけがescapeをdecodeし、木を辿る実装・VM・STEELは
+同じAST byte列を再符号化せず受け取る。backendごとにescape表を複製しない（S-5）。
+
+通常文字はescape境界までを一つのchunkとしてコピーする。escapeが連続するときは空chunkを処理しない。
+`tests/lex.rs`でbyte列を直接、`tests/differential.rs`で木とVM、`tests/steel.rs`でLLVM native実行を照合した。
+
+### 測った
+
+`examples/bench_string_escapes.rs`で64 KiB級sourceを500回ずつlex / parseした一標本である。
+
+| case | 変更前 lex / parse | 変更後 lex / parse |
+|---|---:|---:|
+| plain ASCII | 351.208 / 354.464 µs | 204.201 / 210.046 µs |
+| 既存escape密集 | 144.492 / 146.836 µs | 125.902 / 134.236 µs |
+| `\r`密集 | 解析不能 | 98.967 / 101.953 µs |
+
+plain sourceでは一文字ずつ`String::push`しなくなり、既存escape密集sourceにも退行を残さなかった。
+これは同じmachine上のraw値であり、入力比率や永続的な速度保証ではない。
+
+全release gateは800 passed、6 failed、1 ignored。失敗6件はS-24で触っていない既存のSTEEL native
+baseline（graph三件、heap、ASCII I/O、string library各一件）と同じである。

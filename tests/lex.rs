@@ -70,16 +70,30 @@ fn 小数点とメンバアクセスを取り違えない() {
 
 #[test]
 fn 文字列のエスケープ() {
-    assert_eq!(toks(r#""a\nb""#), vec![Tok::Str("a\nb".into())]);
-    assert_eq!(toks(r#""\x41""#), vec![Tok::Str("A".into())]);
-    assert_eq!(toks(r#""\u{3042}""#), vec![Tok::Str("あ".into())]);
+    assert_eq!(toks(r#""a\nb""#), vec![Tok::Str(b"a\nb".to_vec())]);
+    assert_eq!(
+        toks(r#""\n\r\t\\\"\0""#),
+        vec![Tok::Str(vec![0x0a, 0x0d, 0x09, 0x5c, 0x22, 0x00])]
+    );
+    assert_eq!(toks(r#""\x41""#), vec![Tok::Str(b"A".to_vec())]);
+    assert_eq!(toks(r#""\u{3042}""#), vec![Tok::Str("あ".as_bytes().to_vec())]);
+    assert!(lex(r#""\a""#).is_err());
+}
+
+#[test]
+fn x_escapeは一byteでunicode_escapeはutf8になる() {
+    assert_eq!(toks(r#""\x80""#), vec![Tok::Str(vec![0x80])]);
+    assert_eq!(toks(r#""\u{80}""#), vec![Tok::Str(vec![0xc2, 0x80])]);
 }
 
 #[test]
 fn unicode_escape_は_u32_を越えても折り返さない() {
     assert!(lex(r#""\u{100000000}""#).is_err());
     assert!(lex(r#""\u{ffffffffffffffff}""#).is_err());
-    assert_eq!(toks(r#""\u{10ffff}""#), vec![Tok::Str("\u{10ffff}".into())]);
+    assert_eq!(
+        toks(r#""\u{10ffff}""#),
+        vec![Tok::Str("\u{10ffff}".as_bytes().to_vec())]
+    );
 }
 
 #[test]

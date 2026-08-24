@@ -1447,8 +1447,7 @@ impl Steel {
 
             // 文字列は `u8 array` を包んだ型（C-77）。**場へ写してから渡す**
             E::Str(t) => {
-                let bytes = t.as_bytes().to_vec();
-                let g = self.string_const(&bytes);
+                let g = self.string_const(t);
                 let p = self.tmp();
                 self.emit(&format!("{p} = call ptr @vaak.copy(ptr {g}, i64 1)"));
                 Ok(Some(Val { ok: "true".into(), v: p, ty: ValueType::Str }))

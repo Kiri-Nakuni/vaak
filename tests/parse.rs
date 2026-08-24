@@ -8,7 +8,7 @@ use vaak::parser::{parse, parse_expr};
 fn sexp(e: &Expr) -> String {
     match &e.kind {
         ExprKind::Int(s) | ExprKind::Float(s) => s.clone(),
-        ExprKind::Str(s) => format!("{s:?}"),
+        ExprKind::Str(s) => format!("{:?}", String::from_utf8_lossy(s)),
         ExprKind::Bool(b) => (if *b { "true" } else { "false" }).to_string(),
         ExprKind::Ascribe { expr, ty: tv } => format!("(-> {} {})", sexp(expr), ty(&tv.value)),
         ExprKind::Name(s) => s.clone(),
