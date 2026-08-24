@@ -1,0 +1,217 @@
+%{ STEEL self-hosting の arithmetic vertical slice。
+
+   入力: ASCIIのi64非負整数、空白、括弧、単項`-`、二項`+ - *`。
+   出力: 同じ折返しi64演算を行い、下位32bitを終了statusにするLLVM IR。
+
+   module、再帰型、第一級callback、host I/Oを要求しない純粋 `str -> str` である。
+   fileを読むことと返したIRを書くことは埋め込みhostの責任に残す。 }%
+
+flow $steel_subset_return = $repeat(break, getdepth());
+
+fn steel_subset__append (var output : str alias, input : str) {
+    nfor (i, 0, input.len()) {
+        output.push(input[i] ?? $steel_subset_return);
+    };
+};
+
+fn steel_subset__append_i64 (var output : str alias, value : i64) {
+    if (value == 0) {
+        output.push(0x30);
+        $steel_subset_return true;
+    } fi;
+    if (value < 0) output.push(0x2d); fi;
+    var remaining := if (value > 0) 0 - value else value fi;
+    var scratch : u8 array := new u8 array(20, 0);
+    var digits := 0;
+    while (remaining < 0) {
+        let digit := (0 - (remaining mod 10)) mod 10;
+        scratch[digits] := 0x30 + (digit -> u8);
+        digits += 1;
+        remaining := (remaining + digit) / 10;
+    };
+    while (digits > 0) {
+        digits -= 1;
+        output.push(scratch[digits] ?? $steel_subset_return);
+    };
+    true
+} -> u1;
+
+fn steel_subset__space (byte : u8) {
+    byte == 0x20 || (byte >= 0x09 && byte <= 0x0d)
+} -> u1;
+
+fn steel_subset__skip_space (source : str alias, var cursor : i64 alias) {
+    while (cursor < source.len() &&
+           steel_subset__space(source[cursor] ?? $steel_subset_return)) {
+        cursor += 1;
+    };
+};
+
+fn steel_subset__temporary (var next : i64 alias) {
+    var name := "%v";
+    steel_subset__append_i64(name, next) ?? $steel_subset_return;
+    next += 1;
+    name
+} -> str;
+
+fn steel_subset__emit_binary (
+    var output : str alias,
+    var next : i64 alias,
+    instruction : str,
+    left : str,
+    right : str
+) {
+    let name := steel_subset__temporary(next) ?? $steel_subset_return;
+    steel_subset__append(output, "  ");
+    steel_subset__append(output, name);
+    steel_subset__append(output, " = ");
+    steel_subset__append(output, instruction);
+    steel_subset__append(output, " i64 ");
+    steel_subset__append(output, left);
+    steel_subset__append(output, ", ");
+    steel_subset__append(output, right);
+    output.push(0x0a);
+    name
+} -> str;
+
+fn steel_subset__number (source : str alias, var cursor : i64 alias) {
+    steel_subset__skip_space(source, cursor);
+    let first := cursor;
+    var negative_value := 0;
+    var digits := 0;
+    while (cursor < source.len()) {
+        let byte := source[cursor] ?? $steel_subset_return;
+        if (byte < 0x30 || byte > 0x39) break; fi;
+        let digit := (byte - 0x30) -> i64;
+        if (negative_value < (0 - 922337203685477580)) $steel_subset_return; fi;
+        if (negative_value == (0 - 922337203685477580) && digit > 7) {
+            $steel_subset_return;
+        } fi;
+        negative_value := negative_value * 10 - digit;
+        cursor += 1;
+        digits += 1;
+    };
+    if (digits == 0) $steel_subset_return; fi;
+    var literal := "";
+    nfor (i, first, cursor - first) {
+        literal.push(source[i] ?? $steel_subset_return);
+    };
+    literal
+} -> str;
+
+% 前方宣言は要らない。関数宣言は同じscope全体から見える（C-36）。%
+fn steel_subset__factor (
+    source : str alias,
+    var cursor : i64 alias,
+    var output : str alias,
+    var next : i64 alias
+) {
+    steel_subset__skip_space(source, cursor);
+    if (cursor >= source.len()) $steel_subset_return; fi;
+    let byte := source[cursor] ?? $steel_subset_return;
+    if (byte >= 0x30 && byte <= 0x39) {
+        $steel_subset_return steel_subset__number(source, cursor);
+    } fi;
+    if (byte == 0x28) {
+        cursor += 1;
+        let value := steel_subset__expression(source, cursor, output, next) ??
+                     $steel_subset_return;
+        steel_subset__skip_space(source, cursor);
+        if (cursor >= source.len() ||
+            (source[cursor] ?? $steel_subset_return) != 0x29) {
+            $steel_subset_return;
+        } fi;
+        cursor += 1;
+        $steel_subset_return value;
+    } fi;
+    if (byte == 0x2d) {
+        cursor += 1;
+        let value := steel_subset__factor(source, cursor, output, next) ??
+                     $steel_subset_return;
+        $steel_subset_return steel_subset__emit_binary(output, next, "sub", "0", value);
+    } fi;
+    $steel_subset_return;
+} -> str;
+
+fn steel_subset__term (
+    source : str alias,
+    var cursor : i64 alias,
+    var output : str alias,
+    var next : i64 alias
+) {
+    var left := steel_subset__factor(source, cursor, output, next) ??
+                    $steel_subset_return;
+    var scanning := true;
+    while (scanning) {
+        steel_subset__skip_space(source, cursor);
+        if (cursor >= source.len() ||
+            (source[cursor] ?? $steel_subset_return) != 0x2a) {
+            scanning := false;
+        } else {
+            cursor += 1;
+            let right := steel_subset__factor(source, cursor, output, next) ??
+                         $steel_subset_return;
+            left := steel_subset__emit_binary(output, next, "mul", left, right) ??
+                    $steel_subset_return;
+        } fi;
+    };
+    left
+} -> str;
+
+fn steel_subset__expression (
+    source : str alias,
+    var cursor : i64 alias,
+    var output : str alias,
+    var next : i64 alias
+) {
+    var left := steel_subset__term(source, cursor, output, next) ??
+                    $steel_subset_return;
+    var scanning := true;
+    while (scanning) {
+        steel_subset__skip_space(source, cursor);
+        if (cursor >= source.len()) {
+            scanning := false;
+        } else {
+            let byte := source[cursor] ?? $steel_subset_return;
+            if (byte != 0x2b && byte != 0x2d) {
+                scanning := false;
+            } else {
+                cursor += 1;
+                let right := steel_subset__term(source, cursor, output, next) ??
+                             $steel_subset_return;
+                let instruction := if (byte == 0x2b) "add" else "sub" fi;
+                left := steel_subset__emit_binary(
+                    output, next, instruction, left, right
+                ) ?? $steel_subset_return;
+            } fi;
+        } fi;
+    };
+    left
+} -> str;
+
+fn steel_subset_compile (source : str alias) {
+    var cursor := 0;
+    var next := 0;
+    var body := "";
+    let value := steel_subset__expression(source, cursor, body, next) ??
+                 $steel_subset_return;
+    steel_subset__skip_space(source, cursor);
+    if (cursor != source.len()) $steel_subset_return; fi;
+
+    var output := "; generated by Vaak steel_subset_compile\n";
+    steel_subset__append(output, "target triple = \"x86_64-pc-linux-gnu\"\n");
+    steel_subset__append(output, "define i32 @main() {\nentry:\n");
+    steel_subset__append(output, body);
+    steel_subset__append(output, "  %exit = trunc i64 ");
+    steel_subset__append(output, value);
+    steel_subset__append(output, " to i32\n  ret i32 %exit\n}\n");
+    output
+} -> str;
+
+fn steel_subset_checksum (source : str alias) {
+    var checksum := 0;
+    nfor (i, 0, source.len()) {
+        checksum := (checksum * 131 + ((source[i] ?? $steel_subset_return) -> i64)) mod 251;
+    };
+    checksum
+} -> i64;

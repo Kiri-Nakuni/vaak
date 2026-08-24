@@ -1,0 +1,22 @@
+%{ STEEL self-hosting の最小probe。
+
+   LLVM IR compilerは最終的にstrを組み立てて返す必要がある。このprogramは
+   その前提だけを残し、関数・alias・一byte push・読み戻しを検査する。 }%
+
+flow $return = $repeat(break, getdepth());
+
+fn steel_selfhost_probe_append (var output : str alias, input : str alias) {
+    nfor (i, 0, input.len()) {
+        output.push(input[i] ?? $return);
+    };
+};
+
+fn steel_selfhost_probe_make () {
+    var output := "";
+    let input := "A";
+    steel_selfhost_probe_append(output, input);
+    output
+} -> str;
+
+let output := steel_selfhost_probe_make() ?? "";
+if (output.len() == 1 && output[0] == 65) 42 else 0 fi

@@ -1,0 +1,12 @@
+%{ steel_subset_compiler.vaakを前置きする棄却実験のdriver。
+
+   compilerを別のVaak関数から一回呼ぶ。top-levelから同じcompilerを直接呼ぶ
+   fixtureは成功するが、現行Rust STEELのnative生成物ではこの形がSIGSEGVした。 }%
+
+fn steel_subset_compile_nested_probe (expression : str alias) {
+    let ir := steel_subset_compile(expression) ?? "";
+    steel_subset_checksum(ir)
+} -> i64;
+
+let expression := "2 + 3 * (4 - 1)";
+steel_subset_compile_nested_probe(expression)

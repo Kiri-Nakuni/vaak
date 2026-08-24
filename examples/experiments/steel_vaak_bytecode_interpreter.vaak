@@ -1,0 +1,179 @@
+%{ Rust STEELでnative化するpure Vaak bytecode interpreter vertical slice。
+
+   これはRust `src/interp.rs`や`src/vm.rs`の移植ではない。i64/paradox、slot、
+   算術、比較、絶対jump、条件jumpを持つ固定numeric bytecodeをVaak自身で辿る。
+   source parser、型検査、関数、集合体、escapeは範囲外である。
+
+   opcode:
+     0 halt, 1 const operand, 2 paradox, 3 load slot, 4 store slot,
+     5 add, 6 sub, 7 mul, 8 div, 9 mod, 10 eq, 11 lt,
+     12 jump target, 13 jump_if_false target, 14 coalesce, 15 pop。
+
+   operandとjump targetはopcode直後のi64。jump targetはcodeの0-based添字。
+   値stackは `(ok, i64)` の平行配列で、ok=falseがparadoxである。 }%
+
+flow $steel_vaak_return = $repeat(break, getdepth());
+
+struct SteelVaakEval {
+    var ok : u1;
+    var value : i64;
+    var error : i64;
+    var steps : i64;
+};
+
+% error: 0 none, 1 budget, 2 pc, 3 opcode, 4 operand, 5 stack,
+%        6 slot, 7 jump, 8 step limit, 9 halt shape。%
+fn steel_vaak__result (ok : u1, value : i64, error : i64, steps : i64) {
+    new SteelVaakEval(ok := ok, value := value, error := error, steps := steps)
+} -> SteelVaakEval;
+
+fn steel_vaak_interpret (code : i64 array alias, slot_count : i64, max_steps : i64) {
+    if (slot_count < 0 || max_steps <= 0) {
+        $steel_vaak_return steel_vaak__result(false, 0, 1, 0);
+    } fi;
+
+    var stack_values : i64 array := new i64 array(0, 0);
+    var stack_ok : u1 array := new u1 array(0, false);
+    var slot_values : i64 array := new i64 array(slot_count, 0);
+    var slot_ok : u1 array := new u1 array(slot_count, false);
+    var pc := 0;
+    var steps := 0;
+
+    loop {
+        if (steps >= max_steps) {
+            $steel_vaak_return steel_vaak__result(false, 0, 8, steps);
+        } fi;
+        if (pc < 0 || pc >= code.len()) {
+            $steel_vaak_return steel_vaak__result(false, 0, 2, steps);
+        } fi;
+        let opcode := code[pc] ??
+                      $steel_vaak_return steel_vaak__result(false, 0, 2, steps);
+        pc += 1;
+        steps += 1;
+
+        if (opcode == 0) {
+            if (stack_values.len() != 1 || stack_ok.len() != 1) {
+                $steel_vaak_return steel_vaak__result(false, 0, 9, steps);
+            } fi;
+            let value := stack_values[0] ??
+                         $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            let ok := stack_ok[0] ??
+                      $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            $steel_vaak_return steel_vaak__result(ok, value, 0, steps);
+        } elif (opcode == 1) {
+            if (pc >= code.len()) {
+                $steel_vaak_return steel_vaak__result(false, 0, 4, steps);
+            } fi;
+            stack_values.push(code[pc] ??
+                              $steel_vaak_return steel_vaak__result(false, 0, 4, steps));
+            stack_ok.push(true);
+            pc += 1;
+        } elif (opcode == 2) {
+            stack_values.push(0);
+            stack_ok.push(false);
+        } elif (opcode == 3 || opcode == 4) {
+            if (pc >= code.len()) {
+                $steel_vaak_return steel_vaak__result(false, 0, 4, steps);
+            } fi;
+            let slot := code[pc] ??
+                        $steel_vaak_return steel_vaak__result(false, 0, 4, steps);
+            pc += 1;
+            if (slot < 0 || slot >= slot_count) {
+                $steel_vaak_return steel_vaak__result(false, 0, 6, steps);
+            } fi;
+            if (opcode == 3) {
+                stack_values.push(slot_values[slot] ??
+                                  $steel_vaak_return steel_vaak__result(false, 0, 6, steps));
+                stack_ok.push(slot_ok[slot] ??
+                              $steel_vaak_return steel_vaak__result(false, 0, 6, steps));
+            } else {
+                if (stack_values.len() == 0 || stack_values.len() != stack_ok.len()) {
+                    $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+                } fi;
+                slot_values[slot] := stack_values.pop() ??
+                                     $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+                slot_ok[slot] := stack_ok.pop() ??
+                                 $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            } fi;
+        } elif (opcode >= 5 && opcode <= 11) {
+            if (stack_values.len() < 2 || stack_values.len() != stack_ok.len()) {
+                $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            } fi;
+            let right := stack_values.pop() ??
+                         $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            let right_ok := stack_ok.pop() ??
+                            $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            let left := stack_values.pop() ??
+                        $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            let left_ok := stack_ok.pop() ??
+                           $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            if (! left_ok || ! right_ok || ((opcode == 8 || opcode == 9) && right == 0)) {
+                stack_values.push(0);
+                stack_ok.push(false);
+            } else {
+                var result := 0;
+                if (opcode == 5) result := left + right;
+                elif (opcode == 6) result := left - right;
+                elif (opcode == 7) result := left * right;
+                elif (opcode == 8) result := left / right;
+                elif (opcode == 9) result := left mod right;
+                elif (opcode == 10) result := if (left == right) 1 else 0 fi;
+                else result := if (left < right) 1 else 0 fi; fi;
+                stack_values.push(result);
+                stack_ok.push(true);
+            } fi;
+        } elif (opcode == 12 || opcode == 13) {
+            if (pc >= code.len()) {
+                $steel_vaak_return steel_vaak__result(false, 0, 4, steps);
+            } fi;
+            let target := code[pc] ??
+                          $steel_vaak_return steel_vaak__result(false, 0, 4, steps);
+            pc += 1;
+            if (target < 0 || target >= code.len()) {
+                $steel_vaak_return steel_vaak__result(false, 0, 7, steps);
+            } fi;
+            if (opcode == 12) {
+                pc := target;
+            } else {
+                if (stack_values.len() == 0 || stack_values.len() != stack_ok.len()) {
+                    $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+                } fi;
+                let condition := stack_values.pop() ??
+                                 $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+                let condition_ok := stack_ok.pop() ??
+                                    $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+                if (! condition_ok) {
+                    $steel_vaak_return steel_vaak__result(false, 0, 0, steps);
+                } fi;
+                if (condition == 0) pc := target; fi;
+            } fi;
+        } elif (opcode == 14) {
+            if (stack_values.len() < 2 || stack_values.len() != stack_ok.len()) {
+                $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            } fi;
+            let right := stack_values.pop() ??
+                         $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            let right_ok := stack_ok.pop() ??
+                            $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            let left := stack_values.pop() ??
+                        $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            let left_ok := stack_ok.pop() ??
+                           $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            if (left_ok) {
+                stack_values.push(left);
+                stack_ok.push(true);
+            } else {
+                stack_values.push(right);
+                stack_ok.push(right_ok);
+            } fi;
+        } elif (opcode == 15) {
+            if (stack_values.len() == 0 || stack_values.len() != stack_ok.len()) {
+                $steel_vaak_return steel_vaak__result(false, 0, 5, steps);
+            } fi;
+            stack_values.pop();
+            stack_ok.pop();
+        } else {
+            $steel_vaak_return steel_vaak__result(false, 0, 3, steps);
+        } fi;
+    };
+} -> SteelVaakEval;
