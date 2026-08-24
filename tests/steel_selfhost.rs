@@ -176,7 +176,7 @@ fn interpreter_driver(code: &[i64], slots: i64, max_steps: i64, expected: Oracle
     let ok = if expected.ok { "true" } else { "false" };
     format!(
         r#"{INTERPRETER}
-let code := [ {code} ];
+let code : i64 array := [ {code} ];
 let result := steel_vaak_interpret(code, {slots}, {max_steps});
 if (result.ok == {ok} && result.value == {} && result.error == {} && result.steps == {})
     42
@@ -416,6 +416,8 @@ fn numeric_bytecode_interpreterは四経路で一致する() {
 fn numeric_bytecode_interpreterは診断codeを安定させる() {
     let fixtures: &[(&str, &[i64], i64, i64, i64)] = &[
         ("bad-budget", &[0], 0, 0, 1),
+        ("bad-pc", &[], 0, 10, 2),
+        ("bad-opcode", &[99], 0, 10, 3),
         ("missing-operand", &[1], 0, 10, 4),
         ("stack-underflow", &[5, 0], 0, 10, 5),
         ("bad-slot", &[3, 1, 0], 1, 10, 6),
