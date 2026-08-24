@@ -4,8 +4,9 @@ use std::rc::Rc;
 
 use vaak::ast::{HostItem, HostSig, ValueType};
 use vaak::embedding::{
-    prepare, EmbeddingRunError, EmbeddingRunner, HostFunctionSlot, HostFunctionsError, HostLayout,
-    HostLayoutError, HostSlot, HostValueKind, HostValuesError, PrepareStage, PreparedRunError,
+    prepare, prepare_utf8, EmbeddingRunError, EmbeddingRunner, HostFunctionSlot,
+    HostFunctionsError, HostLayout, HostLayoutError, HostSlot, HostValueKind, HostValuesError,
+    PrepareStage, PreparedRunError,
 };
 use vaak::host::{HostBinding, HostFn};
 use vaak::interp::Eval;
@@ -1162,6 +1163,32 @@ fn prepare診断は検査段を区別する() {
         .diagnostics()
         .iter()
         .any(|diagnostic| diagnostic.stage == PrepareStage::Check));
+}
+
+#[test]
+fn byte列prepareは正しいutf8をそのまま使う() {
+    let layout = HostLayout::new(Vec::new()).expect("空配置");
+    let program = prepare_utf8("40 + 2".as_bytes(), &layout).expect("UTF-8 source");
+    assert_eq!(program.source(), "40 + 2");
+
+    let mut runner = EmbeddingRunner::new();
+    let mut values = program.host_values(Vec::new()).expect("空host値");
+    let result = runner
+        .run_values_without_functions(&program, &mut values)
+        .expect("layout一致")
+        .expect("実行成功");
+    assert_eq!(整数の結果(result), 42);
+}
+
+#[test]
+fn byte列prepareは不正utf8を置換せず最初のbyte位置を返す() {
+    let layout = HostLayout::new(Vec::new()).expect("空配置");
+    let error = prepare_utf8(b"1 + \xff + \xfe", &layout).expect_err("不正UTF-8");
+    let diagnostics = error.diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].stage, PrepareStage::Parse);
+    assert_eq!(diagnostics[0].span, vaak::span::Span::new(4, 5));
+    assert!(diagnostics[0].message.contains("UTF-8"));
 }
 
 #[test]

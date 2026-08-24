@@ -586,6 +586,26 @@ impl PreparedProgram {
     }
 }
 
+/// UTF-8 byte列を検証してから、一度だけparse・check・type-check・VM compileする。
+///
+/// Phase sourceなど、hostがbyte列を所有する入口で使う。無効なbyteを置換して別の
+/// programをprepareせず、最初の不正byte offsetをparse段階の診断として返す。
+pub fn prepare_utf8(source: &[u8], layout: &HostLayout) -> Result<PreparedProgram, PrepareError> {
+    let source = std::str::from_utf8(source).map_err(|error| {
+        let start = u32::try_from(error.valid_up_to()).unwrap_or(u32::MAX);
+        let invalid_len = error.error_len().unwrap_or(1);
+        let end = start.saturating_add(u32::try_from(invalid_len).unwrap_or(u32::MAX));
+        PrepareError {
+            diagnostics: vec![PrepareDiagnostic {
+                stage: PrepareStage::Parse,
+                message: "sourceがUTF-8ではない".into(),
+                span: Span::new(start, end),
+            }],
+        }
+    })?;
+    prepare(source, layout)
+}
+
 /// 一度だけparse・check・type-check・VM compileする。
 pub fn prepare(source: &str, layout: &HostLayout) -> Result<PreparedProgram, PrepareError> {
     let parsed = crate::parser::parse(source).map_err(|error| PrepareError {
