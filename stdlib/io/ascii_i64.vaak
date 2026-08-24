@@ -97,3 +97,119 @@ fn io_ascii_i64_append_newline (var output : str alias) {
     output.push(0x0a);
     true
 } -> u1;
+
+%{
+   sourceからcount個を連続して読み、output[first..first+count)へ書く。
+   一つの関数frame内でparseし、tokenごとの一時文字列を作らない。
+
+   countと出力範囲の違反は何も変更せずparadox。token途中の失敗は、それ以前に
+   成功した値とpositionを保持し、失敗したtokenの出力欄とpositionは変更しない。
+}%
+fn io_ascii_i64_read_n_into (
+    source : str alias,
+    var position : i64 alias,
+    var output : i64 array alias,
+    first : i64,
+    count : i64
+) {
+    if (position < 0 || position > source.len() ||
+        first < 0 || first > output.len() ||
+        count < 0 || count > output.len() - first) {
+        $io_ascii_i64_return;
+    } fi;
+
+    var target := first;
+    let end := first + count;
+    while (target < end) {
+        var cursor := position;
+        while (cursor < source.len()) {
+            let whitespace := source[cursor] ?? $io_ascii_i64_return;
+            if (! (whitespace == 0x20 ||
+                   (whitespace >= 0x09 && whitespace <= 0x0d))) break; fi;
+            cursor += 1;
+        };
+        if (cursor == source.len()) $io_ascii_i64_return; fi;
+
+        var negative := false;
+        let first_byte := source[cursor] ?? $io_ascii_i64_return;
+        if (first_byte == 0x2d) {
+            negative := true;
+            cursor += 1;
+        } elif (first_byte == 0x2b) {
+            cursor += 1;
+        } fi;
+        if (cursor == source.len()) $io_ascii_i64_return; fi;
+
+        var value := 0;
+        var digits := 0;
+        while (cursor < source.len()) {
+            let byte := source[cursor] ?? $io_ascii_i64_return;
+            if (byte < 0x30 || byte > 0x39) break; fi;
+            let digit := (byte - 0x30) -> i64;
+            if (value < (0 - 922337203685477580)) $io_ascii_i64_return; fi;
+            if (value == (0 - 922337203685477580) &&
+                ((! negative && digit > 7) || (negative && digit > 8))) {
+                $io_ascii_i64_return;
+            } fi;
+            value := value * 10 - digit;
+            digits += 1;
+            cursor += 1;
+        };
+        if (digits == 0) $io_ascii_i64_return; fi;
+        if (cursor < source.len()) {
+            let delimiter := source[cursor] ?? $io_ascii_i64_return;
+            if (! (delimiter == 0x20 ||
+                   (delimiter >= 0x09 && delimiter <= 0x0d))) {
+                $io_ascii_i64_return;
+            } fi;
+        } fi;
+
+        output[target] := if (negative) value else 0 - value fi;
+        position := cursor;
+        target += 1;
+    };
+    true
+} -> u1;
+
+%{
+   values[first..last)を十進ASCIIへ変換し、separatorを値の間にだけ置く。
+   結果strと20-byte scratchを一度ずつ確保し、整数ごとの配列確保をしない。
+   有効な空区間は空str。範囲外と非ASCII separatorはparadox。
+}%
+fn io_ascii_i64_format_range (
+    values : i64 array alias,
+    first : i64,
+    last : i64,
+    separator : u8
+) {
+    if (first < 0 || first > last || last > values.len() || separator > 0x7f) {
+        $io_ascii_i64_return;
+    } fi;
+
+    var output := "";
+    var scratch : u8 array := new u8 array(20, 0);
+    var index := first;
+    while (index < last) {
+        if (index > first) output.push(separator); fi;
+        let value := values[index] ?? $io_ascii_i64_return;
+        if (value == 0) {
+            output.push(0x30);
+        } else {
+            if (value < 0) output.push(0x2d); fi;
+            var remaining := if (value > 0) 0 - value else value fi;
+            var digits := 0;
+            while (remaining < 0) {
+                let digit := (0 - (remaining mod 10)) mod 10;
+                scratch[digits] := 0x30 + (digit -> u8);
+                digits += 1;
+                remaining := (remaining + digit) / 10;
+            };
+            while (digits > 0) {
+                digits -= 1;
+                output.push(scratch[digits] ?? $io_ascii_i64_return);
+            };
+        } fi;
+        index += 1;
+    };
+    output
+} -> str;

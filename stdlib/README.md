@@ -130,7 +130,7 @@ Unicodeの正規化や大小対応を行わない。ASCII大小変換は128以�
 | `ds/disjoint_sparse_table_i64.vaak` | `DisjointSparseSumI64`, `disjoint_sparse_sum_i64_*` | immutableなi64折返し和。build O(n log n)、半開区間query O(1) |
 | `ds/ordered_multiset_i64.vaak` | `OrderedMultisetI64`, `ordered_multiset_i64_*` | sorted unique universe固定。重複、順位、0-based k-thをO(log n)で扱う |
 | `graph/csr_scc_two_sat_i64.vaak` | `CsrBuilderI64`, `CsrI64`, `SccResultI64`, `BfsResultI64`, `TopologicalResultI64`, `TwoSatI64` | 安定順序CSR、再帰なしSCC/BFS、辞書順topological、2-SAT。添字はi64固定 |
-| `io/ascii_i64.vaak` | `io_ascii_i64_*` | hostが一括で渡す`str`の整数scannerと返却用`str` formatter。stdin/stdout自体は持たない |
+| `io/ascii_i64.vaak` | `io_ascii_i64_*` | host-owned `str`の単体/bulk整数scannerと返却用bulk formatter。stdin/stdout自体は持たない |
 
 配列を値引数で受けると深い複製になるため、読み取りは `alias`、破壊は
 `var alias` に揃えた。subarray を別名にせず `(xs, first, last)` の半開区間を渡す。
@@ -216,6 +216,16 @@ O(n log n)で検査する。online balanced tree、乱数priority、generic key�
 `io/ascii_i64.vaak`はS-4のhost境界を変えない。hostがstdin等を一括で`str`として渡し、Vaakは
 cursorを明示して読む。出力は`str`へ追記し、最上位の値としてhostへ返す。標準host名、streaming、
 buffer flushは未決であり、このsourceはそれらを暗黙に導入しない。
+
+`io_ascii_i64_read_n_into(source, position, output, first, count)`は一つの関数frame内で`count` tokenを読み、
+caller-ownedな`i64 array`の指定範囲へ書く。count・出力範囲・初期cursor違反は何も変えずparadox。途中tokenの
+失敗は、それ以前の成功prefixだけをoutputとcursorへ確定し、失敗tokenの欄とcursorは変えない。これは
+実行済みwriteを巻き戻す新しい意味を作らず、再開位置を最後の成功tokenへ揃える契約である。
+
+`io_ascii_i64_format_range(values, first, last, separator)`は結果`str`と20-byte digit scratchを各一度だけ確保し、
+整数ごとの逆順配列を作らない。separatorはASCII byteで値の間にだけ入り、空範囲は空`str`、不正範囲と
+非ASCII separatorはparadox。結果を値で返すため、hostは最上位の一括文字列をそのまま書ける。これも
+reserve、streaming、stdin/stdout host名、出力budgetを定めない。
 
 graph sourceは各頂点内で辺の追加順を保つCSRを一度構築し、そのflat表現を反復Kosaraju SCCと
 BFS、topological sort、2-SATで共有する。BFSの未到達距離・親は`-1`、始点の親は始点自身で、同距離の

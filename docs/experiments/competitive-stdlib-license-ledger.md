@@ -4,7 +4,7 @@
 > 外部実装をvendorする許可にもならない。
 
 - 調査日: 2026-08-24〜2026-08-25
-- 対象branch: `codex3/stdlib-fenwick-range`（ordering / sparse / ordered multiset / structure / graph checkpointを統合）
+- 対象branch: `codex3/stdlib-bulk-io`（P1 ordering / range / I/Oとstructure / graph checkpointを統合）
 - Vaak本体のlicense: [`docs/LICENSING.md`](../LICENSING.md)のとおりMIT
 - 規律: 公式仕様から契約・分類・計算量だけを調べ、source、test、解説文を転写・翻訳しない
 
@@ -77,6 +77,17 @@ Rust vector modelは`tests/ordered_multiset_i64.rs`の結果oracleだけに使�
 表現と二配列のindex係数式は、Vaakの既存i64折返し演算上で独立に導出した。Rust vector modelは
 `tests/fenwick_range_i64.rs`の結果oracleだけに使い、Vaak sourceへ転写していない。empty/paradox、公開欄検査、
 range違反時の更新前拒否はこのrepositoryの既存stdlib契約へ揃えた。
+
+## bulk ASCII i64 checkpointで独立に定義したもの
+
+| Vaak source | 外部実装の入力 | 独立性を固定する試験 |
+|---|---|---|
+| `io/ascii_i64.vaak`の`read_n_into` / `format_range` | なし | Rust `i64::to_string`で作った192値の入力・整形結果を、独立wrapping hashと長さで照合 |
+
+外部scanner/formatter、競プロtemplate、snippet、test vectorは入力にしていない。既存single-token契約のASCII空白、
+符号、i64境界をbulk loopにも適用し、random oracleと固定fixtureで両APIを照合した。成功prefixだけを確定する
+失敗契約、caller-owned配列範囲、20-byte scratch一回、ASCII separator、値間だけの区切りは独立に定めた。
+stdin/stdout、host名、streaming、reserve、zero-copy viewの資料・実装はこのcheckpointへ持ち込んでいない。
 
 ## 今後の追記規則
 

@@ -191,3 +191,22 @@ parse、静的検査、VM compileは計測外。全caseは256要素へ同じ2048
 約1.13倍、sum型が約1.51倍速い。FenwickのO(log n)操作でもnamed functionと一つまたは二つのcompound field
 更新費用は消えないため、これを永続的なcrossoverやbackend保証にしない。要素数、range幅、update/query比、
 flat引数版、compound place fast path後を同じchecksumでpairedにして再測定する。
+
+## bulk ASCII i64 checkpoint
+
+2026-08-25、同じLinux x86_64環境で
+`ROUNDS=3 cargo run --release --locked --example bench_io_ascii_bulk`を実行した。一度暖機後の3回平均で、
+parse、静的検査、VM compileは計測外。read pairは同じ2048 tokenを同じcaller-owned配列へ書いてから同じhash、
+format pairは同じ1024整数をspace区切りへ整形して同じbyte hashを返す。
+
+| case | 木を辿る実装 | VM | 結果 |
+|---|---:|---:|---:|
+| 2048整数をper-token `read` | 120.199 ms | 53.512 ms | 132 |
+| 2048整数を`read_n_into` | **66.452 ms** | **51.087 ms** | 132 |
+| 1024整数をper-value `append` | **39.837 ms** | **20.380 ms** | 234 |
+| 1024整数を`format_range` | 41.916 ms | 22.820 ms | 234 |
+
+bulk readはper-token frameを除き、木で約1.81倍、VMで約1.05倍速かった。`format_range`は整数ごとの可変長
+`reversed`配列を除き、結果strと固定scratchを各一度だけ確保するが、この標本では木で約1.05倍、VMで約1.12倍
+遅い。allocation回数を静的に減らすことと現backendで速いことは同じでない。token桁数、入力byte数、出力件数、
+separator、output capacity/reserve、host転送をpairedにし、単一規模から永続的な速度保証を作らない。

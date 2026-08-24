@@ -5,7 +5,8 @@
 > [`modules-and-library.md`](modules-and-library.md)を変更するものでもない。
 
 - 調査・実測日: 2026-08-24〜2026-08-25
-- branch: `codex3/stdlib-fenwick-range`
+- branch: `codex3/stdlib-bulk-io`
+- integrated Fenwick range checkpoint: `codex3/stdlib-fenwick-range` = `2012cb0a4bd41a098dad8aa8f7dbbd0d15098828`
 - integrated ordered multiset checkpoint: `codex3/stdlib-ordered-multiset` = `3e2eeef2202a4ede6394675bd8d8942cb9a0b0eb`
 - integrated sparse checkpoint: `codex3/stdlib-sparse-table` = `2ea12164647d232c2a451274f80439526db9c057`
 - integrated ordering checkpoint: `codex3/stdlib-ordering` = `0f22c4899d2692fe785a8f0de8f8652bb8cc3006`
@@ -252,6 +253,30 @@ pairedにし、raw値を`stdlib/BENCHMARK.md`へ残した。現行の木を辿�
 point型が約1.13倍、sum型が約1.51倍速い一標本だった。計算量とcompound fieldの定数費用を分けて扱う。
 全release gateは792 passed、6 failed、1 ignoredで、失敗6件は4.3に列挙した未変更のnative baselineと同じ。
 
+### 4.7 P1第五checkpoint: bulk ASCII i64
+
+host-ownedな入力`str`と最上位へ返す出力`str`の境界を変えず、既存`ascii_i64.vaak`へ二つのadditive APIを加えた。
+
+| API | allocation / frame | 成功 | 失敗 |
+|---|---|---|---|
+| `io_ascii_i64_read_n_into` | caller-owned i64配列、一つのbulk frame | 指定欄へcount個を書きcursorを進める | 初期範囲違反は原子的。token失敗は成功prefixだけ確定 |
+| `io_ascii_i64_format_range` | 結果str一つ、20-byte scratch一つ | 値間だけASCII separatorを置く | 範囲外・非ASCII separatorはparadox |
+
+bulk scannerはtokenごとの文字列を作らず、whitespace/sign/digit/overflowを一つのloop内で処理する。途中失敗で
+既に読んだ値を巻き戻さず、positionは最後に成功したtoken直後、失敗欄は未変更とする。既存の一token readが
+失敗token自身のcursorを変えない契約と揃え、部分writebackの新しい一般則は作らない。
+
+bulk formatterは`i64::MIN`を負のまま桁へ分解し、固定scratchへ逆順に置いて結果へ戻す。separatorを値の間に
+だけ置くため、有効な空範囲は空`str`で、末尾separatorは付けない。`str.reserve`、caller-owned可変capacity、
+streaming flush、stdin/stdout runner、host名はこのpure sourceへ入れない。
+
+`tests/io_ascii_i64_bulk.rs`は固定境界、成功prefix、範囲違反と192値のRust parse/format oracleをreference / VM /
+STEEL nativeへ流し、5 passed、0 failed。既存single-token試験のreference / VMも不変である。
+`examples/bench_io_ascii_bulk.rs`は同じ2048整数のreadと1024整数のformatをpairedにし、raw値を
+`stdlib/BENCHMARK.md`へ残した。bulk readは木で約1.81倍、VMで約1.05倍速い一方、bulk formatはこの標本で
+木約1.05倍、VM約1.12倍遅く、per-value allocation削減を速度保証とは扱わない。
+全release gateは797 passed、6 failed、1 ignoredで、失敗6件は4.3に列挙した未変更のnative baselineと同じ。
+
 ## 5. flat graph checkpoint
 
 `stdlib/graph/csr_scc_two_sat_i64.vaak`は別sourceを暗黙に読み込まず、次を一ファイルで提供する。
@@ -326,6 +351,10 @@ core変更はしていない。三者は同じi64 indexでも状態契約が異�
 `io_ascii_i64_append(var output, value)`は十進ASCIIを`str`へ追記し、space/newline helperも持つ。
 formatterも`i64::MIN`を正のi64へ反転せず処理する。各整数はO(桁数)、scannerは読んだbyte数に線形である。
 
+P1第五checkpointでは`read_n_into`を加え、caller-owned配列へ指定個数を一つのframeで埋められるようにした。
+`format_range`は範囲全体を一度に整形し、整数ごとの`reversed`配列に代えて20-byte scratchを一度だけ持つ。
+どちらも既存の一括input/output手順の内側だけであり、host APIや言語意味は増やさない。
+
 想定host手順は次である。
 
 1. hostがstdinを一度byte列として読む。
@@ -360,7 +389,7 @@ reference/VM/STEEL差分、計算量、空・範囲・overflow、bench、参照�
 | 順位 | まとまり | 具体的な順序 | 先に満たすgate |
 |---:|---|---|---|
 | P0 済 | 基準構造 | 通常/rollback/weighted DSU、通常/count Fenwick、min/max heap、deque、sum/min/max segtree、range-add-sum | 第三checkpointまでの差分試験とbench |
-| P1 進行中 | 静的range・順序・低alloc I/O | **array sort/compress・sparse/disjoint・圧縮済みordered multiset・Fenwick range派生済** → bulk scanner/output | 固定i64、flat対照、paradox/empty表 |
+| P1 済 | 静的range・順序・低alloc I/O | **array sort/compress・sparse/disjoint・圧縮済みordered multiset・Fenwick range派生・bulk scanner/output済** | 固定i64、flat対照、paradox/empty表 |
 | P2 | byte string・trie・基礎数値 | Z/prefix/KMP → flat byte trie → Aho-Corasick/Manacher → gcd/extgcd/isqrt/sieve/factorization →安全なmod算術 | `str`はbyte列、i64中間幅、allocation測定 |
 | P3 | flat graph | CSR → BFS/DFS/topological sort → SCC → 2-SAT → Dijkstra → LCA/HLD | graph/resultをflat化、決定的tie-break |
 | P4 | 高級構造・flow | wavelet matrix、persistent/rollback構造、Li Chao、maxflow、min-cost flow | memory上限、再帰深さ、overflow、backend差 |
@@ -376,9 +405,9 @@ P1内では次の小checkpoint順にする。
    任意keyをonline追加するbalanced treeや乱数priorityは別候補とする。
 4. 完了: rollback DSU、weighted/potential DSU、prefix countのlower-boundに加え、Fenwickの
    range-add/point-get（一配列）とrange-add/range-sum（二配列）を別型にした。全演算はi64で折り返す。
-5. I/Oはhost名を増やさず、現行scannerの一token一時文字列0を保つ。`read_n_into`候補で一つの関数frameから
-   caller-owned `i64 array`へ埋め、formatterは各整数ごとの`reversed : u8 array`確保をcaller-owned 20-byte
-   scratchまたはbulk appendで除く。`str.reserve`、zero-copy host view、stdin/stdout runnerは未決のまま分ける。
+5. 完了: host名を増やさず、`read_n_into`が一つの関数frameからcaller-owned `i64 array`へ埋める。
+   `format_range`は結果`str`と20-byte scratchを各一度だけ確保する。`str.reserve`、zero-copy host view、
+   stdin/stdout runnerは未決のまま分ける。
 
 P2のtrie/stringはUnicodeを暗黙に扱わない。最初のtrie候補はnode/edge/label/terminalをparallel arrayにした
 byte版で、遷移O(degree)のmutable基準と、build後にedgeをsortしてbinary searchするfrozen版を比較する。
