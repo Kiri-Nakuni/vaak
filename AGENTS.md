@@ -8,9 +8,16 @@
 | **Claude** | Vaak の言語意味論、決定記録、STEEL | `src/` `docs/` `examples/` `editors/` |
 | **Codex** | PraTeX 埋め込みの additive API | `src/embedding.rs`、対応する試験と引き継ぎ文書。必要な支援変更だけ |
 | **Codex** | [PraTeX](https://git.trap.jp/Suima/vaak-rtex)（別版方） | PraTeX の中だけ |
+| **Codex** | managed runtime の実現性調査 | `docs/managed-runtime-feasibility.md`。言語意味論を変えず、実装前の設計資料だけ |
 
 Codex の枝は **`codex2/pratex-embedding-api`**（基点 `codex2/main`）。以後も
 `codex2/` 以下で作業する。Claude の枝と優先順位をこの枝から書き換えない。
+
+managed runtime の調査枝は **`codex2/managed-runtime-feasibility`**（基点
+`7c5ccd706e4dc466dad45baf275c0b550c8bc777`）である。.NET 版の公開名は
+**IRON VAAK**、JVM 版の名前は未決定である。この枝では pure C# VM と pure Java/Kotlin VM、
+portable bytecode と差分試験の境界だけを調べる。**新しい S-n を作らず、Vaak の意味論・
+参照実装・既存 VM を変えない。** 判断が必要な点は未決事項として意味論の所有者へ返す。
 
 PraTeX 埋め込みのための追加 API は進めてよい。ただし、既存の Vaak プログラムの意味、
 参照実装・VM・STEEL の結果、C-n/S-n の解釈を変える必要が出たら実装を止め、Claude に
