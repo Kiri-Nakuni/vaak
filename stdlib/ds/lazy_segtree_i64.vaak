@@ -1,0 +1,155 @@
+%{ i64 の range add / range sum に演算を固定した lazy segment tree。
+
+   i64 加算を 2^64 上の演算として扱うため、aggregate には
+   delta * segment_length を同じ折り返し規則で足せる。更新と半開区間
+   query は O(log n)、build は O(n)、all_prod は O(1)。
+
+   任意 action/monoid callback、range add + min/max、range assign は
+   この型へ混ぜない。 }%
+
+flow $lazy_segtree_i64_return = $repeat(break, getdepth());
+
+struct RangeAddSumSegtreeI64 {
+    var length : i64;
+    var size : i64;
+    var data : i64 array;
+    var lazy : i64 array;
+};
+
+% n < 0、または内部配列長を i64 で表せない n は paradox。n == 0 は有効。%
+fn range_add_sum_segtree_i64_new (n : i64) {
+    if (n < 0) $lazy_segtree_i64_return; fi;
+    var size := 1;
+    while (size < n) {
+        if (size > 4611686018427387903) $lazy_segtree_i64_return; fi;
+        size *= 2;
+    };
+    if (size > 4611686018427387903) $lazy_segtree_i64_return; fi;
+    new RangeAddSumSegtreeI64 (
+        length := n,
+        size := size,
+        data := new i64 array(size * 2, 0),
+        lazy := new i64 array(size * 2, 0)
+    )
+} -> RangeAddSumSegtreeI64;
+
+% 入力を葉へ複製して O(n) build する。%
+fn range_add_sum_segtree_i64_from (values : i64 array alias) {
+    var tree := range_add_sum_segtree_i64_new(values.len()) ?? $lazy_segtree_i64_return;
+    nfor (i, 0, values.len()) {
+        tree.data[tree.size + i] := values[i] ?? $lazy_segtree_i64_return;
+    };
+    var node := tree.size;
+    while (node > 1) {
+        node -= 1;
+        tree.data[node] := (tree.data[node * 2] ?? $lazy_segtree_i64_return) +
+                           (tree.data[node * 2 + 1] ?? $lazy_segtree_i64_return);
+    };
+    tree
+} -> RangeAddSumSegtreeI64;
+
+fn range_add_sum_segtree_i64_len (tree : RangeAddSumSegtreeI64 alias) {
+    tree.length
+} -> i64;
+
+%{
+   完全被覆nodeでは data と lazy の両方へ加算する。部分被覆nodeでは
+   親lazyを子へpushせず保持し、再集約時に親区間長を掛けて加える。
+   これにより一回の更新で触るnode数を O(log n) に保つ。
+}%
+fn range_add_sum_segtree_i64__range_add (
+    var tree : RangeAddSumSegtreeI64 alias,
+    node : i64,
+    node_first : i64,
+    node_last : i64,
+    first : i64,
+    last : i64,
+    delta : i64
+) {
+    if (last <= node_first || node_last <= first) true
+    else if (first <= node_first && node_last <= last) {
+        tree.data[node] += delta * (node_last - node_first);
+        tree.lazy[node] += delta;
+        true
+    } else {
+        let middle := node_first + (node_last - node_first) / 2;
+        range_add_sum_segtree_i64__range_add(
+            tree, node * 2, node_first, middle, first, last, delta
+        ) ?? $lazy_segtree_i64_return;
+        range_add_sum_segtree_i64__range_add(
+            tree, node * 2 + 1, middle, node_last, first, last, delta
+        ) ?? $lazy_segtree_i64_return;
+        tree.data[node] := (tree.data[node * 2] ?? $lazy_segtree_i64_return) +
+                           (tree.data[node * 2 + 1] ?? $lazy_segtree_i64_return) +
+                           (tree.lazy[node] ?? $lazy_segtree_i64_return) *
+                           (node_last - node_first);
+        true
+    } fi fi
+} -> u1;
+
+% [first, last) へ delta を加える。空区間は何もせず true。O(log n)。%
+fn range_add_sum_segtree_i64_range_add (
+    var tree : RangeAddSumSegtreeI64 alias,
+    first : i64,
+    last : i64,
+    delta : i64
+) {
+    if (first < 0 || first > last || last > tree.length) $lazy_segtree_i64_return; fi;
+    if (first == last) $lazy_segtree_i64_return true; fi;
+    range_add_sum_segtree_i64__range_add(
+        tree, 1, 0, tree.size, first, last, delta
+    )
+} -> u1;
+
+%{
+   carry は祖先に留まるlazyの和。完全被覆ではdata[node]へ
+   carry * segment_lengthを足すだけなので、queryは木を変更しない。
+}%
+fn range_add_sum_segtree_i64__prod (
+    tree : RangeAddSumSegtreeI64 alias,
+    node : i64,
+    node_first : i64,
+    node_last : i64,
+    first : i64,
+    last : i64,
+    carry : i64
+) {
+    if (last <= node_first || node_last <= first) 0
+    else if (first <= node_first && node_last <= last) {
+        (tree.data[node] ?? $lazy_segtree_i64_return) +
+        carry * (node_last - node_first)
+    } else {
+        let next_carry := carry + (tree.lazy[node] ?? $lazy_segtree_i64_return);
+        let middle := node_first + (node_last - node_first) / 2;
+        let left := range_add_sum_segtree_i64__prod(
+            tree, node * 2, node_first, middle, first, last, next_carry
+        ) ?? $lazy_segtree_i64_return;
+        let right := range_add_sum_segtree_i64__prod(
+            tree, node * 2 + 1, middle, node_last, first, last, next_carry
+        ) ?? $lazy_segtree_i64_return;
+        left + right
+    } fi fi
+} -> i64;
+
+% [first, last) の和。空区間は 0。O(log n)。%
+fn range_add_sum_segtree_i64_prod (
+    tree : RangeAddSumSegtreeI64 alias,
+    first : i64,
+    last : i64
+) {
+    if (first < 0 || first > last || last > tree.length) $lazy_segtree_i64_return; fi;
+    if (first == last) $lazy_segtree_i64_return 0; fi;
+    range_add_sum_segtree_i64__prod(
+        tree, 1, 0, tree.size, first, last, 0
+    )
+} -> i64;
+
+fn range_add_sum_segtree_i64_get (tree : RangeAddSumSegtreeI64 alias, index : i64) {
+    if (index < 0 || index >= tree.length) $lazy_segtree_i64_return; fi;
+    range_add_sum_segtree_i64_prod(tree, index, index + 1)
+} -> i64;
+
+% 全区間。長さ 0 では 0。O(1)。%
+fn range_add_sum_segtree_i64_all_prod (tree : RangeAddSumSegtreeI64 alias) {
+    tree.data[1]
+} -> i64;

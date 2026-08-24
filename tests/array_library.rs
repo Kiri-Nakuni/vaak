@@ -13,6 +13,8 @@ const FENWICK: &str = include_str!("../stdlib/ds/fenwick_i64.vaak");
 const FENWICK_FLAT: &str = include_str!("../stdlib/ds/fenwick_i64_flat.vaak");
 const HEAP: &str = include_str!("../stdlib/ds/heap_i64.vaak");
 const DEQUE: &str = include_str!("../stdlib/ds/deque_i64.vaak");
+const SEGTREE: &str = include_str!("../stdlib/ds/segtree_i64.vaak");
+const LAZY_SEGTREE: &str = include_str!("../stdlib/ds/lazy_segtree_i64.vaak");
 const ASCII_I64: &str = include_str!("../stdlib/io/ascii_i64.vaak");
 
 fn source(parts: &[&str], body: &str) -> String {
@@ -112,6 +114,16 @@ fn 各ソースは単独で前置きできる() {
         "値 7",
     );
     both(
+        &[SEGTREE],
+        "let xs := [4, 2, 7]; let t := min_segtree_i64_from(xs) ?? new MinSegtreeI64(length := 0, size := 1, data := [0, 0]); min_segtree_i64_all_prod(t)",
+        "値 2",
+    );
+    both(
+        &[LAZY_SEGTREE],
+        "let xs := [1, 2]; var t := range_add_sum_segtree_i64_from(xs) ?? new RangeAddSumSegtreeI64(length := 0, size := 1, data := [0, 0], lazy := [0, 0]); range_add_sum_segtree_i64_range_add(t, 0, 2, 3) ?? false; range_add_sum_segtree_i64_all_prod(t)",
+        "値 9",
+    );
+    both(
         &[ASCII_I64],
         r#"let input := "  -42 "; var at := 0; io_ascii_i64_read(input, at)"#,
         "値 -42",
@@ -153,6 +165,14 @@ fn 各ソースはsteelにも単独で前置きできる() {
             "var q := deque_i64_new() ?? new DequeI64(data := [0], head := 0, size := 0); deque_i64_push_back(q, 7) ?? false; deque_i64_peek_front(q)",
         ),
         (
+            SEGTREE,
+            "let xs := [4, 2, 7]; let t := max_segtree_i64_from(xs) ?? new MaxSegtreeI64(length := 0, size := 1, data := [0, 0]); max_segtree_i64_all_prod(t)",
+        ),
+        (
+            LAZY_SEGTREE,
+            "let xs := [1, 2]; var t := range_add_sum_segtree_i64_from(xs) ?? new RangeAddSumSegtreeI64(length := 0, size := 1, data := [0, 0], lazy := [0, 0]); range_add_sum_segtree_i64_range_add(t, 0, 1, 4) ?? false; range_add_sum_segtree_i64_all_prod(t)",
+        ),
+        (
             ASCII_I64,
             r#"let input := "42"; var at := 0; io_ascii_i64_read(input, at)"#,
         ),
@@ -177,6 +197,8 @@ fn 全ソースを同時に前置きしても名前が衝突しない() {
         FENWICK_FLAT,
         HEAP,
         DEQUE,
+        SEGTREE,
+        LAZY_SEGTREE,
         ASCII_I64,
     ];
     both(&libraries, "42", "値 42");

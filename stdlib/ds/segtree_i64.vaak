@@ -1,0 +1,249 @@
+%{ i64 固定演算の反復 segment tree。
+
+   generic monoid/callback を使わず、sum/min/max を別の named type と
+   hot loop に分ける。構築は O(n)、point set と半開区間 prod は
+   O(log n)、get/all_prod は O(1)。
+
+   sum の加算は Vaak の i64 と同じく折り返す。min/max の空区間は
+   それぞれ i64::MAX / i64::MIN という identity を返す。 }%
+
+flow $segtree_i64_return = $repeat(break, getdepth());
+
+struct SumSegtreeI64 {
+    var length : i64;
+    var size : i64;
+    var data : i64 array;
+};
+
+struct MinSegtreeI64 {
+    var length : i64;
+    var size : i64;
+    var data : i64 array;
+};
+
+struct MaxSegtreeI64 {
+    var length : i64;
+    var size : i64;
+    var data : i64 array;
+};
+
+% n < 0、または内部配列長を i64 で表せない n は paradox。n == 0 は有効。%
+fn sum_segtree_i64_new (n : i64) {
+    if (n < 0) $segtree_i64_return; fi;
+    var size := 1;
+    while (size < n) {
+        if (size > 4611686018427387903) $segtree_i64_return; fi;
+        size *= 2;
+    };
+    if (size > 4611686018427387903) $segtree_i64_return; fi;
+    new SumSegtreeI64 (
+        length := n,
+        size := size,
+        data := new i64 array(size * 2, 0)
+    )
+} -> SumSegtreeI64;
+
+fn min_segtree_i64_new (n : i64) {
+    if (n < 0) $segtree_i64_return; fi;
+    var size := 1;
+    while (size < n) {
+        if (size > 4611686018427387903) $segtree_i64_return; fi;
+        size *= 2;
+    };
+    if (size > 4611686018427387903) $segtree_i64_return; fi;
+    new MinSegtreeI64 (
+        length := n,
+        size := size,
+        data := new i64 array(size * 2, 9223372036854775807)
+    )
+} -> MinSegtreeI64;
+
+fn max_segtree_i64_new (n : i64) {
+    if (n < 0) $segtree_i64_return; fi;
+    var size := 1;
+    while (size < n) {
+        if (size > 4611686018427387903) $segtree_i64_return; fi;
+        size *= 2;
+    };
+    if (size > 4611686018427387903) $segtree_i64_return; fi;
+    new MaxSegtreeI64 (
+        length := n,
+        size := size,
+        data := new i64 array(size * 2, 0 - 9223372036854775807 - 1)
+    )
+} -> MaxSegtreeI64;
+
+% 入力を葉へ一度複製し、bottom-up に O(n) build する。%
+fn sum_segtree_i64_from (values : i64 array alias) {
+    var tree := sum_segtree_i64_new(values.len()) ?? $segtree_i64_return;
+    nfor (i, 0, values.len()) {
+        tree.data[tree.size + i] := values[i] ?? $segtree_i64_return;
+    };
+    var node := tree.size;
+    while (node > 1) {
+        node -= 1;
+        tree.data[node] := (tree.data[node * 2] ?? $segtree_i64_return) +
+                           (tree.data[node * 2 + 1] ?? $segtree_i64_return);
+    };
+    tree
+} -> SumSegtreeI64;
+
+fn min_segtree_i64_from (values : i64 array alias) {
+    var tree := min_segtree_i64_new(values.len()) ?? $segtree_i64_return;
+    nfor (i, 0, values.len()) {
+        tree.data[tree.size + i] := values[i] ?? $segtree_i64_return;
+    };
+    var node := tree.size;
+    while (node > 1) {
+        node -= 1;
+        let left := tree.data[node * 2] ?? $segtree_i64_return;
+        let right := tree.data[node * 2 + 1] ?? $segtree_i64_return;
+        tree.data[node] := if (left < right) left else right fi;
+    };
+    tree
+} -> MinSegtreeI64;
+
+fn max_segtree_i64_from (values : i64 array alias) {
+    var tree := max_segtree_i64_new(values.len()) ?? $segtree_i64_return;
+    nfor (i, 0, values.len()) {
+        tree.data[tree.size + i] := values[i] ?? $segtree_i64_return;
+    };
+    var node := tree.size;
+    while (node > 1) {
+        node -= 1;
+        let left := tree.data[node * 2] ?? $segtree_i64_return;
+        let right := tree.data[node * 2 + 1] ?? $segtree_i64_return;
+        tree.data[node] := if (left > right) left else right fi;
+    };
+    tree
+} -> MaxSegtreeI64;
+
+fn sum_segtree_i64_len (tree : SumSegtreeI64 alias) { tree.length } -> i64;
+fn min_segtree_i64_len (tree : MinSegtreeI64 alias) { tree.length } -> i64;
+fn max_segtree_i64_len (tree : MaxSegtreeI64 alias) { tree.length } -> i64;
+
+% point set。範囲外は paradox、成功は true。O(log n)。%
+fn sum_segtree_i64_set (var tree : SumSegtreeI64 alias, index : i64, value : i64) {
+    if (index < 0 || index >= tree.length) $segtree_i64_return; fi;
+    var node := tree.size + index;
+    tree.data[node] := value;
+    while (node > 1) {
+        node /= 2;
+        tree.data[node] := (tree.data[node * 2] ?? $segtree_i64_return) +
+                           (tree.data[node * 2 + 1] ?? $segtree_i64_return);
+    };
+    true
+} -> u1;
+
+fn min_segtree_i64_set (var tree : MinSegtreeI64 alias, index : i64, value : i64) {
+    if (index < 0 || index >= tree.length) $segtree_i64_return; fi;
+    var node := tree.size + index;
+    tree.data[node] := value;
+    while (node > 1) {
+        node /= 2;
+        let left := tree.data[node * 2] ?? $segtree_i64_return;
+        let right := tree.data[node * 2 + 1] ?? $segtree_i64_return;
+        tree.data[node] := if (left < right) left else right fi;
+    };
+    true
+} -> u1;
+
+fn max_segtree_i64_set (var tree : MaxSegtreeI64 alias, index : i64, value : i64) {
+    if (index < 0 || index >= tree.length) $segtree_i64_return; fi;
+    var node := tree.size + index;
+    tree.data[node] := value;
+    while (node > 1) {
+        node /= 2;
+        let left := tree.data[node * 2] ?? $segtree_i64_return;
+        let right := tree.data[node * 2 + 1] ?? $segtree_i64_return;
+        tree.data[node] := if (left > right) left else right fi;
+    };
+    true
+} -> u1;
+
+% point get。範囲外は paradox。O(1)。%
+fn sum_segtree_i64_get (tree : SumSegtreeI64 alias, index : i64) {
+    if (index < 0 || index >= tree.length) $segtree_i64_return; fi;
+    tree.data[tree.size + index]
+} -> i64;
+
+fn min_segtree_i64_get (tree : MinSegtreeI64 alias, index : i64) {
+    if (index < 0 || index >= tree.length) $segtree_i64_return; fi;
+    tree.data[tree.size + index]
+} -> i64;
+
+fn max_segtree_i64_get (tree : MaxSegtreeI64 alias, index : i64) {
+    if (index < 0 || index >= tree.length) $segtree_i64_return; fi;
+    tree.data[tree.size + index]
+} -> i64;
+
+% [first, last) の積。空区間は演算ごとの identity。O(log n)。%
+fn sum_segtree_i64_prod (tree : SumSegtreeI64 alias, first : i64, last : i64) {
+    if (first < 0 || first > last || last > tree.length) $segtree_i64_return; fi;
+    var left := tree.size + first;
+    var right := tree.size + last;
+    var left_total := 0;
+    var right_total := 0;
+    while (left < right) {
+        if ((left & 1) == 1) {
+            left_total += tree.data[left] ?? $segtree_i64_return;
+            left += 1;
+        } fi;
+        if ((right & 1) == 1) {
+            right -= 1;
+            right_total := (tree.data[right] ?? $segtree_i64_return) + right_total;
+        } fi;
+        left /= 2;
+        right /= 2;
+    };
+    left_total + right_total
+} -> i64;
+
+fn min_segtree_i64_prod (tree : MinSegtreeI64 alias, first : i64, last : i64) {
+    if (first < 0 || first > last || last > tree.length) $segtree_i64_return; fi;
+    var left := tree.size + first;
+    var right := tree.size + last;
+    var answer := 9223372036854775807;
+    while (left < right) {
+        if ((left & 1) == 1) {
+            let value := tree.data[left] ?? $segtree_i64_return;
+            if (value < answer) answer := value; fi;
+            left += 1;
+        } fi;
+        if ((right & 1) == 1) {
+            right -= 1;
+            let value := tree.data[right] ?? $segtree_i64_return;
+            if (value < answer) answer := value; fi;
+        } fi;
+        left /= 2;
+        right /= 2;
+    };
+    answer
+} -> i64;
+
+fn max_segtree_i64_prod (tree : MaxSegtreeI64 alias, first : i64, last : i64) {
+    if (first < 0 || first > last || last > tree.length) $segtree_i64_return; fi;
+    var left := tree.size + first;
+    var right := tree.size + last;
+    var answer := 0 - 9223372036854775807 - 1;
+    while (left < right) {
+        if ((left & 1) == 1) {
+            let value := tree.data[left] ?? $segtree_i64_return;
+            if (value > answer) answer := value; fi;
+            left += 1;
+        } fi;
+        if ((right & 1) == 1) {
+            right -= 1;
+            let value := tree.data[right] ?? $segtree_i64_return;
+            if (value > answer) answer := value; fi;
+        } fi;
+        left /= 2;
+        right /= 2;
+    };
+    answer
+} -> i64;
+
+% 全区間。長さ 0 では identity。O(1)。%
+fn sum_segtree_i64_all_prod (tree : SumSegtreeI64 alias) { tree.data[1] } -> i64;
+fn min_segtree_i64_all_prod (tree : MinSegtreeI64 alias) { tree.data[1] } -> i64;
+fn max_segtree_i64_all_prod (tree : MaxSegtreeI64 alias) { tree.data[1] } -> i64;
