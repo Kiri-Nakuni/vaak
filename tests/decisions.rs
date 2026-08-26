@@ -10,7 +10,9 @@ use vaak::parser::parse;
 use vaak::types::check_types;
 
 fn statics(src: &str) -> Vec<String> {
-    let Ok(p) = parse(src) else { return vec!["構文エラー".into()] };
+    let Ok(p) = parse(src) else {
+        return vec!["構文エラー".into()];
+    };
     let mut e: Vec<String> = check(&p).into_iter().map(|x| x.msg).collect();
     e.extend(check_types(&p).into_iter().map(|x| x.msg));
     e
@@ -25,12 +27,19 @@ fn v(src: &str, expect: &str) {
 }
 #[track_caller]
 fn paradox(src: &str) {
-    assert!(matches!(run(src), Ok(Eval::Paradox(_))), "{src:?} は paradox のはず");
+    assert!(
+        matches!(run(src), Ok(Eval::Paradox(_))),
+        "{src:?} は paradox のはず"
+    );
 }
 #[track_caller]
 fn runtime_err(src: &str) {
     assert!(run(src).is_err(), "{src:?} は実行時エラーのはず");
-    assert!(statics(src).is_empty(), "{src:?} は静的には通るはず: {:?}", statics(src));
+    assert!(
+        statics(src).is_empty(),
+        "{src:?} は静的には通るはず: {:?}",
+        statics(src)
+    );
 }
 #[track_caller]
 fn static_err(src: &str) {
@@ -40,7 +49,11 @@ fn static_err(src: &str) {
 fn ok(src: &str) {
     let e = statics(src);
     assert!(e.is_empty(), "{src:?} は静的に通るはずだが: {e:?}");
-    assert!(run(src).is_ok(), "{src:?} は走るはずだが: {:?}", run(src).err());
+    assert!(
+        run(src).is_ok(),
+        "{src:?} は走るはずだが: {:?}",
+        run(src).err()
+    );
 }
 #[track_caller]
 fn syntax_err(src: &str) {
@@ -73,8 +86,11 @@ fn c4_switch() {
 #[test]
 fn c6_c33_複製は深い() {
     v("var a := [1, 2]; var b := a; b[0] := 9; a[0]", "1");
-    v("struct P { var x : i64 := 0; };
-       var p := new P ( x := 1 ); var q := p; q.x := 9; p.x", "1");
+    v(
+        "struct P { var x : i64 := 0; };
+       var p := new P ( x := 1 ); var q := p; q.x := 9; p.x",
+        "1",
+    );
 }
 
 // ---- C-7 / C-77 str は u8 array をラップした型 ----
@@ -122,7 +138,10 @@ fn c14_虚無と_paradox_は別() {
 // ---- C-15 |> ----
 #[test]
 fn c15_feed() {
-    v("fn add (a : i64, b : i64) { a + b } -> i64; 1 |> add(2)", "3");
+    v(
+        "fn add (a : i64, b : i64) { a + b } -> i64; 1 |> add(2)",
+        "3",
+    );
 }
 
 // ---- C-19 / C-48 別名は値ではない。束縛の形態 ----
@@ -264,7 +283,10 @@ fn c44_ループ本体に値は残らない() {
 #[test]
 fn c45_coalesce_は非対称() {
     // 左は強く、右は緩く
-    v("var m : str i64 map := ( \"a\" => 1 ); m[\"z\"] ?? 0 - 1", "-1");
+    v(
+        "var m : str i64 map := ( \"a\" => 1 ); m[\"z\"] ?? 0 - 1",
+        "-1",
+    );
     v("1 + 1 / 0 ?? 5", "6"); // 1 + ((1/0) ?? 5)
 }
 
@@ -290,7 +312,10 @@ fn c49_逆ポーランド() {
 #[test]
 fn c52_構築() {
     v("var a := new i64 array ( 3, 7 ); a[1]", "7");
-    v("struct P { var x : i64 := 5; }; var p := new P ( ); p.x", "5");
+    v(
+        "struct P { var x : i64 := 5; }; var p := new P ( ); p.x",
+        "5",
+    );
 }
 
 // ---- C-53 別名は名前だけを指す ----
@@ -345,8 +370,8 @@ fn c64_レシーバは経路でよい() {
 // ---- C-68 分岐は E@0。腕は E@6 ----
 #[test]
 fn c68_分岐と腕() {
-    paradox("if (1 < 2) 3; fi");          // 分岐は ; を吸う
-    // 腕は `;` を吸わないので、`;` は switch 全体に効く。次の腕が来れば構文エラー
+    paradox("if (1 < 2) 3; fi"); // 分岐は ; を吸う
+                                 // 腕は `;` を吸わないので、`;` は switch 全体に効く。次の腕が来れば構文エラー
     ok("switch (1) case 1 => 3;");
     syntax_err("switch (1) case 1 => 3; case 2 => 4");
 }
@@ -355,8 +380,8 @@ fn c68_分岐と腕() {
 #[test]
 fn c69_プラスマイナスは左を要求しない() {
     v("{ -1 }", "-1");
-    v("{ 1 -2 }", "-1");    // 並べたつもりでも減算
-    v("{ 1; -2 }", "-2");   // `;` の後は符号
+    v("{ 1 -2 }", "-1"); // 並べたつもりでも減算
+    v("{ 1; -2 }", "-2"); // `;` の後は符号
 }
 
 // ---- C-73 break は即時、continue は遅延 ----
@@ -426,7 +451,10 @@ fn c90_領域を抜ければ捨てられる() {
 // ---- C-92 continue continue は周回を一つ余分に飛ばす ----
 #[test]
 fn c92_continue_continue() {
-    v("var n := 0; nfor (i, 0, 4) { if (i == 0) continue continue; fi; n += 1; }; n", "2");
+    v(
+        "var n := 0; nfor (i, 0, 4) { if (i == 0) continue continue; fi; n += 1; }; n",
+        "2",
+    );
 }
 
 // ---- C-94 注釈は集合体の中まで届く ----
@@ -434,7 +462,13 @@ fn c92_continue_continue() {
 fn c94_注釈は集合体の中まで届く() {
     // 要素が i32 なら、溢れは 2^32 を法として折り返す
     v("var a : i32 array := [2147483647]; a[0] + 1", "-2147483648");
-    v("var a : i32 array := new i32 array ( 2, 0 ); a[0] := 2147483647; a[0] + 1", "-2147483648");
+    v(
+        "var a : i32 array := new i32 array ( 2, 0 ); a[0] := 2147483647; a[0] + 1",
+        "-2147483648",
+    );
     // 写像の値も
-    v(r#"var m : str i32 map := ( "a" => 2147483647 ); m["a"] + 1"#, "-2147483648");
+    v(
+        r#"var m : str i32 map := ( "a" => 2147483647 ); m["a"] + 1"#,
+        "-2147483648",
+    );
 }

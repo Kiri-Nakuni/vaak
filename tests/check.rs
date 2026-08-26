@@ -110,10 +110,7 @@ fn 比較と代入は連鎖できない() {
 #[test]
 fn 型依存グラフは_dag() {
     bad("struct Node { var next : Node; };", "循環");
-    bad(
-        "struct A { var b : B; }; struct B { var a : A; };",
-        "循環",
-    );
+    bad("struct A { var b : B; }; struct B { var a : A; };", "循環");
     ok("struct P { var x : i64; }; struct Q { var p : P; };");
 }
 
@@ -174,10 +171,7 @@ fn outward_は書いた_break_の段送りに掛かる() {
     ok("fn f () { break outward break 1; };
         loop { f(); };");
     // 深さ 2（裸のブロックの中）では、一つ目はブロックを抜けるだけ。空振り
-    bad(
-        "fn f () { { break outward break 1; }; };",
-        "空振り",
-    );
+    bad("fn f () { { break outward break 1; }; };", "空振り");
     // 深さ 2 からフレームを越えるなら、二つ目に書く
     ok("fn f () { { break break outward break 1; }; };
         loop { f(); };");
@@ -191,19 +185,13 @@ fn outward_無しでフレームは越えられない() {
 #[test]
 fn flow_の本体に_flow_名は書けない() {
     bad("flow $a = $a;", "本体に `flow` 名");
-    bad(
-        "flow $a = $repeat($return, 1);",
-        "本体に `flow` 名",
-    );
+    bad("flow $a = $repeat($return, 1);", "本体に `flow` 名");
     ok("flow $a = $repeat(break, 1);");
 }
 
 #[test]
 fn flow_は同名で再定義できない() {
-    bad(
-        "flow $a = break; flow $a = continue;",
-        "再定義できない",
-    );
+    bad("flow $a = break; flow $a = continue;", "再定義できない");
     ok("flow $return = $repeat(break, getdepth());");
     bad(
         "flow $return = break; flow $return = continue;",

@@ -7,7 +7,9 @@ use vaak::parser::parse;
 use vaak::types::check_types;
 
 fn statics(src: &str) -> Vec<String> {
-    let Ok(p) = parse(src) else { return vec!["構文エラー".into()] };
+    let Ok(p) = parse(src) else {
+        return vec!["構文エラー".into()];
+    };
     let mut e: Vec<String> = check(&p).into_iter().map(|x| x.msg).collect();
     e.extend(check_types(&p).into_iter().map(|x| x.msg));
     e
@@ -23,7 +25,10 @@ fn v(src: &str, expect: &str) {
 }
 #[track_caller]
 fn paradox(src: &str) {
-    assert!(matches!(run(src), Ok(Eval::Paradox(_))), "{src:?} は paradox のはず");
+    assert!(
+        matches!(run(src), Ok(Eval::Paradox(_))),
+        "{src:?} は paradox のはず"
+    );
 }
 #[track_caller]
 fn static_err(src: &str) {
@@ -33,7 +38,11 @@ fn static_err(src: &str) {
 fn ok(src: &str) {
     let e = statics(src);
     assert!(e.is_empty(), "{src:?} は静的に通るはずだが: {e:?}");
-    assert!(run(src).is_ok(), "{src:?} は走るはずだが: {:?}", run(src).err());
+    assert!(
+        run(src).is_ok(),
+        "{src:?} は走るはずだが: {:?}",
+        run(src).err()
+    );
 }
 
 // ================= S-1 メンバ関数 =================
@@ -42,12 +51,15 @@ const POINT: &str = "struct Point { var x : i64 := 0; var y : i64 := 0; };";
 
 #[test]
 fn s1_メンバ関数は型の名前空間に入る() {
-    v(&format!(
-        "{POINT}
+    v(
+        &format!(
+            "{POINT}
          fn Point.norm2 (self) {{ self.x * self.x + self.y * self.y }} -> i64;
          var p := new Point ( x := 3, y := 4 );
          p.norm2()"
-    ), "25");
+        ),
+        "25",
+    );
 }
 
 #[test]
@@ -60,13 +72,16 @@ fn s1_self_には型注釈を書かない() {
 
 #[test]
 fn s1_var_self_なら破壊できる() {
-    v(&format!(
-        "{POINT}
+    v(
+        &format!(
+            "{POINT}
          fn Point.scale (var self, k : i64) {{ self.x *= k; self.y *= k; }};
          var p := new Point ( x := 2, y := 3 );
          p.scale(10);
          p.x + p.y"
-    ), "50");
+        ),
+        "50",
+    );
 }
 
 #[test]
@@ -92,22 +107,28 @@ fn s1_メンバ関数の引数と返り値の型を見る() {
 
 #[test]
 fn s1_型が違えば別のメンバ関数() {
-    v("struct A { var v : i64 := 0; };
+    v(
+        "struct A { var v : i64 := 0; };
        struct B { var v : i64 := 0; };
        fn A.get (self) { self.v + 1 } -> i64;
        fn B.get (self) { self.v + 2 } -> i64;
        var a := new A ( v := 10 );
        var b := new B ( v := 10 );
-       a.get() + b.get()", "23");
+       a.get() + b.get()",
+        "23",
+    );
 }
 
 // ================= S-2 ラップ型 =================
 
 #[test]
 fn s2_wrap_で宣言する() {
-    v("wrap Meters = i64;
+    v(
+        "wrap Meters = i64;
        var m := new Meters ( 5 );
-       new i64 ( m )", "5");
+       new i64 ( m )",
+        "5",
+    );
 }
 
 #[test]
@@ -119,10 +140,13 @@ fn s2_ラップ型は別の型() {
 
 #[test]
 fn s2_ラップ型にもメンバ関数を書ける() {
-    v("wrap Meters = i64;
+    v(
+        "wrap Meters = i64;
        fn Meters.double (self) { new Meters ( new i64 ( self ) * 2 ) } -> Meters;
        var m := new Meters ( 21 );
-       new i64 ( m.double() )", "42");
+       new i64 ( m.double() )",
+        "42",
+    );
 }
 
 // ================= S-3 標準ライブラリ =================
@@ -146,7 +170,10 @@ fn s3_写像() {
     v(r#"var m := ( "a" => 1 ); m.has("z")"#, "0");
     v(r#"var m := ( "a" => 1, "b" => 2 ); m.remove("a")"#, "1");
     // 鍵の配列。**全順序なので並びが決まる**
-    v(r#"var m := ( "b" => 1, "a" => 2 ); var k := m.keys(); k[0]"#, r#""a""#);
+    v(
+        r#"var m := ( "b" => 1, "a" => 2 ); var k := m.keys(); k[0]"#,
+        r#""a""#,
+    );
     paradox(r#"var m := ( "a" => 1 ); m.remove("z")"#);
 }
 
@@ -164,7 +191,10 @@ fn s3_str_は名前で数え方を示す() {
 #[test]
 fn s3_配列のメソッドは_str_に直接効く() {
     v(r#"var s := "ab"; s.pop()"#, "98");
-    v(r#"var s := "ab"; var c : u8 := 99; s.push(c); s.len()"#, "3");
+    v(
+        r#"var s := "ab"; var c : u8 := 99; s.push(c); s.len()"#,
+        "3",
+    );
 }
 
 #[test]
@@ -177,7 +207,10 @@ fn s3_出力は持たない() {
 
 #[test]
 fn s0_相互再帰は抑止なしで通る() {
-    v("fn a (n : i64) { if (n == 0) 0 else b(n - 1) fi } -> i64;
+    v(
+        "fn a (n : i64) { if (n == 0) 0 else b(n - 1) fi } -> i64;
        fn b (n : i64) { if (n == 0) 1 else a(n - 1) fi } -> i64;
-       a(3)", "1");
+       a(3)",
+        "1",
+    );
 }

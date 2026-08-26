@@ -100,7 +100,12 @@ pub struct HashVal {
 
 impl HashVal {
     pub fn new(key: ValueType, val: ValueType) -> Self {
-        Self { key, val, entries: Vec::new(), index: HashMap::new() }
+        Self {
+            key,
+            val,
+            entries: Vec::new(),
+            index: HashMap::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -319,13 +324,18 @@ impl Value {
                 format!("({})", s.join(", "))
             }
             Value::Hash(h) => {
-                let s: Vec<String> =
-                    h.iter().map(|(k, v)| format!("{} => {}", show_key(k), v.show())).collect();
+                let s: Vec<String> = h
+                    .iter()
+                    .map(|(k, v)| format!("{} => {}", show_key(k), v.show()))
+                    .collect();
                 format!("({})", s.join(", "))
             }
             Value::Struct(t) => {
-                let s: Vec<String> =
-                    t.fields.iter().map(|(n, v)| format!("{n} := {}", v.show())).collect();
+                let s: Vec<String> = t
+                    .fields
+                    .iter()
+                    .map(|(n, v)| format!("{n} := {}", v.show()))
+                    .collect();
                 format!("{}({})", t.name, s.join(", "))
             }
         }

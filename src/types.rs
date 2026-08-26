@@ -63,7 +63,10 @@ type T = Option<ValueType>;
 
 impl TypeChecker {
     fn err(&mut self, msg: impl Into<String>, span: Span) {
-        self.errs.push(StaticError { msg: msg.into(), span });
+        self.errs.push(StaticError {
+            msg: msg.into(),
+            span,
+        });
     }
 
     fn collect(&mut self, body: &[Expr]) {
@@ -121,7 +124,14 @@ impl TypeChecker {
     /// ラップ型も**別の型である**（S-2）——包むには `new` が要る。
     fn unify(&mut self, want: &ValueType, got: &ValueType, span: Span) {
         if want != got {
-            self.err(format!("型が合わない（`{}` が要るのに `{}`）", show(want), show(got)), span);
+            self.err(
+                format!(
+                    "型が合わない（`{}` が要るのに `{}`）",
+                    show(want),
+                    show(got)
+                ),
+                span,
+            );
         }
     }
 
@@ -302,7 +312,11 @@ impl TypeChecker {
                     Box::new(kt.unwrap_or(ValueType::I64)),
                     Box::new(vt.unwrap_or(ValueType::I64)),
                 );
-                Some(if as_hash { ValueType::Hash(k, v) } else { ValueType::Map(k, v) })
+                Some(if as_hash {
+                    ValueType::Hash(k, v)
+                } else {
+                    ValueType::Map(k, v)
+                })
             }
 
             ExprKind::Construct { ty, args } => {
@@ -371,7 +385,12 @@ impl TypeChecker {
                 self.loop_body(body, want);
                 want.cloned().or(Some(ValueType::I64))
             }
-            ExprKind::NFor { name, start, count, body } => {
+            ExprKind::NFor {
+                name,
+                start,
+                count,
+                body,
+            } => {
                 let st = self.expr(start, None);
                 if let Some(t) = &st {
                     if !is_int(t) {
@@ -515,14 +534,19 @@ impl TypeChecker {
                 }
             };
             if let Some(t) = t {
-                self.scopes.last_mut().unwrap().insert(b.name.clone(), (t, d.kind));
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(b.name.clone(), (t, d.kind));
             }
         }
     }
 
     fn assign(&mut self, op: AssignOp, lhs: &Expr, rhs: &Expr, span: Span) {
         if op == AssignOp::Alias {
-            let (ExprKind::Name(n), ExprKind::Name(t)) = (&lhs.kind, &rhs.kind) else { return };
+            let (ExprKind::Name(n), ExprKind::Name(t)) = (&lhs.kind, &rhs.kind) else {
+                return;
+            };
             if let (Some(a), Some(b)) = (self.lookup(n), self.lookup(t)) {
                 self.unify(&a, &b, span);
             }
@@ -573,12 +597,10 @@ impl TypeChecker {
             // 利用者定義のメンバ関数（S-1）を先に探す
             if let Some(ValueType::Named(t)) = &bt {
                 if let Some(f) = self.fns.get(&format!("{t}.{name}")).cloned() {
-                    let alias_errs = crate::check::alias_arg_errors(
-                        &f.params[1..],
-                        args,
-                        Some(base),
-                        |n| self.kind_of(n),
-                    );
+                    let alias_errs =
+                        crate::check::alias_arg_errors(&f.params[1..], args, Some(base), |n| {
+                            self.kind_of(n)
+                        });
                     self.errs.extend(alias_errs);
                     for (p, a) in f.params[1..].iter().zip(args) {
                         self.expect(a, &p.ty.value);
@@ -637,9 +659,8 @@ impl TypeChecker {
                     }
                     bt.clone()
                 }
-                "abs" | "reverse_bits" | "swap_bytes" | "sqrt" | "floor" | "ceil"
-                | "trunc" | "round" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos"
-                | "tan" => {
+                "abs" | "reverse_bits" | "swap_bytes" | "sqrt" | "floor" | "ceil" | "trunc"
+                | "round" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos" | "tan" => {
                     for a in args {
                         self.expr(a, None);
                     }
@@ -694,7 +715,9 @@ impl TypeChecker {
                 }
             };
         }
-        let ExprKind::Name(name) = &callee.kind else { return None };
+        let ExprKind::Name(name) = &callee.kind else {
+            return None;
+        };
         if name == "getdepth" {
             return Some(ValueType::I64);
         }
@@ -727,7 +750,9 @@ impl TypeChecker {
     fn construct(&mut self, ty: &Type, args: &CtorArgs, span: Span) {
         match (&ty.value, args) {
             (ValueType::Named(n), CtorArgs::Named(given)) => {
-                let Some(s) = self.structs.get(n).cloned() else { return };
+                let Some(s) = self.structs.get(n).cloned() else {
+                    return;
+                };
                 for (fname, e) in given {
                     match s.fields.iter().find(|f| &f.name == fname) {
                         Some(f) => self.expect(e, &f.ty.value),
@@ -773,7 +798,9 @@ impl TypeChecker {
                 }
             }
             (ValueType::Named(n), CtorArgs::Positional(a)) if a.is_empty() => {
-                let Some(s) = self.structs.get(n).cloned() else { return };
+                let Some(s) = self.structs.get(n).cloned() else {
+                    return;
+                };
                 for f in &s.fields {
                     if f.default.is_none() {
                         self.err(format!("欄 `{}` に値が無い", f.name), span);
@@ -797,15 +824,14 @@ impl TypeChecker {
     fn escape(&mut self, esc: &Escape, _want: Option<&ValueType>) {
         let stages = escape_stages(esc);
         // 段送りは内側から外へ。行き先の段の型を取る
-        let target = stages
-            .and_then(|n| {
-                let len = self.stage_want.len();
-                if (n as usize) <= len {
-                    self.stage_want[len - n as usize].clone()
-                } else {
-                    None
-                }
-            });
+        let target = stages.and_then(|n| {
+            let len = self.stage_want.len();
+            if (n as usize) <= len {
+                self.stage_want[len - n as usize].clone()
+            } else {
+                None
+            }
+        });
         self.escape_operand(esc, target.as_ref());
     }
 

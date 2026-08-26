@@ -31,7 +31,10 @@ pub enum ExprKind {
     Block(Vec<Expr>),
 
     /// `new 型 ( 引数 )`
-    Construct { ty: Type, args: CtorArgs },
+    Construct {
+        ty: Type,
+        args: CtorArgs,
+    },
     /// `[ E, … ]`
     ArrayLit(Vec<Expr>),
     /// `( K => V, … )`
@@ -45,15 +48,33 @@ pub enum ExprKind {
 
     If(If),
     Loop(Box<Expr>),
-    While { cond: Box<Expr>, body: Box<Expr> },
-    NFor { name: String, start: Box<Expr>, count: Box<Expr>, body: Box<Expr> },
-    Switch { subject: Box<Expr>, arms: Vec<Arm> },
+    While {
+        cond: Box<Expr>,
+        body: Box<Expr>,
+    },
+    NFor {
+        name: String,
+        start: Box<Expr>,
+        count: Box<Expr>,
+        body: Box<Expr>,
+    },
+    Switch {
+        subject: Box<Expr>,
+        arms: Vec<Arm>,
+    },
 
     // --- 演算子 ---
     /// 前置。`-` `+` `!`
-    Unary { op: UnOp, rhs: Box<Expr> },
+    Unary {
+        op: UnOp,
+        rhs: Box<Expr>,
+    },
     /// 中置。
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     /// `;` — 左の領域を潰し、内面を空にする。**左辺は無くてもよい**（C-80）。
     Discard(Option<Box<Expr>>),
     /// `E -> T` — **領域に型を付ける**（C-30）。
@@ -61,15 +82,31 @@ pub enum ExprKind {
     /// 「`:` は識別子に、`->` は領域に」の後半である。
     /// **リテラルは型が決まるまでソースの表現を保持する**ので、
     /// これがその型を決める道になる——`1 -> u1`、`300 -> u8`。
-    Ascribe { expr: Box<Expr>, ty: Type },
+    Ascribe {
+        expr: Box<Expr>,
+        ty: Type,
+    },
     /// `a.m`
-    Field { base: Box<Expr>, name: String },
+    Field {
+        base: Box<Expr>,
+        name: String,
+    },
     /// `a[i]`
-    Index { base: Box<Expr>, index: Box<Expr> },
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
     /// `f(a, b)` / `a.m(b)`
-    Call { callee: Box<Expr>, args: Vec<Expr> },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
     /// `path := E` / `path += E` / `IDENT &= IDENT`
-    Assign { op: AssignOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    Assign {
+        op: AssignOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 
     /// 脱出。**式ではないが、式の位置に前置演算子として現れる。**
     Escape(Box<Escape>),
@@ -84,10 +121,24 @@ pub enum UnOp {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    Shl, Shr, BitAnd, BitXor, BitOr,
-    Lt, Le, Gt, Ge, Eq, Ne,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Shl,
+    Shr,
+    BitAnd,
+    BitXor,
+    BitOr,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+    And,
+    Or,
     /// `??` — paradox の除去子。**唯一の回復手段**（C-22）。
     Coalesce,
     /// `|>` — 構文の水準の糖衣（C-15）。
@@ -100,7 +151,15 @@ pub enum AssignOp {
     Set,
     /// `&=` 名前が別のセルを指すようにする
     Alias,
-    Add, Sub, Mul, Div, Mod, Shl, Shr, BitXor, BitOr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Shl,
+    Shr,
+    BitXor,
+    BitOr,
 }
 
 // --- 宣言 ---
@@ -253,7 +312,14 @@ pub struct Type {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ValueType {
-    U1, U8, U16, U32, I32, I64, F32, F64,
+    U1,
+    U8,
+    U16,
+    U32,
+    I32,
+    I64,
+    F32,
+    F64,
     /// **方言が足した基底型**（プローブ：「ホスト方言は基底型を足せる（例: 31/63bit 整数、f80）」）。
     ///
     /// **STEEL 方言だけが持つ。** LLVM の `x86_fp80`——符号 1・指数 15・仮数 64 ビット。

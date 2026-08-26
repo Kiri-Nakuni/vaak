@@ -11,11 +11,19 @@ impl HostBinding for Bytes {
         ValueType::Array(Box::new(ValueType::U8))
     }
     fn read(&self) -> Value {
-        Value::array(ValueType::U8, self.0.iter().map(|b| Value::U8(*b)).collect())
+        Value::array(
+            ValueType::U8,
+            self.0.iter().map(|b| Value::U8(*b)).collect(),
+        )
     }
     fn write(&mut self, v: &Value) {
         if let Value::Array(ar) = v {
-            self.0 = ar.items.iter().filter_map(|x| x.as_int()).map(|x| x as u8).collect();
+            self.0 = ar
+                .items
+                .iter()
+                .filter_map(|x| x.as_int())
+                .map(|x| x as u8)
+                .collect();
         }
     }
 }
@@ -50,10 +58,19 @@ fn s4_配列を書き換えられる() {
         "var b : u8 array alias &= buf;
          nfor (i, 0, b.len()) { b[i] := 0; };",
     );
-    assert!(matches!(out, Outcome::Empty | Outcome::Paradox { .. }), "{out:?}");
+    assert!(
+        matches!(out, Outcome::Empty | Outcome::Paradox { .. }),
+        "{out:?}"
+    );
     match h.get("buf").map(|b| b.read()) {
         Some(Value::Array(ar)) => {
-            assert_eq!(ar.items.iter().filter_map(|x| x.as_int()).collect::<Vec<_>>(), vec![0, 0, 0]);
+            assert_eq!(
+                ar.items
+                    .iter()
+                    .filter_map(|x| x.as_int())
+                    .collect::<Vec<_>>(),
+                vec![0, 0, 0]
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -65,7 +82,10 @@ fn s4_剥がされたセルは見えない() {
     h.expose_value("n", Value::I64(1));
     h.invalidate("n");
     // 名前ごと消えるので、名前解決で落ちる
-    assert!(matches!(h.run("var x : i64 alias &= n; x"), Outcome::Static(_)));
+    assert!(matches!(
+        h.run("var x : i64 alias &= n; x"),
+        Outcome::Static(_)
+    ));
 }
 
 #[test]
@@ -95,7 +115,10 @@ fn s4_最上位の外界面を受け取る() {
         other => panic!("{other:?}"),
     }
     // 中身が空で終わればホストに委ねる
-    assert!(matches!(h.run("var x := 1;"), Outcome::Paradox { .. } | Outcome::Empty));
+    assert!(matches!(
+        h.run("var x := 1;"),
+        Outcome::Paradox { .. } | Outcome::Empty
+    ));
 }
 
 /// **VM でも同じ結果になる。** ホストの名前を受け取れるようになった。
@@ -148,7 +171,10 @@ fn c2_実行時エラーまでの書き換えは巻き戻さない() {
              fn f (a : i64) { a } -> i64;
              f(1 / 0);",
         );
-        assert!(matches!(out, Outcome::Runtime { .. }), "use_vm={use_vm}: {out:?}");
+        assert!(
+            matches!(out, Outcome::Runtime { .. }),
+            "use_vm={use_vm}: {out:?}"
+        );
         match h.get("n").map(|b| b.read()) {
             Some(Value::I64(v)) => assert_eq!(v, 42, "use_vm={use_vm}"),
             other => panic!("use_vm={use_vm}: {other:?}"),
@@ -172,7 +198,10 @@ fn run96(src: &str, vm: bool) -> Outcome {
 #[test]
 fn c96_最上位からは見える() {
     for vm in [false, true] {
-        assert!(matches!(run96("count[1]", vm), Outcome::Value(_)), "vm={vm}");
+        assert!(
+            matches!(run96("count[1]", vm), Outcome::Value(_)),
+            "vm={vm}"
+        );
     }
 }
 
@@ -235,8 +264,20 @@ fn 書き戻しの回数(src: &str, use_vm: bool) -> u32 {
     let n = std::rc::Rc::new(std::cell::Cell::new(0));
     let mut h = vaak::host::Host::new();
     h.use_vm = use_vm;
-    h.expose("a", Box::new(Counted { v: 7, writes: n.clone() }));
-    h.expose("b", Box::new(Counted { v: 9, writes: n.clone() }));
+    h.expose(
+        "a",
+        Box::new(Counted {
+            v: 7,
+            writes: n.clone(),
+        }),
+    );
+    h.expose(
+        "b",
+        Box::new(Counted {
+            v: 9,
+            writes: n.clone(),
+        }),
+    );
     let _ = h.run(src);
     n.get()
 }
@@ -269,13 +310,21 @@ fn 誤りでも途中までの書き換えを拾える() {
     // だから誤りのときの後の状態にも意味がある
     let prog = vaak::parser::parse("a := 42; b := a / 0; 0").expect("構文");
     let exposed = vec![
-        ("a".to_string(), vaak::ast::HostItem::Value(vaak::ast::ValueType::I64)),
-        ("b".to_string(), vaak::ast::HostItem::Value(vaak::ast::ValueType::I64)),
+        (
+            "a".to_string(),
+            vaak::ast::HostItem::Value(vaak::ast::ValueType::I64),
+        ),
+        (
+            "b".to_string(),
+            vaak::ast::HostItem::Value(vaak::ast::ValueType::I64),
+        ),
     ];
     let p = vaak::vm::compile_with_host(&prog, &exposed).expect("組み立て");
     let mut r = vaak::vm::Runner::new();
-    let (result, after) =
-        r.run_writeback(&p, vec![vaak::value::Value::I64(7), vaak::value::Value::I64(9)]);
+    let (result, after) = r.run_writeback(
+        &p,
+        vec![vaak::value::Value::I64(7), vaak::value::Value::I64(9)],
+    );
     assert!(result.is_err(), "0 除算の paradox が消費されずに誤りになる");
     // **`a := 42` は誤りより前なので残っている**
     assert_eq!(after[0].as_int(), Some(42));
@@ -307,7 +356,13 @@ fn 読みの回数(src: &str) -> u32 {
     let mut h = vaak::host::Host::new();
     h.use_vm = true;
     for name in ["a", "b", "c"] {
-        h.expose(name, Box::new(CountedRead { v: 1, reads: n.clone() }));
+        h.expose(
+            name,
+            Box::new(CountedRead {
+                v: 1,
+                reads: n.clone(),
+            }),
+        );
     }
     let _ = h.run(src);
     n.get()
@@ -439,7 +494,9 @@ fn 書いた値が本当に届く() {
     );
     let _ = h.run("count[3] := 42; 0");
     let after = h.get("count").unwrap().read();
-    let vaak::value::Value::Array(a) = after else { panic!("配列のはず") };
+    let vaak::value::Value::Array(a) = after else {
+        panic!("配列のはず")
+    };
     assert_eq!(a.items[3].as_int(), Some(42));
     // **触っていない要素は零のままで、潰されていない**
     assert_eq!(a.items[4].as_int(), Some(0));
@@ -467,7 +524,9 @@ fn 長さを見るなら本物の長さが要る() {
             element_writes: z.clone(),
         }),
     );
-    assert!(matches!(h.run("count.len()"), vaak::host::Outcome::Value(v) if v.as_int() == Some(256)));
+    assert!(
+        matches!(h.run("count.len()"), vaak::host::Outcome::Value(v) if v.as_int() == Some(256))
+    );
 }
 
 // ── S-15：片側だけの部分accessは書き込みへ使わない ─────────────
@@ -523,8 +582,7 @@ impl vaak::host::HostBinding for ReadAtOnly {
     }
 }
 
-fn read_at_only_host(
-) -> (
+fn read_at_only_host() -> (
     vaak::host::Host,
     std::rc::Rc<std::cell::RefCell<Vec<i64>>>,
     std::rc::Rc<std::cell::Cell<u32>>,
@@ -584,9 +642,7 @@ fn host_touched_for(source: &str) -> Option<Vec<i128>> {
 #[test]
 fn alias引数はhost値を丸ごと要求する() {
     assert_eq!(
-        host_touched_for(
-            "fn f (var c : i64 array alias) { c[2] += 1; }; f(count); 0"
-        ),
+        host_touched_for("fn f (var c : i64 array alias) { c[2] += 1; }; f(count); 0"),
         None
     );
 }
@@ -594,9 +650,8 @@ fn alias引数はhost値を丸ごと要求する() {
 #[test]
 fn alias経由の変更も実行時errorで丸ごと書き戻す() {
     let (mut host, values, whole_reads, element_reads, whole_writes) = read_at_only_host();
-    let outcome = host.run(
-        "fn f (var c : i64 array alias) { c[2] += 10; }; f(count); var x := 1 / 0; x",
-    );
+    let outcome =
+        host.run("fn f (var c : i64 array alias) { c[2] += 10; }; f(count); var x := 1 / 0; x");
     assert!(matches!(outcome, Outcome::Runtime { .. }), "{outcome:?}");
     assert_eq!(&*values.borrow(), &[0, 1, 12, 3]);
     assert_eq!(whole_reads.get(), 1);

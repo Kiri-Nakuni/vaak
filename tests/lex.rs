@@ -1,7 +1,11 @@
 use vaak::lexer::{lex, Tok};
 
 fn toks(src: &str) -> Vec<Tok> {
-    let mut v: Vec<Tok> = lex(src).expect("字句解析に失敗").into_iter().map(|t| t.tok).collect();
+    let mut v: Vec<Tok> = lex(src)
+        .expect("字句解析に失敗")
+        .into_iter()
+        .map(|t| t.tok)
+        .collect();
     assert_eq!(v.pop(), Some(Tok::Eof));
     v
 }
@@ -59,13 +63,22 @@ fn 数値はソースの表現のまま保持する() {
 
 #[test]
 fn 型接尾辞は無いので識別子になる() {
-    assert_eq!(toks("1i64"), vec![Tok::Int("1".into()), Tok::Ident("i64".into())]);
+    assert_eq!(
+        toks("1i64"),
+        vec![Tok::Int("1".into()), Tok::Ident("i64".into())]
+    );
 }
 
 #[test]
 fn 小数点とメンバアクセスを取り違えない() {
-    assert_eq!(toks("a.b"), vec![Tok::Ident("a".into()), Tok::Dot, Tok::Ident("b".into())]);
-    assert_eq!(toks("1.len"), vec![Tok::Int("1".into()), Tok::Dot, Tok::Ident("len".into())]);
+    assert_eq!(
+        toks("a.b"),
+        vec![Tok::Ident("a".into()), Tok::Dot, Tok::Ident("b".into())]
+    );
+    assert_eq!(
+        toks("1.len"),
+        vec![Tok::Int("1".into()), Tok::Dot, Tok::Ident("len".into())]
+    );
 }
 
 #[test]
@@ -76,7 +89,10 @@ fn 文字列のエスケープ() {
         vec![Tok::Str(vec![0x0a, 0x0d, 0x09, 0x5c, 0x22, 0x00])]
     );
     assert_eq!(toks(r#""\x41""#), vec![Tok::Str(b"A".to_vec())]);
-    assert_eq!(toks(r#""\u{3042}""#), vec![Tok::Str("あ".as_bytes().to_vec())]);
+    assert_eq!(
+        toks(r#""\u{3042}""#),
+        vec![Tok::Str("あ".as_bytes().to_vec())]
+    );
     assert!(lex(r#""\a""#).is_err());
 }
 
@@ -103,8 +119,14 @@ fn 閉じない文字列はエラー() {
 
 #[test]
 fn mod_は鍵語だが_mod_イコールは複合代入() {
-    assert_eq!(toks("a mod b"), vec![Tok::Ident("a".into()), Tok::Mod, Tok::Ident("b".into())]);
-    assert_eq!(toks("a mod= b"), vec![Tok::Ident("a".into()), Tok::ModEq, Tok::Ident("b".into())]);
+    assert_eq!(
+        toks("a mod b"),
+        vec![Tok::Ident("a".into()), Tok::Mod, Tok::Ident("b".into())]
+    );
+    assert_eq!(
+        toks("a mod= b"),
+        vec![Tok::Ident("a".into()), Tok::ModEq, Tok::Ident("b".into())]
+    );
     assert_eq!(toks("a mod == b")[1], Tok::Mod);
 }
 
@@ -131,16 +153,40 @@ fn 演算子の最長一致() {
 
 #[test]
 fn 鍵語() {
-    assert_eq!(toks("var let const fn flow struct new"),
-        vec![Tok::Var, Tok::Let, Tok::Const, Tok::Fn, Tok::Flow, Tok::Struct, Tok::New]);
-    assert_eq!(toks("if elif else fi"), vec![Tok::If, Tok::Elif, Tok::Else, Tok::Fi]);
-    assert_eq!(toks("loop while nfor switch case"),
-        vec![Tok::Loop, Tok::While, Tok::Nfor, Tok::Switch, Tok::Case]);
-    assert_eq!(toks("break continue outward"), vec![Tok::Break, Tok::Continue, Tok::Outward]);
-    assert_eq!(toks("array map alias"), vec![Tok::Array, Tok::Map, Tok::Alias]);
+    assert_eq!(
+        toks("var let const fn flow struct new"),
+        vec![
+            Tok::Var,
+            Tok::Let,
+            Tok::Const,
+            Tok::Fn,
+            Tok::Flow,
+            Tok::Struct,
+            Tok::New
+        ]
+    );
+    assert_eq!(
+        toks("if elif else fi"),
+        vec![Tok::If, Tok::Elif, Tok::Else, Tok::Fi]
+    );
+    assert_eq!(
+        toks("loop while nfor switch case"),
+        vec![Tok::Loop, Tok::While, Tok::Nfor, Tok::Switch, Tok::Case]
+    );
+    assert_eq!(
+        toks("break continue outward"),
+        vec![Tok::Break, Tok::Continue, Tok::Outward]
+    );
+    assert_eq!(
+        toks("array map alias"),
+        vec![Tok::Array, Tok::Map, Tok::Alias]
+    );
 }
 
 #[test]
 fn セミコロンの連続() {
-    assert_eq!(toks("1;;"), vec![Tok::Int("1".into()), Tok::Semi, Tok::Semi]);
+    assert_eq!(
+        toks("1;;"),
+        vec![Tok::Int("1".into()), Tok::Semi, Tok::Semi]
+    );
 }

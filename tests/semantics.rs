@@ -137,7 +137,10 @@ fn ブロックが段を作るのは裸のときだけ() {
     // 本体の { } は loop の段。一段で抜ける
     v("loop { break 5; }", "5");
     // 裸のブロックは段が二つ。内側だけ抜ける → ループは続く
-    v("var n := 0; loop { { break; }; n += 1; if (n == 3) break n; fi; }", "3");
+    v(
+        "var n := 0; loop { { break; }; n += 1; if (n == 3) break n; fi; }",
+        "3",
+    );
 }
 
 #[test]
@@ -170,7 +173,10 @@ fn continue_の被演算子は遅延する() {
 #[test]
 fn continue_continue_は周回を一つ余分に飛ばす() {
     // 0 周目で continue → 1 周目の先頭で継続 → 2 周目から普通に回る
-    v("var n := 0; nfor (i, 0, 4) { if (i == 0) continue continue; fi; n += 1; }", "4");
+    v(
+        "var n := 0; nfor (i, 0, 4) { if (i == 0) continue continue; fi; n += 1; }",
+        "4",
+    );
     ok("var n := 0; nfor (i, 0, 4) { if (i == 0) continue continue; fi; n += 1; }; n;");
 }
 
@@ -382,11 +388,9 @@ fn 構造体() {
 
 #[test]
 fn const_は値ごと凍る() {
-    err(
-        "struct Point { var x : i64 := 0; };
+    err("struct Point { var x : i64 := 0; };
          const p := new Point ( x := 1 );
-         p.x := 2;",
-    );
+         p.x := 2;");
 }
 
 #[test]
@@ -399,7 +403,10 @@ fn 構築() {
 
 #[test]
 fn gcd() {
-    v("fn gcd (a : i64, b : i64) { if (b == 0) a else gcd(b, a mod b) fi } -> i64; gcd(48, 18)", "6");
+    v(
+        "fn gcd (a : i64, b : i64) { if (b == 0) a else gcd(b, a mod b) fi } -> i64; gcd(48, 18)",
+        "6",
+    );
 }
 
 #[test]

@@ -11,7 +11,9 @@ use std::collections::BTreeSet;
 /// `grammar.js` の `choice(...)` から文字列リテラルを拾う。
 fn choices(src: &str, rule: &str) -> BTreeSet<String> {
     let head = format!("{rule}: $ => choice(");
-    let i = src.find(&head).unwrap_or_else(|| panic!("`{rule}` が文法に無い"));
+    let i = src
+        .find(&head)
+        .unwrap_or_else(|| panic!("`{rule}` が文法に無い"));
     let rest = &src[i + head.len()..];
     let end = rest.find("),").expect("閉じ括弧が無い");
     let mut out = BTreeSet::new();

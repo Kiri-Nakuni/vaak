@@ -4,18 +4,18 @@
 //! 構文は `docs/vaak/16-形式構文.md`。束縛力表が一次仕様であり、BNF は従属する。
 
 pub mod ast;
-pub mod lexer;
 pub mod check;
 pub mod embedding;
 pub mod host;
 pub mod interp;
+pub mod json;
+pub mod lexer;
+pub mod lsp;
 pub mod parser;
+pub mod portable;
 pub mod span;
+pub mod stdlib;
+pub mod steel;
 pub mod types;
 pub mod value;
 pub mod vm;
-pub mod json;
-pub mod lsp;
-pub mod steel;
-pub mod portable;
-pub mod stdlib;

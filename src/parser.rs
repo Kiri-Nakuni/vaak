@@ -98,12 +98,18 @@ impl std::fmt::Display for ParseError {
 }
 
 pub fn parse(src: &str) -> Result<Program, ParseError> {
-    let toks = lex(src).map_err(|e| ParseError { msg: e.msg, span: e.span })?;
+    let toks = lex(src).map_err(|e| ParseError {
+        msg: e.msg,
+        span: e.span,
+    })?;
     Parser::new(toks).program()
 }
 
 pub fn parse_expr(src: &str) -> Result<Expr, ParseError> {
-    let mut p = Parser::new(lex(src).map_err(|e| ParseError { msg: e.msg, span: e.span })?);
+    let mut p = Parser::new(lex(src).map_err(|e| ParseError {
+        msg: e.msg,
+        span: e.span,
+    })?);
     let e = p.expr(0, false)?;
     p.expect(Tok::Eof)?;
     Ok(e)
@@ -117,7 +123,11 @@ struct Parser {
 
 impl Parser {
     fn new(toks: Vec<Token>) -> Self {
-        Self { toks, pos: 0, next_id: 0 }
+        Self {
+            toks,
+            pos: 0,
+            next_id: 0,
+        }
     }
 
     // ---- 基本操作 ----
@@ -166,7 +176,10 @@ impl Parser {
     }
 
     fn err(&self, msg: impl Into<String>) -> ParseError {
-        ParseError { msg: msg.into(), span: self.span() }
+        ParseError {
+            msg: msg.into(),
+            span: self.span(),
+        }
     }
 
     fn ident(&mut self) -> Result<String, ParseError> {
@@ -243,7 +256,13 @@ impl Parser {
                         }
                         self.expect(Tok::RParen)?;
                         let span = lhs.span.to(self.prev_span());
-                        lhs = self.node(ExprKind::Call { callee: Box::new(lhs), args }, span);
+                        lhs = self.node(
+                            ExprKind::Call {
+                                callee: Box::new(lhs),
+                                args,
+                            },
+                            span,
+                        );
                         continue;
                     }
                     Tok::LBracket => {
@@ -252,7 +271,10 @@ impl Parser {
                         self.expect(Tok::RBracket)?;
                         let span = lhs.span.to(self.prev_span());
                         lhs = self.node(
-                            ExprKind::Index { base: Box::new(lhs), index: Box::new(index) },
+                            ExprKind::Index {
+                                base: Box::new(lhs),
+                                index: Box::new(index),
+                            },
                             span,
                         );
                         continue;
@@ -261,7 +283,13 @@ impl Parser {
                         self.bump();
                         let name = self.ident()?;
                         let span = lhs.span.to(self.prev_span());
-                        lhs = self.node(ExprKind::Field { base: Box::new(lhs), name }, span);
+                        lhs = self.node(
+                            ExprKind::Field {
+                                base: Box::new(lhs),
+                                name,
+                            },
+                            span,
+                        );
                         continue;
                     }
                     // `E -> T` — **領域に型を付ける**（C-30）。
@@ -271,7 +299,10 @@ impl Parser {
                         let ty = self.ty()?;
                         let span = lhs.span.to(self.prev_span());
                         lhs = self.node(
-                            ExprKind::Ascribe { expr: Box::new(lhs), ty },
+                            ExprKind::Ascribe {
+                                expr: Box::new(lhs),
+                                ty,
+                            },
                             span,
                         );
                         continue;
@@ -281,7 +312,9 @@ impl Parser {
             }
 
             // 中置：左辺の**値**を要求する
-            let Some((lbp, rbp)) = infix_bp(&t) else { break };
+            let Some((lbp, rbp)) = infix_bp(&t) else {
+                break;
+            };
             if lbp < min_bp || !has_value {
                 break;
             }
@@ -293,12 +326,23 @@ impl Parser {
             let span = lhs.span.to(rhs.span);
             lhs = if let Some(op) = assign_op(&t) {
                 self.node(
-                    ExprKind::Assign { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                    ExprKind::Assign {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
                     span,
                 )
             } else {
                 let op = bin_op(&t).expect("中置演算子のはず");
-                self.node(ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }, span)
+                self.node(
+                    ExprKind::Binary {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                    span,
+                )
             };
         }
 
@@ -335,7 +379,13 @@ impl Parser {
                 };
                 let rhs = self.expr(BP_PREFIX, false)?;
                 let span = start.to(rhs.span);
-                self.node(ExprKind::Unary { op, rhs: Box::new(rhs) }, span)
+                self.node(
+                    ExprKind::Unary {
+                        op,
+                        rhs: Box::new(rhs),
+                    },
+                    span,
+                )
             }
             Tok::Int(s) => {
                 self.bump();
@@ -399,7 +449,10 @@ impl Parser {
                 let cond = self.paren_expr()?;
                 let body = self.block()?;
                 self.node(
-                    ExprKind::While { cond: Box::new(cond), body: Box::new(body) },
+                    ExprKind::While {
+                        cond: Box::new(cond),
+                        body: Box::new(body),
+                    },
                     start.to(self.prev_span()),
                 )
             }
@@ -526,7 +579,10 @@ impl Parser {
                 break;
             }
         }
-        Ok(self.node(ExprKind::Decl(Decl { kind, bindings }), start.to(self.prev_span())))
+        Ok(self.node(
+            ExprKind::Decl(Decl { kind, bindings }),
+            start.to(self.prev_span()),
+        ))
     }
 
     fn fn_decl(&mut self) -> Result<Expr, ParseError> {
@@ -572,7 +628,12 @@ impl Parser {
                     self.expect(Tok::Colon)?; // 注釈は省けない
                     self.ty()?
                 };
-                params.push(Param { kind, name: pname, ty, span: pstart.to(self.prev_span()) });
+                params.push(Param {
+                    kind,
+                    name: pname,
+                    ty,
+                    span: pstart.to(self.prev_span()),
+                });
                 if !self.eat(Tok::Comma) {
                     break;
                 }
@@ -581,10 +642,21 @@ impl Parser {
         self.expect(Tok::RParen)?;
         let body = self.block()?;
         // `->` は**本体の領域**に付く（C-30）。だから本体の直後に来る
-        let ret = if self.eat(Tok::Arrow) { Some(self.ty()?) } else { None };
+        let ret = if self.eat(Tok::Arrow) {
+            Some(self.ty()?)
+        } else {
+            None
+        };
         let span = start.to(self.prev_span());
         Ok(self.node(
-            ExprKind::FnDecl(FnDecl { owner, name, params, body: Box::new(body), ret, span }),
+            ExprKind::FnDecl(FnDecl {
+                owner,
+                name,
+                params,
+                body: Box::new(body),
+                ret,
+                span,
+            }),
             span,
         ))
     }
@@ -605,7 +677,14 @@ impl Parser {
         self.expect(Tok::Define)?;
         let body = self.escape()?;
         let span = start.to(self.prev_span());
-        Ok(self.node(ExprKind::FlowDecl(FlowDecl { name, body: Box::new(body), span }), span))
+        Ok(self.node(
+            ExprKind::FlowDecl(FlowDecl {
+                name,
+                body: Box::new(body),
+                span,
+            }),
+            span,
+        ))
     }
 
     /// `wrap 名前 = 型;`（S-2）。`=` は定義であって束縛演算子ではない
@@ -641,13 +720,26 @@ impl Parser {
             let fname = self.ident()?;
             self.expect(Tok::Colon)?;
             let ty = self.ty()?; // `alias` は書けない（欄は値の場所）
-            let default = if self.eat(Tok::Assign) { Some(self.expr(6, false)?) } else { None };
+            let default = if self.eat(Tok::Assign) {
+                Some(self.expr(6, false)?)
+            } else {
+                None
+            };
             self.expect(Tok::Semi)?;
-            fields.push(Field { kind, name: fname, ty, default, span: fstart.to(self.prev_span()) });
+            fields.push(Field {
+                kind,
+                name: fname,
+                ty,
+                default,
+                span: fstart.to(self.prev_span()),
+            });
         }
         self.expect(Tok::RBrace)?;
         let span = start.to(self.prev_span());
-        Ok(self.node(ExprKind::StructDecl(StructDecl { name, fields, span }), span))
+        Ok(self.node(
+            ExprKind::StructDecl(StructDecl { name, fields, span }),
+            span,
+        ))
     }
 
     fn construct(&mut self) -> Result<Expr, ParseError> {
@@ -698,7 +790,11 @@ impl Parser {
             let b = self.expr(0, false)?;
             arms.push((c, b));
         }
-        let els = if self.eat(Tok::Else) { Some(Box::new(self.expr(0, false)?)) } else { None };
+        let els = if self.eat(Tok::Else) {
+            Some(Box::new(self.expr(0, false)?))
+        } else {
+            None
+        };
         self.expect(Tok::Fi)?;
         Ok(self.node(ExprKind::If(If { arms, els }), start.to(self.prev_span())))
     }
@@ -738,13 +834,20 @@ impl Parser {
             self.expect(Tok::FatArrow)?;
             // 腕は `E@6`。`;` を吸わず、最上位の `??` も消費しない（C-82）
             let value = self.expr(6, true)?;
-            arms.push(Arm { pattern, value, span: astart.to(self.prev_span()) });
+            arms.push(Arm {
+                pattern,
+                value,
+                span: astart.to(self.prev_span()),
+            });
         }
         if arms.is_empty() {
             return Err(self.err("`switch` には腕が要る"));
         }
         Ok(self.node(
-            ExprKind::Switch { subject: Box::new(subject), arms },
+            ExprKind::Switch {
+                subject: Box::new(subject),
+                arms,
+            },
             start.to(self.prev_span()),
         ))
     }
@@ -809,16 +912,20 @@ impl Parser {
             Tok::Continue => {
                 self.bump();
                 // `continue` は**値を取れない**。脱出か虚無だけ（C-71）
-                let operand = if matches!(self.peek(), Tok::Break | Tok::Continue | Tok::FlowName(_))
-                {
-                    Some(Operand::Escape(Box::new(self.escape()?)))
-                } else if self.starts_expr() {
-                    // 文法では表せないが、書き手の意図は明らかなので、そう言う
-                    return Err(self.err("`continue` は値を取れない。脱出か、何も書かないか"));
-                } else {
-                    None
-                };
-                Ok(Escape { kind: EscapeKind::Continue, operand, span: start.to(self.prev_span()) })
+                let operand =
+                    if matches!(self.peek(), Tok::Break | Tok::Continue | Tok::FlowName(_)) {
+                        Some(Operand::Escape(Box::new(self.escape()?)))
+                    } else if self.starts_expr() {
+                        // 文法では表せないが、書き手の意図は明らかなので、そう言う
+                        return Err(self.err("`continue` は値を取れない。脱出か、何も書かないか"));
+                    } else {
+                        None
+                    };
+                Ok(Escape {
+                    kind: EscapeKind::Continue,
+                    operand,
+                    span: start.to(self.prev_span()),
+                })
             }
             Tok::FlowName(name) => {
                 self.bump();
@@ -828,10 +935,8 @@ impl Parser {
                     if *self.peek() != Tok::RParen {
                         loop {
                             // 作用素式は値の引数位置に置けないので分けている
-                            if matches!(
-                                self.peek(),
-                                Tok::Break | Tok::Continue | Tok::FlowName(_)
-                            ) {
+                            if matches!(self.peek(), Tok::Break | Tok::Continue | Tok::FlowName(_))
+                            {
                                 args.push(FlowArg::Escape(self.escape()?));
                             } else {
                                 args.push(FlowArg::Value(self.expr(0, false)?));
@@ -915,11 +1020,18 @@ impl Parser {
         let is_alias = self.eat(Tok::Alias);
         if stack.len() != 1 {
             return Err(ParseError {
-                msg: format!("型は最後にちょうど一つ残らねばならない（{} 個残った）", stack.len()),
+                msg: format!(
+                    "型は最後にちょうど一つ残らねばならない（{} 個残った）",
+                    stack.len()
+                ),
                 span: start.to(self.prev_span()),
             });
         }
-        Ok(Type { value: stack.pop().unwrap(), is_alias, span: start.to(self.prev_span()) })
+        Ok(Type {
+            value: stack.pop().unwrap(),
+            is_alias,
+            span: start.to(self.prev_span()),
+        })
     }
 }
 

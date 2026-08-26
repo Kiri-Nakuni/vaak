@@ -50,7 +50,11 @@ impl Doc {
         };
         let start = self.lines[line] as usize;
         let end = (off as usize).min(self.text.len());
-        let col = self.text.get(start..end).map(|t| t.encode_utf16().count()).unwrap_or(0);
+        let col = self
+            .text
+            .get(start..end)
+            .map(|t| t.encode_utf16().count())
+            .unwrap_or(0);
         (line as u32, col as u32)
     }
 
@@ -77,8 +81,14 @@ impl Doc {
         let (l1, c1) = self.pos(sp.start);
         let (l2, c2) = self.pos(sp.end.max(sp.start));
         obj(vec![
-            ("start", obj(vec![("line", n(l1 as i64)), ("character", n(c1 as i64))])),
-            ("end", obj(vec![("line", n(l2 as i64)), ("character", n(c2 as i64))])),
+            (
+                "start",
+                obj(vec![("line", n(l1 as i64)), ("character", n(c1 as i64))]),
+            ),
+            (
+                "end",
+                obj(vec![("line", n(l2 as i64)), ("character", n(c2 as i64))]),
+            ),
         ])
     }
 }
@@ -87,8 +97,17 @@ impl Doc {
 
 /// LSP に渡す種類の一覧。**番号は並び順である。**
 pub const TOKEN_TYPES: &[&str] = &[
-    "keyword", "number", "string", "comment", "operator", "function", "variable", "type",
-    "macro", "parameter", "property",
+    "keyword",
+    "number",
+    "string",
+    "comment",
+    "operator",
+    "function",
+    "variable",
+    "type",
+    "macro",
+    "parameter",
+    "property",
 ];
 
 const T_KEYWORD: u32 = 0;
@@ -152,8 +171,10 @@ fn kind_of(t: &Tok, next: Option<&Tok>, prev: Option<&Tok>) -> Option<u32> {
             // 完全な解決はしない——色分けに要る精度で足りる
             if matches!(next, Some(LParen)) {
                 T_FUNCTION
-            } else if matches!(prev, Some(Colon) | Some(New) | Some(Arrow) | Some(Struct) | Some(Wrap))
-                || matches!(next, Some(Array) | Some(Map) | Some(Alias))
+            } else if matches!(
+                prev,
+                Some(Colon) | Some(New) | Some(Arrow) | Some(Struct) | Some(Wrap)
+            ) || matches!(next, Some(Array) | Some(Map) | Some(Alias))
             {
                 T_TYPE
             } else {
@@ -173,7 +194,10 @@ fn kind_of(t: &Tok, next: Option<&Tok>, prev: Option<&Tok>) -> Option<u32> {
 
 /// 組み込みの型の名前。**字句器は鍵語にしていない**（識別子である）ので、ここで拾う。
 fn is_builtin_type(name: &str) -> bool {
-    matches!(name, "bool" | "u1" | "u8" | "u16" | "u32" | "i32" | "i64" | "f32" | "f64" | "f80" | "str")
+    matches!(
+        name,
+        "bool" | "u1" | "u8" | "u16" | "u32" | "i32" | "i64" | "f32" | "f64" | "f80" | "str"
+    )
 }
 
 pub fn semantic_tokens(doc: &Doc) -> Vec<i64> {
@@ -202,7 +226,11 @@ pub fn semantic_tokens(doc: &Doc) -> Vec<i64> {
         let (l, c) = doc.pos(sp.start);
         let (l2, c2) = doc.pos(sp.end);
         // **行をまたぐものは出さない。** LSP は一行に収まる印しか受け取らない
-        let len = if l2 == l { c2.saturating_sub(c) } else { continue };
+        let len = if l2 == l {
+            c2.saturating_sub(c)
+        } else {
+            continue;
+        };
         if len == 0 {
             continue;
         }
@@ -236,7 +264,11 @@ pub fn diagnostics(doc: &Doc) -> Vec<J> {
 }
 
 fn diag(doc: &Doc, sp: Span, msg: &str) -> J {
-    let sp = if sp.end <= sp.start { Span::new(sp.start, sp.start + 1) } else { sp };
+    let sp = if sp.end <= sp.start {
+        Span::new(sp.start, sp.start + 1)
+    } else {
+        sp
+    };
     obj(vec![
         ("range", doc.range(sp)),
         ("severity", n(1)),
@@ -248,7 +280,9 @@ fn diag(doc: &Doc, sp: Span, msg: &str) -> J {
 // ========== 記号一覧 ==========
 
 pub fn symbols(doc: &Doc) -> Vec<J> {
-    let Ok(prog) = crate::parser::parse(&doc.text) else { return Vec::new() };
+    let Ok(prog) = crate::parser::parse(&doc.text) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for e in &prog.body {
         collect_symbol(doc, e, &mut out);
@@ -276,7 +310,11 @@ fn collect_symbol(doc: &Doc, e: &crate::ast::Expr, out: &mut Vec<J>) {
         E::FlowDecl(d) => (d.name.clone(), 12, d.span),
         E::Decl(d) => {
             for b in &d.bindings {
-                let k = if d.kind == crate::ast::BindKind::Const { 14 } else { 13 };
+                let k = if d.kind == crate::ast::BindKind::Const {
+                    14
+                } else {
+                    13
+                };
                 out.push(obj(vec![
                     ("name", s(&b.name)),
                     ("kind", n(k)),
@@ -335,13 +373,18 @@ fn explain(t: &Tok) -> Option<&'static str> {
 
 pub fn hover(doc: &Doc, off: u32) -> Option<J> {
     let toks = crate::lexer::lex(&doc.text).ok()?;
-    let t = toks.iter().find(|t| t.span.start <= off && off < t.span.end)?;
+    let t = toks
+        .iter()
+        .find(|t| t.span.start <= off && off < t.span.end)?;
     let md = match &t.tok {
         Tok::Ident(name) => decl_doc(doc, name)?,
         other => explain(other)?.to_string(),
     };
     Some(obj(vec![
-        ("contents", obj(vec![("kind", s("markdown")), ("value", s(&md))])),
+        (
+            "contents",
+            obj(vec![("kind", s("markdown")), ("value", s(&md))]),
+        ),
         ("range", doc.range(t.span)),
     ]))
 }
@@ -349,9 +392,11 @@ pub fn hover(doc: &Doc, off: u32) -> Option<J> {
 /// 名前の宣言を探して説明にする。**構文木を一度歩くだけ。**
 fn decl_doc(doc: &Doc, name: &str) -> Option<String> {
     if is_builtin_type(name) {
-        return Some(format!("**組み込みの型** `{name}`\n\n\
+        return Some(format!(
+            "**組み込みの型** `{name}`\n\n\
             すべての整数演算は 2^N を法として折り返す。除算は**ユークリッド**（C-76）——\
-            剰余は必ず非負である。"));
+            剰余は必ず非負である。"
+        ));
     }
     let prog = crate::parser::parse(&doc.text).ok()?;
     let mut found = None;
@@ -364,16 +409,29 @@ fn decl_doc(doc: &Doc, name: &str) -> Option<String> {
                     .iter()
                     .map(|p| format!("{} : {}", p.name, show_type(&p.ty)))
                     .collect();
-                let ret = f.ret.as_ref().map(|r| format!(" -> {}", show_type(r))).unwrap_or_default();
+                let ret = f
+                    .ret
+                    .as_ref()
+                    .map(|r| format!(" -> {}", show_type(r)))
+                    .unwrap_or_default();
                 found = Some(format!("```vaak\nfn {name} ({}){ret}\n```", ps.join(", ")));
             }
             E::StructDecl(d) if d.name == name => {
-                let fs: Vec<String> =
-                    d.fields.iter().map(|f| format!("    {} : {};", f.name, show_type(&f.ty))).collect();
-                found = Some(format!("```vaak\nstruct {name} {{\n{}\n}}\n```", fs.join("\n")));
+                let fs: Vec<String> = d
+                    .fields
+                    .iter()
+                    .map(|f| format!("    {} : {};", f.name, show_type(&f.ty)))
+                    .collect();
+                found = Some(format!(
+                    "```vaak\nstruct {name} {{\n{}\n}}\n```",
+                    fs.join("\n")
+                ));
             }
             E::WrapDecl(d) if d.name == name => {
-                found = Some(format!("```vaak\nwrap {name} = {};\n```", show_type(&d.base)));
+                found = Some(format!(
+                    "```vaak\nwrap {name} = {};\n```",
+                    show_type(&d.base)
+                ));
             }
             E::Decl(d) => {
                 for b in &d.bindings {
@@ -383,11 +441,10 @@ fn decl_doc(doc: &Doc, name: &str) -> Option<String> {
                             crate::ast::BindKind::Let => "let",
                             crate::ast::BindKind::Const => "const",
                         };
-                        let ty = b
-                            .ty
-                            .as_ref()
-                            .map(|t| format!(" : {}", show_type(t)))
-                            .unwrap_or_default();
+                        let ty =
+                            b.ty.as_ref()
+                                .map(|t| format!(" : {}", show_type(t)))
+                                .unwrap_or_default();
                         found = Some(format!("```vaak\n{k} {name}{ty}\n```"));
                     }
                 }
@@ -445,7 +502,8 @@ fn show_vt(t: &crate::ast::ValueType) -> String {
 const KEYWORDS: &[&str] = &[
     "var", "let", "const", "fn", "flow", "struct", "wrap", "new", "if", "elif", "else", "fi",
     "loop", "while", "nfor", "switch", "case", "break", "continue", "outward", "mod", "array",
-    "map", "alias", "true", "false", "bool", "u1", "u8", "u16", "u32", "i32", "i64", "f32", "f64", "str",
+    "map", "alias", "true", "false", "bool", "u1", "u8", "u16", "u32", "i32", "i64", "f32", "f64",
+    "str",
 ];
 
 pub fn completions(doc: &Doc) -> Vec<J> {
@@ -485,16 +543,26 @@ pub struct Server {
 
 impl Server {
     pub fn new() -> Self {
-        Self { docs: HashMap::new() }
+        Self {
+            docs: HashMap::new(),
+        }
     }
 
     pub fn run(&mut self) {
         let stdin = std::io::stdin();
         let mut r = stdin.lock();
         loop {
-            let Some(body) = read_message(&mut r) else { return };
-            let Some(msg) = crate::json::parse(&body) else { continue };
-            let method = msg.get("method").and_then(|m| m.str()).unwrap_or("").to_string();
+            let Some(body) = read_message(&mut r) else {
+                return;
+            };
+            let Some(msg) = crate::json::parse(&body) else {
+                continue;
+            };
+            let method = msg
+                .get("method")
+                .and_then(|m| m.str())
+                .unwrap_or("")
+                .to_string();
             let id = msg.get("id").cloned();
             if method == "exit" {
                 return;
@@ -544,15 +612,21 @@ impl Server {
             }
             "shutdown" => reply(id, J::Null),
             "textDocument/didOpen" => {
-                let uri = msg.path(&["params", "textDocument", "uri"]).and_then(|u| u.str());
-                let text = msg.path(&["params", "textDocument", "text"]).and_then(|t| t.str());
+                let uri = msg
+                    .path(&["params", "textDocument", "uri"])
+                    .and_then(|u| u.str());
+                let text = msg
+                    .path(&["params", "textDocument", "text"])
+                    .and_then(|t| t.str());
                 if let (Some(u), Some(t)) = (uri, text) {
                     self.docs.insert(u.to_string(), Doc::new(t.to_string()));
                     self.publish(u);
                 }
             }
             "textDocument/didChange" => {
-                let uri = msg.path(&["params", "textDocument", "uri"]).and_then(|u| u.str());
+                let uri = msg
+                    .path(&["params", "textDocument", "uri"])
+                    .and_then(|u| u.str());
                 let text = msg
                     .path(&["params", "contentChanges"])
                     .and_then(|c| c.at(0))
@@ -564,7 +638,9 @@ impl Server {
                 }
             }
             "textDocument/didClose" => {
-                if let Some(u) = msg.path(&["params", "textDocument", "uri"]).and_then(|u| u.str())
+                if let Some(u) = msg
+                    .path(&["params", "textDocument", "uri"])
+                    .and_then(|u| u.str())
                 {
                     self.docs.remove(u);
                 }
@@ -575,11 +651,21 @@ impl Server {
             }
             "textDocument/semanticTokens/full" => {
                 let data = self.doc_of(msg).map(semantic_tokens).unwrap_or_default();
-                reply(id, obj(vec![("data", J::Arr(data.into_iter().map(J::from_i64).collect()))]));
+                reply(
+                    id,
+                    obj(vec![(
+                        "data",
+                        J::Arr(data.into_iter().map(J::from_i64).collect()),
+                    )]),
+                );
             }
             "textDocument/hover" => {
-                let line = msg.path(&["params", "position", "line"]).and_then(|x| x.int());
-                let ch = msg.path(&["params", "position", "character"]).and_then(|x| x.int());
+                let line = msg
+                    .path(&["params", "position", "line"])
+                    .and_then(|x| x.int());
+                let ch = msg
+                    .path(&["params", "position", "character"])
+                    .and_then(|x| x.int());
                 let r = match (self.doc_of(msg), line, ch) {
                     (Some(d), Some(l), Some(c)) => {
                         let off = d.off(l as u32, c as u32);
@@ -611,7 +697,10 @@ impl Server {
         let Some(d) = self.docs.get(uri) else { return };
         notify(
             "textDocument/publishDiagnostics",
-            obj(vec![("uri", s(uri)), ("diagnostics", J::Arr(diagnostics(d)))]),
+            obj(vec![
+                ("uri", s(uri)),
+                ("diagnostics", J::Arr(diagnostics(d))),
+            ]),
         );
     }
 }
@@ -660,5 +749,9 @@ fn reply(id: Option<J>, result: J) {
 }
 
 fn notify(method: &str, params: J) {
-    send(obj(vec![("jsonrpc", s("2.0")), ("method", s(method)), ("params", params)]));
+    send(obj(vec![
+        ("jsonrpc", s("2.0")),
+        ("method", s(method)),
+        ("params", params),
+    ]));
 }

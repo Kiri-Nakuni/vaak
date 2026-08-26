@@ -54,14 +54,14 @@ pub struct RuntimeError {
 pub type R<T> = Result<T, RuntimeError>;
 
 fn rt<T>(msg: impl Into<String>, span: Span) -> R<T> {
-    Err(RuntimeError { msg: msg.into(), span })
+    Err(RuntimeError {
+        msg: msg.into(),
+        span,
+    })
 }
 
 /// 検査を飛ばした実行でも、同じ実セルへ二つの別名を束縛しない（C-87）。
-fn reject_duplicate_alias_cells(
-    cells: impl IntoIterator<Item = CellId>,
-    span: Span,
-) -> R<()> {
+fn reject_duplicate_alias_cells(cells: impl IntoIterator<Item = CellId>, span: Span) -> R<()> {
     let mut seen = Vec::new();
     for cell in cells {
         if seen.contains(&cell) {
@@ -173,7 +173,14 @@ impl Interp {
     /// ホストのセルを最上位のスコープに置く（S-4）。**`var` で見せる。**
     pub fn expose(&mut self, name: &str, v: Value) {
         let cell = self.arena.alloc(Some(v));
-        self.declare(name, Binding { cell, kind: BindKind::Var, is_alias: false });
+        self.declare(
+            name,
+            Binding {
+                cell,
+                kind: BindKind::Var,
+                is_alias: false,
+            },
+        );
     }
 
     /// 走り終わったあと、ホストのセルの値を**取り出す**。写さない。
@@ -186,7 +193,10 @@ impl Interp {
     pub fn run(&mut self, prog: &Program) -> R<Eval> {
         // **この方言に無い型は断る**（S-20）
         if let Some((name, span)) = find_dialect_type(&prog.body) {
-            return rt(format!("`{name}` はこの方言には無い型（STEEL 方言の型である）"), span);
+            return rt(
+                format!("`{name}` はこの方言には無い型（STEEL 方言の型である）"),
+                span,
+            );
         }
         self.collect_decls(&prog.body);
         self.region(&prog.body, Span::NONE)
@@ -197,11 +207,7 @@ impl Interp {
     ///
     /// **持ち主は呼び出し側のままである**——`Rc` で共有するので、
     /// 走り終わってもホストの側に残っている。
-    pub fn run_with(
-        &mut self,
-        prog: &Program,
-        hosts: Box<dyn crate::value::HostFns>,
-    ) -> R<Eval> {
+    pub fn run_with(&mut self, prog: &Program, hosts: Box<dyn crate::value::HostFns>) -> R<Eval> {
         self.hosts = Some(hosts);
         let r = self.run(prog);
         self.hosts = None;
@@ -243,7 +249,11 @@ impl Interp {
     }
 
     fn declare(&mut self, name: &str, b: Binding) {
-        self.scopes.last_mut().unwrap().vars.insert(name.to_string(), b);
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .vars
+            .insert(name.to_string(), b);
     }
 
     /// フレームからの段数（C-23）。`getdepth()` が返す。
@@ -297,12 +307,7 @@ impl Interp {
 
     /// **領域の値は一つだけ**（C-14）。どれがそれかは走らせるまで分からないので、
     /// 文脈の型は全部に置く。**受け取らない枝は先頭で捨てるだけである。**
-    fn region_wanting(
-        &mut self,
-        body: &[Expr],
-        want: Option<ValueType>,
-        span: Span,
-    ) -> R<Eval> {
+    fn region_wanting(&mut self, body: &[Expr], want: Option<ValueType>, span: Span) -> R<Eval> {
         let mut slot: Option<(Value, Span)> = None;
         let mut inner_paradox: Option<Span> = None;
 
@@ -385,11 +390,11 @@ impl Interp {
                 // **注釈は式の中まで届く**（C-100）
                 self.want = Some(ty.value.clone());
                 match self.need_value(expr)? {
-                Ok(v) => Ok(match try_coerce_to(v, &ty.value) {
-                    Some(v) => Eval::Value(v),
-                    None => Eval::Paradox(e.span),
-                }),
-                Err(x) => Ok(Eval::Escape(x)),
+                    Ok(v) => Ok(match try_coerce_to(v, &ty.value) {
+                        Some(v) => Eval::Value(v),
+                        None => Eval::Paradox(e.span),
+                    }),
+                    Err(x) => Ok(Eval::Escape(x)),
                 }
             }
 
@@ -450,9 +455,12 @@ impl Interp {
             ExprKind::If(i) => self.if_expr(i, want, e.span),
             ExprKind::Loop(body) => self.loop_expr(body, None, e.span),
             ExprKind::While { cond, body } => self.while_expr(cond, body, e.span),
-            ExprKind::NFor { name, start, count, body } => {
-                self.nfor(name, start, count, body, e.span)
-            }
+            ExprKind::NFor {
+                name,
+                start,
+                count,
+                body,
+            } => self.nfor(name, start, count, body, e.span),
             ExprKind::Switch { subject, arms } => self.switch(subject, arms, e.span),
 
             ExprKind::ArrayLit(items) => {
@@ -690,11 +698,20 @@ pub fn parse_int_pub(src: &str, span: Span) -> R<Value> {
 
 fn parse_int(src: &str, span: Span) -> R<Value> {
     let clean: String = src.chars().filter(|c| *c != '_').collect();
-    let v = if let Some(h) = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")) {
+    let v = if let Some(h) = clean
+        .strip_prefix("0x")
+        .or_else(|| clean.strip_prefix("0X"))
+    {
         i128::from_str_radix(h, 16)
-    } else if let Some(b) = clean.strip_prefix("0b").or_else(|| clean.strip_prefix("0B")) {
+    } else if let Some(b) = clean
+        .strip_prefix("0b")
+        .or_else(|| clean.strip_prefix("0B"))
+    {
         i128::from_str_radix(b, 2)
-    } else if let Some(o) = clean.strip_prefix("0o").or_else(|| clean.strip_prefix("0O")) {
+    } else if let Some(o) = clean
+        .strip_prefix("0o")
+        .or_else(|| clean.strip_prefix("0O"))
+    {
         i128::from_str_radix(o, 8)
     } else {
         clean.parse::<i128>()
@@ -903,7 +920,14 @@ impl Interp {
                     };
                     let v = require_coerce(v, b.ty.as_ref(), e.span)?;
                     let cell = self.arena.alloc(Some(v));
-                    self.declare(&b.name, Binding { cell, kind: d.kind, is_alias: false });
+                    self.declare(
+                        &b.name,
+                        Binding {
+                            cell,
+                            kind: d.kind,
+                            is_alias: false,
+                        },
+                    );
                 }
                 // `&=` は**名前が別のセルを指すようにする**。対象は名前だけ（C-53）
                 BindInit::AliasOf(target) => {
@@ -913,7 +937,10 @@ impl Interp {
                     // **経路の権限は増やせない**（C-51）。凍結は常に許される
                     if !can_narrow(tb.kind, d.kind) {
                         return rt(
-                            format!("権限が増える（`{:?}` から `{:?}` の別名は作れない）", tb.kind, d.kind),
+                            format!(
+                                "権限が増える（`{:?}` から `{:?}` の別名は作れない）",
+                                tb.kind, d.kind
+                            ),
                             b.span,
                         );
                     }
@@ -922,7 +949,14 @@ impl Interp {
                         self.frozen.push(tb.cell);
                         self.scopes.last_mut().unwrap().frozen.push(tb.cell);
                     }
-                    self.declare(&b.name, Binding { cell: tb.cell, kind: d.kind, is_alias: true });
+                    self.declare(
+                        &b.name,
+                        Binding {
+                            cell: tb.cell,
+                            kind: d.kind,
+                            is_alias: true,
+                        },
+                    );
                 }
             }
         }
@@ -1011,7 +1045,10 @@ impl Interp {
                     return rt(format!("知らない名前 `{n}`"), e.span);
                 };
                 if b.kind != BindKind::Var {
-                    return rt(format!("`{n}` は書けない（`{:?}` で束縛されている）", b.kind), e.span);
+                    return rt(
+                        format!("`{n}` は書けない（`{:?}` で束縛されている）", b.kind),
+                        e.span,
+                    );
                 }
                 Ok(Place::Cell(b.cell))
             }
@@ -1089,10 +1126,7 @@ pub(crate) fn place_read(arena: &Arena, p: &Place) -> Option<Value> {
     place_read_checked(arena, p).ok()
 }
 
-pub(crate) fn place_read_checked(
-    arena: &Arena,
-    p: &Place,
-) -> Result<Value, PlaceReadError> {
+pub(crate) fn place_read_checked(arena: &Arena, p: &Place) -> Result<Value, PlaceReadError> {
     let (cell, steps) = match p {
         Place::Cell(c) => (*c, &[][..]),
         Place::Field(c, steps) => (*c, &steps[..]),
@@ -1127,11 +1161,7 @@ pub(crate) fn place_len(arena: &Arena, p: &Place) -> Option<usize> {
 }
 
 /// 経路の末端へ直接書く。VM と参照実装の強制・挿入規則はここで一つになる。
-pub(crate) fn place_write(
-    arena: &mut Arena,
-    p: &Place,
-    v: Value,
-) -> Result<(), PlaceWriteError> {
+pub(crate) fn place_write(arena: &mut Arena, p: &Place, v: Value) -> Result<(), PlaceWriteError> {
     // **セルの型は一度決まったら変わらない。** 代入右辺のリテラルも
     // その場所の型を受け取る（C-25 / C-94）。
     // 写像・hash はまだ無い鍵への代入が**挿入**なので、値を読まず型だけ辿る。
@@ -1245,12 +1275,10 @@ fn step_set(v: &mut Value, steps: &[Step], new: Value) -> bool {
         new
     };
     match (v, first) {
-        (Value::Struct(sv), Step::Field(n)) => {
-            match sv.fields.iter_mut().find(|(k, _)| k == n) {
-                Some((_, slot)) => step_set(slot, rest, new),
-                None => false,
-            }
-        }
+        (Value::Struct(sv), Step::Field(n)) => match sv.fields.iter_mut().find(|(k, _)| k == n) {
+            Some((_, slot)) => step_set(slot, rest, new),
+            None => false,
+        },
         (Value::Array(ar), Step::Index(i)) => {
             if *i < 0 {
                 return false;
@@ -1353,8 +1381,10 @@ pub fn try_coerce_pub(v: Value, ty: Option<&Type>) -> Option<Value> {
 }
 
 fn require_coerce(v: Value, ty: Option<&Type>, span: Span) -> R<Value> {
-    try_coerce(v, ty)
-        .ok_or_else(|| RuntimeError { msg: "浮動小数を狭めると非有限になる".into(), span })
+    try_coerce(v, ty).ok_or_else(|| RuntimeError {
+        msg: "浮動小数を狭めると非有限になる".into(),
+        span,
+    })
 }
 
 /// 関数本体の外界面を返り値型へ揃える。
@@ -1398,7 +1428,11 @@ fn try_coerce(v: Value, ty: Option<&Type>) -> Option<Value> {
             return Some(Value::str(bytes));
         }
         (ValueType::Array(el), Value::Array(ar)) => {
-            let et = Type { value: (**el).clone(), is_alias: false, span: t.span };
+            let et = Type {
+                value: (**el).clone(),
+                is_alias: false,
+                span: t.span,
+            };
             let items = ar
                 .items
                 .into_iter()
@@ -1407,7 +1441,11 @@ fn try_coerce(v: Value, ty: Option<&Type>) -> Option<Value> {
             return Some(Value::array((**el).clone(), items));
         }
         (ValueType::Map(kt, vt), Value::Map(mp)) => {
-            let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
+            let vty = Type {
+                value: (**vt).clone(),
+                is_alias: false,
+                span: t.span,
+            };
             let entries = mp
                 .entries
                 .into_iter()
@@ -1416,7 +1454,11 @@ fn try_coerce(v: Value, ty: Option<&Type>) -> Option<Value> {
             return Some(Value::map((**kt).clone(), (**vt).clone(), entries));
         }
         (ValueType::Hash(kt, vt), Value::Hash(hv)) => {
-            let vty = Type { value: (**vt).clone(), is_alias: false, span: t.span };
+            let vty = Type {
+                value: (**vt).clone(),
+                is_alias: false,
+                span: t.span,
+            };
             let mut out = crate::value::HashVal::new((**kt).clone(), (**vt).clone());
             // **入れた順を保つ**（C-98）。穴は飛ばす
             for (k, x) in hv.entries.into_iter().flatten() {
@@ -1438,9 +1480,7 @@ pub fn is_dialect_only(t: &ValueType) -> bool {
     match t {
         ValueType::F80 => true,
         ValueType::Array(e) => is_dialect_only(e),
-        ValueType::Map(k, v) | ValueType::Hash(k, v) => {
-            is_dialect_only(k) || is_dialect_only(v)
-        }
+        ValueType::Map(k, v) | ValueType::Hash(k, v) => is_dialect_only(k) || is_dialect_only(v),
         _ => false,
     }
 }
@@ -1508,7 +1548,9 @@ pub fn find_dialect_type(items: &[Expr]) -> Option<(String, Span)> {
                     walk(std::slice::from_ref(cond), out);
                     walk(std::slice::from_ref(body), out);
                 }
-                E::NFor { start, count, body, .. } => {
+                E::NFor {
+                    start, count, body, ..
+                } => {
                     walk(std::slice::from_ref(start), out);
                     walk(std::slice::from_ref(count), out);
                     walk(std::slice::from_ref(body), out);
@@ -1554,7 +1596,14 @@ pub fn coerce_to(v: Value, t: &ValueType) -> Value {
 }
 
 pub fn try_coerce_to(v: Value, t: &ValueType) -> Option<Value> {
-    try_coerce(v, Some(&Type { value: t.clone(), is_alias: false, span: Span::NONE }))
+    try_coerce(
+        v,
+        Some(&Type {
+            value: t.clone(),
+            is_alias: false,
+            span: Span::NONE,
+        }),
+    )
 }
 
 /// `new u8 array(x)` の一引数構築を、参照実装と VM で一箇所に保つ。
@@ -1564,10 +1613,7 @@ pub fn try_coerce_to(v: Value, t: &ValueType) -> Option<Value> {
 /// 見分けると将来の変更で長さを失い得る。入力の型を先に分ける。
 pub(crate) fn make_u8_array_one(source: Value) -> Option<Value> {
     match source {
-        source @ Value::Str(_) => try_coerce_to(
-            source,
-            &ValueType::Array(Box::new(ValueType::U8)),
-        ),
+        source @ Value::Str(_) => try_coerce_to(source, &ValueType::Array(Box::new(ValueType::U8))),
         Value::I64(count) => Some(Value::array(
             ValueType::U8,
             vec![Value::U8(0); count.max(0) as usize],
@@ -1811,14 +1857,7 @@ impl Interp {
 
     /// `nfor` の三被演算子は**束縛名・開始・回数**。歩幅は無い。
     /// 束縛名は本体の中で `let` であり、**スコープは本体**。
-    fn nfor(
-        &mut self,
-        name: &str,
-        start: &Expr,
-        count: &Expr,
-        body: &Expr,
-        span: Span,
-    ) -> R<Eval> {
+    fn nfor(&mut self, name: &str, start: &Expr, count: &Expr, body: &Expr, span: Span) -> R<Eval> {
         let sv = match self.need_value(start)? {
             Ok(v) => v,
             Err(x) => return Ok(Eval::Escape(x)),
@@ -1871,7 +1910,14 @@ impl Interp {
         self.push_scope(true, false);
         if let Some((n, v)) = loop_var {
             let cell = self.arena.alloc(Some(v));
-            self.declare(n, Binding { cell, kind: BindKind::Let, is_alias: false });
+            self.declare(
+                n,
+                Binding {
+                    cell,
+                    kind: BindKind::Let,
+                    is_alias: false,
+                },
+            );
         }
         self.collect_decls(items);
 
@@ -2009,15 +2055,21 @@ impl Interp {
                 // 充填値も**要素の型**でなければならない（C-94）
                 let fill = require_coerce(
                     fill,
-                    Some(&Type { value: (**elem).clone(), is_alias: false, span }),
+                    Some(&Type {
+                        value: (**elem).clone(),
+                        is_alias: false,
+                        span,
+                    }),
                     span,
                 )?;
-                Ok(Eval::Value(Value::array((**elem).clone(), vec![fill; n as usize])))
+                Ok(Eval::Value(Value::array(
+                    (**elem).clone(),
+                    vec![fill; n as usize],
+                )))
             }
             // ラップを剥がす：`new i64 ( m )` のように基底型で構築する
             (base, CtorArgs::Positional(a))
-                if a.len() == 1
-                    && !matches!(base, ValueType::Named(_) | ValueType::Array(_)) =>
+                if a.len() == 1 && !matches!(base, ValueType::Named(_) | ValueType::Array(_)) =>
             {
                 match self.need_value(&a[0])? {
                     Ok(Value::Struct(sv)) if sv.fields.len() == 1 && sv.fields[0].0.is_empty() => {
@@ -2030,7 +2082,11 @@ impl Interp {
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
-            (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::map((**k).clone(), (**v).clone(), Default::default()))),
+            (ValueType::Map(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::map(
+                (**k).clone(),
+                (**v).clone(),
+                Default::default(),
+            ))),
             (ValueType::Hash(k, v), CtorArgs::Positional(_)) => Ok(Eval::Value(Value::Hash(
                 Box::new(crate::value::HashVal::new((**k).clone(), (**v).clone())),
             ))),
@@ -2049,7 +2105,10 @@ impl Interp {
                 if self.wraps.contains_key(name) && a.len() == 1 =>
             {
                 match self.need_value(&a[0])? {
-                    Ok(v) => Ok(Eval::Value(Value::strukt(name.clone(), vec![("".to_string(), v)]))),
+                    Ok(v) => Ok(Eval::Value(Value::strukt(
+                        name.clone(),
+                        vec![("".to_string(), v)],
+                    ))),
                     Err(x) => Ok(Eval::Escape(x)),
                 }
             }
@@ -2191,7 +2250,11 @@ impl Interp {
         };
         if f.decl.params.len() != args.len() {
             return rt(
-                format!("`{name}` は引数を {} 個取るが {} 個来た", f.decl.params.len(), args.len()),
+                format!(
+                    "`{name}` は引数を {} 個取るが {} 個来た",
+                    f.decl.params.len(),
+                    args.len()
+                ),
                 span,
             );
         }
@@ -2231,7 +2294,14 @@ impl Interp {
         self.push_scope(true, true);
         self.frame_base = self.scopes.len() - 1;
         for (n, k, c, is_alias) in bound {
-            self.declare(&n, Binding { cell: c, kind: k, is_alias });
+            self.declare(
+                &n,
+                Binding {
+                    cell: c,
+                    kind: k,
+                    is_alias,
+                },
+            );
         }
         let ExprKind::Block(items) = &f.decl.body.kind else {
             self.frame_base = saved_base;
@@ -2306,7 +2376,10 @@ impl Interp {
     fn call_method(&mut self, f: FnEntry, base: &Expr, args: &[Expr], span: Span) -> R<Eval> {
         let d = f.decl.clone();
         if d.params.len() != args.len() + 1 {
-            return rt(format!("`{}` は引数を {} 個取る", d.name, d.params.len() - 1), span);
+            return rt(
+                format!("`{}` は引数を {} 個取る", d.name, d.params.len() - 1),
+                span,
+            );
         }
         let self_param = d.params[0].clone();
         // 破壊するなら `var self`。書き戻す先を先に押さえる
@@ -2350,7 +2423,14 @@ impl Interp {
         self.push_scope(true, true);
         self.frame_base = self.scopes.len() - 1;
         for (n, k, c, is_alias) in bound {
-            self.declare(&n, Binding { cell: c, kind: k, is_alias });
+            self.declare(
+                &n,
+                Binding {
+                    cell: c,
+                    kind: k,
+                    is_alias,
+                },
+            );
         }
         let ExprKind::Block(items) = &d.body.kind else {
             self.frame_base = saved;
@@ -2415,7 +2495,12 @@ impl Interp {
             }
         }
         // ---- 読むだけのもの ----
-        if is_num_method(name) || matches!(name, "len" | "has" | "keys" | "utf8_len" | "utf8_at" | "utf8_valid") {
+        if is_num_method(name)
+            || matches!(
+                name,
+                "len" | "has" | "keys" | "utf8_len" | "utf8_at" | "utf8_valid"
+            )
+        {
             let b = match self.need_value(base)? {
                 Ok(v) => v,
                 Err(x) => return Ok(Eval::Escape(x)),
@@ -2489,15 +2574,34 @@ pub fn read_method_pub(b: &Value, name: &str, args: &[Value], span: Span) -> R<E
 pub fn is_num_method(name: &str) -> bool {
     matches!(
         name,
-        "abs" | "min" | "max"
-            | "count_ones" | "leading_zeros" | "trailing_zeros"
-            | "reverse_bits" | "swap_bytes"
-            | "rotate_left" | "rotate_right"
-            | "saturating_add" | "saturating_sub" | "saturating_mul"
-            | "sqrt" | "floor" | "ceil" | "trunc" | "round"
-            | "copysign" | "mul_add"
-            | "exp" | "ln" | "log2" | "log10" | "pow"
-            | "sin" | "cos" | "tan"
+        "abs"
+            | "min"
+            | "max"
+            | "count_ones"
+            | "leading_zeros"
+            | "trailing_zeros"
+            | "reverse_bits"
+            | "swap_bytes"
+            | "rotate_left"
+            | "rotate_right"
+            | "saturating_add"
+            | "saturating_sub"
+            | "saturating_mul"
+            | "sqrt"
+            | "floor"
+            | "ceil"
+            | "trunc"
+            | "round"
+            | "copysign"
+            | "mul_add"
+            | "exp"
+            | "ln"
+            | "log2"
+            | "log10"
+            | "pow"
+            | "sin"
+            | "cos"
+            | "tan"
     )
 }
 
@@ -2524,7 +2628,13 @@ fn read_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
             Eval::Value(Value::U1(mp.entries.contains_key(&k)))
         }
         // 並びは鍵の順。**全順序なので決まる**（C-75）
-        ("keys", Value::Map(mp)) => Eval::Value(Value::array(mp.key.clone(), mp.entries.keys().map(|k| key_to_value(k, &mp.key)).collect())),
+        ("keys", Value::Map(mp)) => Eval::Value(Value::array(
+            mp.key.clone(),
+            mp.entries
+                .keys()
+                .map(|k| key_to_value(k, &mp.key))
+                .collect(),
+        )),
         // **入れた順**（C-98）。穴は飛ばす
         ("keys", Value::Hash(h)) => Eval::Value(Value::array(
             h.key.clone(),
@@ -2562,7 +2672,9 @@ fn write_method(cur: &mut Value, name: &str, args: &[Value], span: Span) -> R<Ev
     let paradox = Eval::Paradox(span);
     Ok(match (name, cur) {
         ("push", Value::Array(ar)) => {
-            let Some(v) = args.first() else { return rt("`push` は値を一つ取る", span) };
+            let Some(v) = args.first() else {
+                return rt("`push` は値を一つ取る", span);
+            };
             // **集合体は自分の要素の型を知っている**（C-94）。書き込む値をそれに揃える
             let el = ar.elem.clone();
             let Some(v) = try_coerce_to(v.clone(), &el) else {
@@ -2761,12 +2873,13 @@ fn like(recv: &Value, x: f64) -> Option<Value> {
     match recv {
         Value::F32(_) => {
             let y = x as f32;
-            y.is_finite().then_some(Value::F64(y as f64)).map(|_| Value::F32(y))
+            y.is_finite()
+                .then_some(Value::F64(y as f64))
+                .map(|_| Value::F32(y))
         }
         _ => x.is_finite().then_some(Value::F64(x)),
     }
 }
-
 
 /// 受け手の幅と符号。
 fn width_signed(v: &Value) -> Option<(u32, bool)> {
@@ -2861,7 +2974,11 @@ fn num_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
             return Ok(Eval::Value(Value::I64(z)));
         }
         "trailing_zeros" => {
-            let z = if raw == 0 { w as i64 } else { raw.trailing_zeros() as i64 };
+            let z = if raw == 0 {
+                w as i64
+            } else {
+                raw.trailing_zeros() as i64
+            };
             return Ok(Eval::Value(Value::I64(z)));
         }
         "reverse_bits" => {
@@ -2890,8 +3007,16 @@ fn num_method(b: &Value, name: &str, args: &[Value], span: Span) -> R<Eval> {
                 return rt(format!("`{name}` は桁数を一つ取る"), span);
             };
             let n = n.rem_euclid(w as i128) as u32;
-            let n = if name == "rotate_right" { (w - n) % w } else { n };
-            let r = if n == 0 { raw } else { (raw << n | raw >> (w - n)) & mask as u128 };
+            let n = if name == "rotate_right" {
+                (w - n) % w
+            } else {
+                n
+            };
+            let r = if n == 0 {
+                raw
+            } else {
+                (raw << n | raw >> (w - n)) & mask as u128
+            };
             r as i128
         }
         // **折り返さずに止まる。** 折り返してほしいなら `+` と書く

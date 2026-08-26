@@ -60,7 +60,13 @@ fn ホストを操る() {
     let regs = Value::array(
         ValueType::I32,
         (0..256usize)
-            .map(|i| Value::I32(if (1..=3).contains(&i) { [19, 28, 37][i - 1] } else { 0 }))
+            .map(|i| {
+                Value::I32(if (1..=3).contains(&i) {
+                    [19, 28, 37][i - 1]
+                } else {
+                    0
+                })
+            })
             .collect(),
     );
     for vm in [false, true] {
@@ -73,7 +79,6 @@ fn ホストを操る() {
         }
     }
 }
-
 
 /// S-16 の再現。**直った**（分岐は領域である、を VM が守っていなかった）。
 ///

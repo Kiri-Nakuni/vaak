@@ -86,7 +86,10 @@ pub fn check_with_host(prog: &Program, host: &[(String, HostItem)]) -> Vec<Stati
         wraps: HashMap::new(),
         flows: HashSet::new(),
         flow_defs: HashSet::new(),
-        stages: vec![Stage { is_loop: false, is_frame: true }],
+        stages: vec![Stage {
+            is_loop: false,
+            is_frame: true,
+        }],
         visible_limit: None,
         host_names: host
             .iter()
@@ -163,7 +166,10 @@ impl Checker {
     }
 
     fn err(&mut self, msg: impl Into<String>, span: Span) {
-        self.errs.push(StaticError { msg: msg.into(), span });
+        self.errs.push(StaticError {
+            msg: msg.into(),
+            span,
+        });
     }
 
     fn collect(&mut self, body: &[Expr]) {
@@ -194,7 +200,10 @@ impl Checker {
     }
 
     fn lookup(&self, n: &str) -> Option<(BindKind, bool)> {
-        let end = self.visible_limit.unwrap_or(self.scopes.len()).min(self.scopes.len());
+        let end = self
+            .visible_limit
+            .unwrap_or(self.scopes.len())
+            .min(self.scopes.len());
         if end <= self.frame_base {
             return None;
         }
@@ -207,7 +216,10 @@ impl Checker {
     }
 
     fn declare(&mut self, n: &str, k: BindKind, is_alias: bool) {
-        self.scopes.last_mut().unwrap().insert(n.to_string(), (k, is_alias));
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(n.to_string(), (k, is_alias));
     }
 
     /// **構造体の型依存グラフは DAG でなければならない**（C-63）。
@@ -223,7 +235,9 @@ impl Checker {
     }
 
     fn reaches(&self, from: &str, target: &str, seen: &mut HashSet<String>) -> bool {
-        let Some(s) = self.structs.get(from) else { return false };
+        let Some(s) = self.structs.get(from) else {
+            return false;
+        };
         for f in &s.fields {
             for dep in type_deps(&f.ty.value) {
                 if dep == target {
@@ -312,7 +326,10 @@ impl Checker {
             ExprKind::Block(body) => {
                 self.scopes.push(HashMap::new());
                 self.collect(body);
-                self.stages.push(Stage { is_loop: false, is_frame: false });
+                self.stages.push(Stage {
+                    is_loop: false,
+                    is_frame: false,
+                });
                 let p = self.region(body, env, e.span, RegionKind::Normal);
                 self.stages.pop();
                 self.scopes.pop();
@@ -406,9 +423,7 @@ impl Checker {
                 }
                 Places::Paradox
             }
-            ExprKind::StructDecl(_) | ExprKind::WrapDecl(_) => {
-                Places::Paradox
-            }
+            ExprKind::StructDecl(_) | ExprKind::WrapDecl(_) => Places::Paradox,
 
             ExprKind::If(i) => {
                 let mut any_value = false;
@@ -456,7 +471,12 @@ impl Checker {
                 self.loop_body(body, env);
                 Places::Value
             }
-            ExprKind::NFor { name, start, count, body } => {
+            ExprKind::NFor {
+                name,
+                start,
+                count,
+                body,
+            } => {
                 self.operand(start, env);
                 self.operand(count, env);
                 // ループ変数は**本体の先頭で見えている**。本体の局所とは別のスコープに置く
@@ -537,7 +557,10 @@ impl Checker {
         };
         self.collect(items);
         // 本体は**その構文の段**。二重にはならない（C-64）
-        self.stages.push(Stage { is_loop: true, is_frame: false });
+        self.stages.push(Stage {
+            is_loop: true,
+            is_frame: false,
+        });
         self.region(items, env, body.span, RegionKind::LoopBody);
         self.stages.pop();
     }
@@ -607,7 +630,10 @@ impl Checker {
                 None => self.unknown(n, lhs.span),
                 Some((k, _)) => {
                     if k != BindKind::Var {
-                        self.err(format!("`{n}` は書けない（`{k:?}` で束縛されている）"), lhs.span);
+                        self.err(
+                            format!("`{n}` は書けない（`{k:?}` で束縛されている）"),
+                            lhs.span,
+                        );
                     }
                 }
             },
@@ -633,7 +659,10 @@ impl Checker {
         };
         self.collect(items);
         // 本体はフレーム。**段数はここから数え直す**
-        self.stages.push(Stage { is_loop: false, is_frame: true });
+        self.stages.push(Stage {
+            is_loop: false,
+            is_frame: true,
+        });
         let p = self.region(items, Env, f.body.span, RegionKind::Normal);
         self.stages.pop();
         // `->` は**外界面の型**（C-66）。無ければ外界面は paradox のみ
@@ -655,12 +684,17 @@ impl Checker {
             }
             // **破壊的メンバ関数はレシーバに `var` を要求する**（C-64）。
             // 利用者定義（S-1）なら `var self` かで決まる
-            let destructive = matches!(name.as_str(), "push" | "pop" | "clear" | "insert" | "remove")
-                || self
-                    .fns
-                    .values()
-                    .any(|f| f.owner.is_some() && &f.name == name
-                        && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false));
+            let destructive = matches!(
+                name.as_str(),
+                "push" | "pop" | "clear" | "insert" | "remove"
+            ) || self.fns.values().any(|f| {
+                f.owner.is_some()
+                    && &f.name == name
+                    && f.params
+                        .first()
+                        .map(|p| p.kind == BindKind::Var)
+                        .unwrap_or(false)
+            });
             if destructive {
                 match root_of(base) {
                     Some(n) => match self.lookup(n) {
@@ -707,7 +741,11 @@ impl Checker {
         };
         if f.params.len() != args.len() {
             self.err(
-                format!("`{name}` は引数を {} 個取るが {} 個来た", f.params.len(), args.len()),
+                format!(
+                    "`{name}` は引数を {} 個取るが {} 個来た",
+                    f.params.len(),
+                    args.len()
+                ),
                 span,
             );
         }
@@ -867,7 +905,10 @@ enum EKind2 {
 }
 
 fn is_cmp(op: BinOp) -> bool {
-    matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne)
+    matches!(
+        op,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+    )
 }
 
 fn can_narrow(from: BindKind, to: BindKind) -> bool {

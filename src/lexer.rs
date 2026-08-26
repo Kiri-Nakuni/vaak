@@ -85,8 +85,8 @@ pub enum Tok {
     Dot,
 
     // --- 束縛と代入 ---
-    Assign,      // :=
-    AliasBind,   // &=
+    Assign,    // :=
+    AliasBind, // &=
     PlusEq,
     MinusEq,
     StarEq,
@@ -134,11 +134,19 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(src: &'a str) -> Self {
-        Self { src, bytes: src.as_bytes(), pos: 0, out: Vec::new() }
+        Self {
+            src,
+            bytes: src.as_bytes(),
+            pos: 0,
+            out: Vec::new(),
+        }
     }
 
     fn err<T>(&self, msg: impl Into<String>, start: usize) -> Result<T, LexError> {
-        Err(LexError { msg: msg.into(), span: Span::new(start as u32, self.pos as u32) })
+        Err(LexError {
+            msg: msg.into(),
+            span: Span::new(start as u32, self.pos as u32),
+        })
     }
 
     fn peek(&self) -> Option<u8> {
@@ -155,7 +163,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn push(&mut self, tok: Tok, start: usize) {
-        self.out.push(Token { tok, span: Span::new(start as u32, self.pos as u32) });
+        self.out.push(Token {
+            tok,
+            span: Span::new(start as u32, self.pos as u32),
+        });
     }
 
     fn run(mut self) -> Result<Vec<Token>, LexError> {
@@ -358,7 +369,14 @@ impl<'a> Lexer<'a> {
         }
 
         let text = self.src[start..self.pos].to_string();
-        self.push(if is_float { Tok::Float(text) } else { Tok::Int(text) }, start);
+        self.push(
+            if is_float {
+                Tok::Float(text)
+            } else {
+                Tok::Int(text)
+            },
+            start,
+        );
         Ok(())
     }
 
@@ -413,8 +431,7 @@ impl<'a> Lexer<'a> {
                                 let Some(d) = (c as char).to_digit(16) else {
                                     return self.err("16進数ではない", start);
                                 };
-                                let Some(next) =
-                                    v.checked_mul(16).and_then(|v| v.checked_add(d))
+                                let Some(next) = v.checked_mul(16).and_then(|v| v.checked_add(d))
                                 else {
                                     return self.err("符号位置ではない", start);
                                 };

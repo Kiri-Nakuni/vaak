@@ -17,7 +17,10 @@ struct Recorder {
 
 impl HostFn for Recorder {
     fn sig(&self) -> HostSig {
-        HostSig { params: vec![ValueType::I64], ret: None }
+        HostSig {
+            params: vec![ValueType::I64],
+            ret: None,
+        }
     }
     fn call(&mut self, args: &[Value]) -> Option<Value> {
         self.seen.borrow_mut().push(args[0].as_int().unwrap_or(0));
@@ -69,7 +72,10 @@ fn 返り値が無ければparadoxになる() {
     for vm in [false, true] {
         // **`;` が潰す。** 領域に値は残らない
         let (out, seen) = run("note(7);", vm);
-        assert!(matches!(out, Outcome::Empty | Outcome::Paradox { .. }), "vm={vm}: {out:?}");
+        assert!(
+            matches!(out, Outcome::Empty | Outcome::Paradox { .. }),
+            "vm={vm}: {out:?}"
+        );
         assert_eq!(seen, vec![7], "vm={vm}");
     }
 }
@@ -104,7 +110,9 @@ fn 参照実装もhost関数indexが折り返す前に拒む() {
     for index in 0..u16::MAX as usize + 2 {
         host.expose_fn(&format!("f{index}"), Box::new(呼ばれない関数));
     }
-    assert!(matches!(host.run("0"), Outcome::Static(errors) if errors.iter().any(|error| error.contains("65536"))));
+    assert!(
+        matches!(host.run("0"), Outcome::Static(errors) if errors.iter().any(|error| error.contains("65536")))
+    );
 }
 
 #[test]

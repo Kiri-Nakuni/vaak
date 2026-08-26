@@ -49,7 +49,10 @@ pub struct SteelError {
 }
 
 fn err<T>(msg: impl Into<String>, span: Span) -> Result<T, SteelError> {
-    Err(SteelError { msg: msg.into(), span })
+    Err(SteelError {
+        msg: msg.into(),
+        span,
+    })
 }
 
 type R<T> = Result<T, SteelError>;
@@ -229,7 +232,11 @@ fn fbits(v: f64, ty: &ValueType) -> String {
     if matches!(ty, ValueType::F80) {
         return f80_bits(v);
     }
-    let d = if matches!(ty, ValueType::F32) { v as f32 as f64 } else { v };
+    let d = if matches!(ty, ValueType::F32) {
+        v as f32 as f64
+    } else {
+        v
+    };
     format!("0x{:016X}", d.to_bits())
 }
 
@@ -347,7 +354,9 @@ impl Steel {
     // ========== 名前 ==========
 
     fn push_scope(&mut self) {
-        self.scopes.push(Scope { names: HashMap::new() });
+        self.scopes.push(Scope {
+            names: HashMap::new(),
+        });
     }
 
     fn pop_scope(&mut self) {
@@ -378,7 +387,11 @@ impl Steel {
     fn declare_alias(&mut self, name: &str, target: &str, ty: ValueType) -> String {
         let r = self.alloca("ptr");
         self.emit(&format!("store ptr {target}, ptr {r}"));
-        self.scopes.last_mut().unwrap().names.insert(name.to_string(), (r.clone(), ty, true));
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .names
+            .insert(name.to_string(), (r.clone(), ty, true));
         r
     }
 
@@ -478,7 +491,9 @@ impl Steel {
     fn field_ptr(&mut self, base: &str, name: &str, idx: usize) -> R<String> {
         let ll = self.struct_ty(name)?;
         let g = self.tmp();
-        self.emit(&format!("{g} = getelementptr {ll}, ptr {base}, i64 0, i32 {idx}"));
+        self.emit(&format!(
+            "{g} = getelementptr {ll}, ptr {base}, i64 0, i32 {idx}"
+        ));
         Ok(g)
     }
 
@@ -491,11 +506,19 @@ impl Steel {
         } else {
             m
         };
-        Val { ok: "true".into(), v: format!("{m}"), ty: ty.clone() }
+        Val {
+            ok: "true".into(),
+            v: format!("{m}"),
+            ty: ty.clone(),
+        }
     }
 
     fn paradox(&mut self, ty: &ValueType) -> Val {
-        Val { ok: "false".into(), v: "0".into(), ty: ty.clone() }
+        Val {
+            ok: "false".into(),
+            v: "0".into(),
+            ty: ty.clone(),
+        }
     }
 
     /// 幅を合わせる。**結果の型は左が決める**（`wrap_like` と同じ）。
@@ -515,15 +538,27 @@ impl Steel {
                         ValueType::F64 => 1,
                         _ => 2,
                     };
-                    if rank(from) < rank(to) { "fpext" } else { "fptrunc" }
+                    if rank(from) < rank(to) {
+                        "fpext"
+                    } else {
+                        "fptrunc"
+                    }
                 }
                 // **整数と浮動小数は混ぜられない**（検査器が捕らえる）。
                 // ここへ来るのは注釈で明示したときだけ
                 (false, true) => {
-                    if signed(from) { "sitofp" } else { "uitofp" }
+                    if signed(from) {
+                        "sitofp"
+                    } else {
+                        "uitofp"
+                    }
                 }
                 (true, false) => {
-                    if signed(to) { "fptosi" } else { "fptoui" }
+                    if signed(to) {
+                        "fptosi"
+                    } else {
+                        "fptoui"
+                    }
                 }
                 (false, false) => unreachable!(),
             };
@@ -553,15 +588,19 @@ impl Steel {
     fn conv_value(&mut self, x: Val, to: &ValueType) -> Val {
         let from = x.ty.clone();
         let v = self.conv(&x.v, &from, to);
-        let narrows_float = matches!(to, ValueType::F32)
-            && matches!(from, ValueType::F64 | ValueType::F80);
+        let narrows_float =
+            matches!(to, ValueType::F32) && matches!(from, ValueType::F64 | ValueType::F80);
         let ok = if narrows_float {
             let finite = self.finite(&v, to);
             self.both_ok(&x.ok, &finite)
         } else {
             x.ok
         };
-        Val { ok, v, ty: to.clone() }
+        Val {
+            ok,
+            v,
+            ty: to.clone(),
+        }
     }
 
     /// 二つ組を一つに畳む。**片方でも paradox なら paradox**（C-22：伝播する）。
@@ -600,15 +639,26 @@ impl Steel {
             };
             let t = self.tmp();
             self.emit(&format!("{t} = icmp {p} i64 {a}, {b}"));
-            return Ok(Val { ok, v: t, ty: ValueType::U1 });
+            return Ok(Val {
+                ok,
+                v: t,
+                ty: ValueType::U1,
+            });
         }
 
         if matches!(op, And | Or) {
             let a = self.nonzero(&l);
             let b = self.nonzero(&r);
             let t = self.tmp();
-            self.emit(&format!("{t} = {} i1 {a}, {b}", if op == And { "and" } else { "or" }));
-            return Ok(Val { ok, v: t, ty: ValueType::U1 });
+            self.emit(&format!(
+                "{t} = {} i1 {a}, {b}",
+                if op == And { "and" } else { "or" }
+            ));
+            return Ok(Val {
+                ok,
+                v: t,
+                ty: ValueType::U1,
+            });
         }
 
         let ty = l.ty.clone();
@@ -664,7 +714,11 @@ impl Steel {
             };
             let x = self.tmp();
             self.emit(&format!("{x} = fcmp {p} {t} {}, {}", l.v, r.v));
-            return Ok(Val { ok, v: x, ty: ValueType::U1 });
+            return Ok(Val {
+                ok,
+                v: x,
+                ty: ValueType::U1,
+            });
         }
 
         let o = match op {
@@ -679,7 +733,11 @@ impl Steel {
         self.emit(&format!("{x} = {o} {t} {}, {}", l.v, r.v));
         let fin = self.finite(&x, &l.ty);
         let ok2 = self.both_ok(&ok, &fin);
-        Ok(Val { ok: ok2, v: x, ty: l.ty })
+        Ok(Val {
+            ok: ok2,
+            v: x,
+            ty: l.ty,
+        })
     }
 
     /// **有限か。** NaN なら `olt` が偽になるので、これ一つで両方を捕まえる。
@@ -744,7 +802,11 @@ impl Steel {
             let r = self.tmp();
             self.emit(&format!("{r} = urem {i} {x}, {safe}"));
             // 符号無しなら剰余は既に非負
-            return Val { ok: ok2, v: if want_q { q } else { r }, ty: ty.clone() };
+            return Val {
+                ok: ok2,
+                v: if want_q { q } else { r },
+                ty: ty.clone(),
+            };
         };
 
         let neg = self.tmp();
@@ -768,7 +830,11 @@ impl Steel {
         let rf = self.tmp();
         self.emit(&format!("{rf} = select i1 {neg}, {i} {r2}, {i} {r}"));
 
-        Val { ok: ok2, v: if want_q { qf } else { rf }, ty: ty.clone() }
+        Val {
+            ok: ok2,
+            v: if want_q { qf } else { rf },
+            ty: ty.clone(),
+        }
     }
 
     // ================= 集合体 =================
@@ -787,7 +853,10 @@ impl Steel {
         let d = self.tmp();
         self.emit(&format!("{d} = call ptr @vaak.data(ptr {base})"));
         let g = self.tmp();
-        self.emit(&format!("{g} = getelementptr {}, ptr {d}, i64 {idx}", ity(&el)));
+        self.emit(&format!(
+            "{g} = getelementptr {}, ptr {d}, i64 {idx}",
+            ity(&el)
+        ));
         g
     }
 
@@ -931,9 +1000,7 @@ impl Steel {
                 "define internal ptr {fname}(ptr %p) {{\nentry:\n  %q = call ptr @vaak.map.clone(ptr %p, i64 {ks}, i64 {vs})\n  %n = load i64, ptr %q\n"
             );
             // 場を持つ鍵・値は**一つずつ深く写す**
-            for (which, ty2, sz) in
-                [("keys", kt.clone(), ks), ("vals", vt.clone(), vs)]
-            {
+            for (which, ty2, sz) in [("keys", kt.clone(), ks), ("vals", vt.clone(), vs)] {
                 let _ = sz;
                 if !is_heap(&ty2) {
                     continue;
@@ -1029,7 +1096,9 @@ impl Steel {
                         // **欄の型が式の中まで届く**（C-100）
                         self.want = Some(fty.clone());
                         let v = self.expr(e)?;
-                        let Some(v) = v else { return err("欄に値が無い", e.span) };
+                        let Some(v) = v else {
+                            return err("欄に値が無い", e.span);
+                        };
                         if is_heap(fty) {
                             self.deep_copy(&v.v.clone(), fty)
                         } else {
@@ -1044,7 +1113,11 @@ impl Steel {
                 let g = self.field_ptr(&p, &name, i)?;
                 self.emit(&format!("store {} {v}, ptr {g}", ity(fty)));
             }
-            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+            return Ok(Some(Val {
+                ok: "true".into(),
+                v: p,
+                ty: t,
+            }));
         }
         // **包み型を剥がす／包む**（S-2）。`new i64 ( m )` は数を数に
         if !is_heap(&t) {
@@ -1055,9 +1128,15 @@ impl Steel {
                 return err("`new` に値が要る", span);
             };
             let v = self.expr(first)?;
-            let Some(v) = v else { return err("`new` に値が要る", span) };
+            let Some(v) = v else {
+                return err("`new` に値が要る", span);
+            };
             let c = self.conv(&v.v.clone(), &v.ty.clone(), &t);
-            return Ok(Some(Val { ok: v.ok, v: c, ty: t }));
+            return Ok(Some(Val {
+                ok: v.ok,
+                v: c,
+                ty: t,
+            }));
         }
         let CtorArgs::Positional(a) = args else {
             return err("集合体は位置で構築する", span);
@@ -1070,29 +1149,50 @@ impl Steel {
             self.hash_fns(&t)?;
             let p = self.tmp();
             self.emit(&format!("{p} = call ptr @vaak.hash.new()"));
-            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+            return Ok(Some(Val {
+                ok: "true".into(),
+                v: p,
+                ty: t,
+            }));
         }
         // `new K V map ( )` — **空。** 中身は写像リテラルで書く
         if is_map(&t) {
             if !a.is_empty() {
-                return err("`new … map` は空でなければならない（中身は `( 鍵 => 値 )` で書く）", span);
+                return err(
+                    "`new … map` は空でなければならない（中身は `( 鍵 => 値 )` で書く）",
+                    span,
+                );
             }
             let p = self.map_new();
-            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+            return Ok(Some(Val {
+                ok: "true".into(),
+                v: p,
+                ty: t,
+            }));
         }
         let el = elem_of(&t).unwrap_or(ValueType::I64);
         // `new T array ( )` — 空
         let Some(nx) = a.first() else {
             let p = self.new_collection("0", &t);
-            return Ok(Some(Val { ok: "true".into(), v: p, ty: t }));
+            return Ok(Some(Val {
+                ok: "true".into(),
+                v: p,
+                ty: t,
+            }));
         };
         let n = self.expr(nx)?;
-        let Some(n) = n else { return err("`new` の個数に値が無い", nx.span) };
+        let Some(n) = n else {
+            return err("`new` の個数に値が無い", nx.span);
+        };
         // **包む／剥がす**（C-78 / S-2）。集合体なら長さではなく構築である。
         // 構築は深い複製なので、同じ置き場を型だけ変えて返してはならない。
         if is_heap(&n.ty) {
             let copied = self.deep_copy(&n.v, &t);
-            return Ok(Some(Val { ok: n.ok, v: copied, ty: t }));
+            return Ok(Some(Val {
+                ok: n.ok,
+                v: copied,
+                ty: t,
+            }));
         }
         let len = self.widen64(&n);
         // **負の個数は零とみなす。** 落ちるより畳む
@@ -1106,7 +1206,9 @@ impl Steel {
         let fill = match a.get(1) {
             Some(fx) => {
                 let f = self.expr(fx)?;
-                let Some(f) = f else { return err("埋める値が無い", fx.span) };
+                let Some(f) = f else {
+                    return err("埋める値が無い", fx.span);
+                };
                 self.conv(&f.v.clone(), &f.ty.clone(), &el)
             }
             None => match el {
@@ -1143,7 +1245,11 @@ impl Steel {
         self.br(&head);
         self.place(&done);
 
-        Ok(Some(Val { ok: "true".into(), v: p, ty: t }))
+        Ok(Some(Val {
+            ok: "true".into(),
+            v: p,
+            ty: t,
+        }))
     }
 
     /// 欄の既定値（`let x : i64 := 0;` の `0`）。
@@ -1153,7 +1259,9 @@ impl Steel {
         let Some(f) = d.fields.iter().find(|f| f.name == fname) else {
             return Ok(None);
         };
-        let Some(def) = f.default.clone() else { return Ok(None) };
+        let Some(def) = f.default.clone() else {
+            return Ok(None);
+        };
         self.want = Some(fty.clone());
         let v = self.expr(&def)?;
         let Some(v) = v else { return Ok(None) };
@@ -1167,8 +1275,11 @@ impl Steel {
     /// 文字列の定数。**場の形（長さ・容量・中身）で置く。**
     fn string_const(&mut self, b: &[u8]) -> String {
         let name = format!("@.vaak.s{}", self.strings.len());
-        let body: String =
-            b.iter().map(|c| format!("\\{c:02X}")).collect::<Vec<_>>().join("");
+        let body: String = b
+            .iter()
+            .map(|c| format!("\\{c:02X}"))
+            .collect::<Vec<_>>()
+            .join("");
         let n = b.len();
         self.head_global(&format!(
             "{name} = internal constant {{ i64, i64, [{n} x i8] }} \
@@ -1298,7 +1409,11 @@ impl Steel {
         let exit = self.label("stage.exit");
         let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
-        let count_slot = if count { Some(self.alloca("i64")) } else { None };
+        let count_slot = if count {
+            Some(self.alloca("i64"))
+        } else {
+            None
+        };
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
         self.emit(&format!("store i128 0, ptr {slot}"));
         if let Some(c) = &count_slot {
@@ -1405,7 +1520,11 @@ impl Steel {
                     Some(w) if is_float(w) && w != &ValueType::F64 => {
                         let c = self.conv(&base.v.clone(), &ValueType::F64, w);
                         let ok = self.finite(&c, w);
-                        Ok(Some(Val { ok, v: c, ty: w.clone() }))
+                        Ok(Some(Val {
+                            ok,
+                            v: c,
+                            ty: w.clone(),
+                        }))
                     }
                     _ => Ok(Some(base)),
                 }
@@ -1423,7 +1542,9 @@ impl Steel {
                 for it in items {
                     self.want = el.clone();
                     let v = self.expr(it)?;
-                    let Some(v) = v else { return err("配列の要素に値が無い", it.span) };
+                    let Some(v) = v else {
+                        return err("配列の要素に値が無い", it.span);
+                    };
                     vals.push(v);
                 }
                 let el = vals.first().map(|v| v.ty.clone()).unwrap_or(ValueType::I64);
@@ -1439,7 +1560,11 @@ impl Steel {
                     };
                     self.emit(&format!("store {} {c}, ptr {g}", ity(&el)));
                 }
-                Ok(Some(Val { ok: "true".into(), v: p, ty }))
+                Ok(Some(Val {
+                    ok: "true".into(),
+                    v: p,
+                    ty,
+                }))
             }
 
             // `new T array(n, 埋める値)`
@@ -1450,13 +1575,19 @@ impl Steel {
                 let g = self.string_const(t);
                 let p = self.tmp();
                 self.emit(&format!("{p} = call ptr @vaak.copy(ptr {g}, i64 1)"));
-                Ok(Some(Val { ok: "true".into(), v: p, ty: ValueType::Str }))
+                Ok(Some(Val {
+                    ok: "true".into(),
+                    v: p,
+                    ty: ValueType::Str,
+                }))
             }
 
             // `p.欄`
             E::Field { base, name } => {
                 let b = self.expr(base)?;
-                let Some(b) = b else { return err("受け手に値が無い", base.span) };
+                let Some(b) = b else {
+                    return err("受け手に値が無い", base.span);
+                };
                 let ValueType::Named(sname) = &b.ty else {
                     return err("欄を持つのは構造体だけ", base.span);
                 };
@@ -1471,7 +1602,11 @@ impl Steel {
                 let g = self.field_ptr(&b.v.clone(), &sname, i)?;
                 let t = self.tmp();
                 self.emit(&format!("{t} = load {}, ptr {g}", ity(&fty)));
-                Ok(Some(Val { ok: b.ok, v: t, ty: fty }))
+                Ok(Some(Val {
+                    ok: b.ok,
+                    v: t,
+                    ty: fty,
+                }))
             }
 
             // `a[i]` — **範囲外は paradox**（C-46）
@@ -1486,7 +1621,9 @@ impl Steel {
                 }
                 // **hash も鍵で引く。** 引き方が違うだけ
                 if is_hash(&b.ty) {
-                    let ValueType::Hash(kt, vt) = &b.ty else { unreachable!() };
+                    let ValueType::Hash(kt, vt) = &b.ty else {
+                        unreachable!()
+                    };
                     let (kt, vt) = ((**kt).clone(), (**vt).clone());
                     let stem = self.hash_fns(&b.ty.clone())?;
                     let kc = self.conv(&i.v.clone(), &i.ty.clone(), &kt);
@@ -1528,7 +1665,11 @@ impl Steel {
                     let got = self.map_get(&b.v.clone(), &b.ty.clone(), i.clone(), e.span)?;
                     let ok1 = self.both_ok(&b.ok, &i.ok);
                     let ok = self.both_ok(&ok1, &got.ok);
-                    return Ok(Some(Val { ok, v: got.v, ty: got.ty }));
+                    return Ok(Some(Val {
+                        ok,
+                        v: got.v,
+                        ty: got.ty,
+                    }));
                 }
                 let idx = self.widen64(&i);
                 let (inb, safe) = self.bounds(&b.v.clone(), &idx);
@@ -1547,7 +1688,11 @@ impl Steel {
                 };
                 let t = self.tmp();
                 self.emit(&format!("{t} = load {}, ptr {p}", ity(&ty)));
-                Ok(Some(Val { ok: "true".into(), v: t, ty }))
+                Ok(Some(Val {
+                    ok: "true".into(),
+                    v: t,
+                    ty,
+                }))
             }
 
             // **`;` は領域を潰し、内面を空にする**（C-22）。左辺は無くてもよい（C-80）
@@ -1580,7 +1725,9 @@ impl Steel {
                 // **符号は型を変えない**（C-100）
                 self.want = want;
                 let r = self.expr(rhs)?;
-                let Some(r) = r else { return err("被演算子に値が無い", e.span) };
+                let Some(r) = r else {
+                    return err("被演算子に値が無い", e.span);
+                };
                 match op {
                     UnOp::Pos => Ok(Some(r)),
                     UnOp::Neg => {
@@ -1591,7 +1738,11 @@ impl Steel {
                             let w = width(&r.ty).unwrap_or(64);
                             self.emit(&format!("{t} = sub i{w} 0, {}", r.v));
                         }
-                        Ok(Some(Val { ok: r.ok, v: t, ty: r.ty }))
+                        Ok(Some(Val {
+                            ok: r.ok,
+                            v: t,
+                            ty: r.ty,
+                        }))
                     }
                     // **`u1` なら論理否定、それ以外はビット反転。**
                     // 参照実装がそうしている——`! 0` は `i64` で −1 である
@@ -1603,7 +1754,11 @@ impl Steel {
                         } else {
                             self.emit(&format!("{t} = xor i{w} {}, -1", r.v));
                         }
-                        Ok(Some(Val { ok: r.ok, v: t, ty: r.ty }))
+                        Ok(Some(Val {
+                            ok: r.ok,
+                            v: t,
+                            ty: r.ty,
+                        }))
                     }
                 }
             }
@@ -1702,7 +1857,9 @@ impl Steel {
                 // `p.欄 := v`
                 if let ExprKind::Field { base, name } = &lhs.kind {
                     let b = self.expr(base)?;
-                    let Some(b) = b else { return err("受け手に値が無い", base.span) };
+                    let Some(b) = b else {
+                        return err("受け手に値が無い", base.span);
+                    };
                     let ValueType::Named(sname) = &b.ty else {
                         return err("欄を持つのは構造体だけ", base.span);
                     };
@@ -1715,7 +1872,9 @@ impl Steel {
                     };
                     let fty = fields[i].1.clone();
                     let r = self.expr(rhs)?;
-                    let Some(r) = r else { return err("代入する値が無い", e.span) };
+                    let Some(r) = r else {
+                        return err("代入する値が無い", e.span);
+                    };
                     let g = self.field_ptr(&b.v.clone(), &sname, i)?;
                     // **場所は一度だけ数える。** 読み書きで別々に数えない
                     let c = self.rmw(*op, &g, &fty, r, e.span)?;
@@ -1736,11 +1895,11 @@ impl Steel {
                     // **hash も枠を持たない**
                     if is_hash(&b.ty) {
                         if *op != AssignOp::Set {
-                            return self
-                                .hash_update(*op, &b, i, r, e.span)
-                                .map(|_| None);
+                            return self.hash_update(*op, &b, i, r, e.span).map(|_| None);
                         }
-                        let ValueType::Hash(kt, vt) = &b.ty else { unreachable!() };
+                        let ValueType::Hash(kt, vt) = &b.ty else {
+                            unreachable!()
+                        };
                         let (kt, vt) = ((**kt).clone(), (**vt).clone());
                         let stem = self.hash_fns(&b.ty.clone())?;
                         let kc = if is_heap(&kt) {
@@ -1815,7 +1974,9 @@ impl Steel {
                 // **置き場の型が右辺の中まで届く**（C-100）
                 self.want = Some(ty.clone());
                 let r = self.expr(rhs)?;
-                let Some(r) = r else { return err("代入する値が無い", e.span) };
+                let Some(r) = r else {
+                    return err("代入する値が無い", e.span);
+                };
                 let v = if *op == AssignOp::Set {
                     if is_heap(&ty) {
                         self.deep_copy(&r.v.clone(), &ty)
@@ -1828,7 +1989,11 @@ impl Steel {
                     let Some(b) = assign_binop(*op) else {
                         return err("扱えない代入", e.span);
                     };
-                    let lv = Val { ok: "true".into(), v: cur, ty: ty.clone() };
+                    let lv = Val {
+                        ok: "true".into(),
+                        v: cur,
+                        ty: ty.clone(),
+                    };
                     let out = self.binary(b, lv, r, e.span)?;
                     out.v
                 };
@@ -1844,7 +2009,9 @@ impl Steel {
                 let t = self.resolve(&t);
                 // **同じリテラルが両方に使える。** 文脈の型が決める（C-98）
                 if is_hash(&t) {
-                    let ValueType::Hash(kt, vt) = &t else { unreachable!() };
+                    let ValueType::Hash(kt, vt) = &t else {
+                        unreachable!()
+                    };
                     let (kt, vt) = ((**kt).clone(), (**vt).clone());
                     let stem = self.hash_fns(&t)?;
                     let h = self.tmp();
@@ -1871,7 +2038,11 @@ impl Steel {
                             ity(&vt)
                         ));
                     }
-                    return Ok(Some(Val { ok: "true".into(), v: h, ty: t }));
+                    return Ok(Some(Val {
+                        ok: "true".into(),
+                        v: h,
+                        ty: t,
+                    }));
                 }
                 if !is_map(&t) {
                     return err("写像リテラルに写像でない型が求められている", e.span);
@@ -1885,15 +2056,22 @@ impl Steel {
                     };
                     self.map_put(&m, &t, kv, vv, e.span)?;
                 }
-                Ok(Some(Val { ok: "true".into(), v: m, ty: t }))
+                Ok(Some(Val {
+                    ok: "true".into(),
+                    v: m,
+                    ty: t,
+                }))
             }
 
             E::If(i) => self.if_expr(i, want, e.span).map(Some),
             E::Loop(body) => self.loop_expr(None, body, e.span).map(Some),
             E::While { cond, body } => self.loop_expr(Some(cond), body, e.span).map(Some),
-            E::NFor { name, start, count, body } => {
-                self.nfor(name, start, count, body, e.span).map(Some)
-            }
+            E::NFor {
+                name,
+                start,
+                count,
+                body,
+            } => self.nfor(name, start, count, body, e.span).map(Some),
             E::Switch { subject, arms } => self.switch(subject, arms, e.span).map(Some),
 
             E::Escape(x) => {
@@ -1912,14 +2090,20 @@ impl Steel {
                 // **注釈は式の中まで届く**（C-100）
                 self.want = Some(self.resolve(&ty.value));
                 let v = self.expr(expr)?;
-                let Some(v) = v else { return err("注釈する値が無い", e.span) };
+                let Some(v) = v else {
+                    return err("注釈する値が無い", e.span);
+                };
                 let t = self.resolve(&ty.value);
                 if width(&t).is_none() && !is_float(&t) && !is_heap(&t) {
                     return err("STEEL はまだ数と集合体しか扱えない", e.span);
                 }
                 // **包みを剥がしても置き場は変わらない**（S-2）。数だけ幅を合わせる
                 let out = if is_heap(&t) {
-                    Val { ok: v.ok, v: v.v, ty: t }
+                    Val {
+                        ok: v.ok,
+                        v: v.v,
+                        ty: t,
+                    }
                 } else {
                     self.conv_value(v, &t)
                 };
@@ -1978,7 +2162,11 @@ impl Steel {
 "
             )
         } else {
-            let (lt, gt) = if signed(kty) { ("slt", "sgt") } else { ("ult", "ugt") };
+            let (lt, gt) = if signed(kty) {
+                ("slt", "sgt")
+            } else {
+                ("ult", "ugt")
+            };
             format!(
                 "  %lt = icmp {lt} {kt} %kv, %k\n  \
                  %gt = icmp {gt} {kt} %kv, %k\n  \
@@ -2046,7 +2234,9 @@ impl Steel {
             "0".to_string()
         };
         let out = self.tmp();
-        self.emit(&format!("{out} = select i1 {big}, i{w} {spill}, i{w} {raw}"));
+        self.emit(&format!(
+            "{out} = select i1 {big}, i{w} {spill}, i{w} {raw}"
+        ));
         let _ = ty;
         out
     }
@@ -2073,7 +2263,9 @@ impl Steel {
     }
 
     fn hash_ent_ty(&mut self, ht: &ValueType) -> String {
-        let ValueType::Hash(k, v) = ht else { return "%err".into() };
+        let ValueType::Hash(k, v) = ht else {
+            return "%err".into();
+        };
         format!("%hent.{}_{}", type_tag(k), type_tag(v))
     }
 
@@ -2115,16 +2307,23 @@ impl Steel {
                 ("fadd double %k, 0.0", "fadd double %ek, 0.0")
             };
             (
-                format!("  %kd = {}
+                format!(
+                    "  %kd = {}
   %kw = call i64 @vaak.fkey(double %kd)
                            %hv = call i64 @vaak.hash.i64(i64 %kw)
-", ext.0),
-                format!("  %ekd = {}
+",
+                    ext.0
+                ),
+                format!(
+                    "  %ekd = {}
   %eka = call i64 @vaak.fkey(double %ekd)
                            %kd2 = {}
   %ekb = call i64 @vaak.fkey(double %kd2)
                            %same = icmp eq i64 %eka, %ekb
-", ext.1, ext.0.replace("%k,", "%k,")),
+",
+                    ext.1,
+                    ext.0.replace("%k,", "%k,")
+                ),
             )
         } else {
             let w = width(&kt).unwrap_or(64);
@@ -2403,7 +2602,10 @@ impl Steel {
         };
         let f = self.map_find_fn(&kt)?;
         let r = self.tmp();
-        self.emit(&format!("{r} = call {{ i64, i1 }} {f}(ptr {m}, {} {kc})", ity(&kt)));
+        self.emit(&format!(
+            "{r} = call {{ i64, i1 }} {f}(ptr {m}, {} {kc})",
+            ity(&kt)
+        ));
         let at = self.tmp();
         self.emit(&format!("{at} = extractvalue {{ i64, i1 }} {r}, 0"));
         let hit = self.tmp();
@@ -2412,7 +2614,9 @@ impl Steel {
         let after = self.label("put.set");
         self.cbr(&hit, &after, &ins);
         self.place(&ins);
-        self.emit(&format!("call void @vaak.map.reserve(ptr {m}, i64 {ks}, i64 {vs})"));
+        self.emit(&format!(
+            "call void @vaak.map.reserve(ptr {m}, i64 {ks}, i64 {vs})"
+        ));
         self.emit(&format!(
             "call void @vaak.map.open(ptr {m}, i64 {at}, i64 {ks}, i64 {vs})"
         ));
@@ -2420,14 +2624,20 @@ impl Steel {
         let keys = self.tmp();
         self.emit(&format!("{keys} = call ptr @vaak.map.keys(ptr {m})"));
         let kp = self.tmp();
-        self.emit(&format!("{kp} = getelementptr {}, ptr {keys}, i64 {at}", ity(&kt)));
+        self.emit(&format!(
+            "{kp} = getelementptr {}, ptr {keys}, i64 {at}",
+            ity(&kt)
+        ));
         self.emit(&format!("store {} {kc}, ptr {kp}", ity(&kt)));
         self.br(&after);
         self.place(&after);
         let vals = self.tmp();
         self.emit(&format!("{vals} = call ptr @vaak.map.vals(ptr {m})"));
         let vp = self.tmp();
-        self.emit(&format!("{vp} = getelementptr {}, ptr {vals}, i64 {at}", ity(&vt)));
+        self.emit(&format!(
+            "{vp} = getelementptr {}, ptr {vals}, i64 {at}",
+            ity(&vt)
+        ));
         self.emit(&format!("store {} {vc}, ptr {vp}", ity(&vt)));
         Ok(())
     }
@@ -2441,7 +2651,10 @@ impl Steel {
         let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
         let f = self.map_find_fn(&kt)?;
         let r = self.tmp();
-        self.emit(&format!("{r} = call {{ i64, i1 }} {f}(ptr {m}, {} {kc})", ity(&kt)));
+        self.emit(&format!(
+            "{r} = call {{ i64, i1 }} {f}(ptr {m}, {} {kc})",
+            ity(&kt)
+        ));
         let at = self.tmp();
         self.emit(&format!("{at} = extractvalue {{ i64, i1 }} {r}, 0"));
         let hit = self.tmp();
@@ -2473,7 +2686,11 @@ impl Steel {
         self.place(&after);
         let out = self.tmp();
         self.emit(&format!("{out} = load {vty}, ptr {slot}"));
-        Ok(Val { ok: hit, v: out, ty: vt })
+        Ok(Val {
+            ok: hit,
+            v: out,
+            ty: vt,
+        })
     }
 
     /// 場所への**読み・演算・書き**。`:=` なら読まずに書く。
@@ -2497,21 +2714,21 @@ impl Steel {
         }
         let cur = self.tmp();
         self.emit(&format!("{cur} = load {}, ptr {ptr}", ity(ty)));
-        let lv = Val { ok: "true".into(), v: cur, ty: ty.clone() };
+        let lv = Val {
+            ok: "true".into(),
+            v: cur,
+            ty: ty.clone(),
+        };
         Ok(self.binary(b, lv, r, span)?.v)
     }
 
     /// `??` — **左が値なら右は走らない。**
-    fn coalesce(
-        &mut self,
-        lhs: &Expr,
-        rhs: &Expr,
-        want: Option<ValueType>,
-        span: Span,
-    ) -> R<Val> {
+    fn coalesce(&mut self, lhs: &Expr, rhs: &Expr, want: Option<ValueType>, span: Span) -> R<Val> {
         self.want = want.clone();
         let l = self.expr(lhs)?;
-        let Some(l) = l else { return err("`??` の左に領域が無い", span) };
+        let Some(l) = l else {
+            return err("`??` の左に領域が無い", span);
+        };
         // `E ?? D : T` の T は左辺の型である（C-29）。脱出も式としては
         // 仮の i64 paradox を返すので、右辺から型を取ると集合体の名前型を失う。
         let ty = l.ty.clone();
@@ -2564,7 +2781,9 @@ impl Steel {
 
         for (cond, body) in &i.arms {
             let c = self.expr(cond)?;
-            let Some(c) = c else { return err("`if` の条件に値が無い", cond.span) };
+            let Some(c) = c else {
+                return err("`if` の条件に値が無い", cond.span);
+            };
             let b = self.nonzero(&c);
             let yes = self.label("if.yes");
             let no = self.label("if.no");
@@ -2620,7 +2839,9 @@ impl Steel {
 
         if let Some(c) = cond {
             let cv = self.expr(c)?;
-            let Some(cv) = cv else { return err("`while` の条件に値が無い", c.span) };
+            let Some(cv) = cv else {
+                return err("`while` の条件に値が無い", c.span);
+            };
             let b = self.nonzero(&cv);
             let go = self.label("loop.go");
             let out = self.label("loop.out");
@@ -2629,7 +2850,14 @@ impl Steel {
             // 条件で終わったときは**回数が値**
             let n = self.tmp();
             self.emit(&format!("{n} = load i64, ptr {count_slot}"));
-            self.leave(1, Some(Val { ok: "true".into(), v: n, ty: ValueType::I64 }))?;
+            self.leave(
+                1,
+                Some(Val {
+                    ok: "true".into(),
+                    v: n,
+                    ty: ValueType::I64,
+                }),
+            )?;
             self.place(&go);
         }
 
@@ -2702,7 +2930,14 @@ impl Steel {
         self.place(&out);
         let fin = self.tmp();
         self.emit(&format!("{fin} = load i64, ptr {count_slot}"));
-        self.leave(1, Some(Val { ok: "true".into(), v: fin, ty: ValueType::I64 }))?;
+        self.leave(
+            1,
+            Some(Val {
+                ok: "true".into(),
+                v: fin,
+                ty: ValueType::I64,
+            }),
+        )?;
 
         self.place(&run);
         self.push_scope();
@@ -2749,7 +2984,9 @@ impl Steel {
     /// `switch` — **どの腕にも当たらなければ paradox**（C-39）。
     fn switch(&mut self, subject: &Expr, arms: &[Arm], span: Span) -> R<Val> {
         let s = self.expr(subject)?;
-        let Some(s) = s else { return err("`switch` の主題に値が無い", span) };
+        let Some(s) = s else {
+            return err("`switch` の主題に値が無い", span);
+        };
         let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
         self.emit(&format!("store i1 false, ptr {ok_slot}"));
@@ -2759,7 +2996,9 @@ impl Steel {
 
         for a in arms {
             let p = self.expr(&a.pattern)?;
-            let Some(p) = p else { return err("`case` に値が無い", a.span) };
+            let Some(p) = p else {
+                return err("`case` に値が無い", a.span);
+            };
             let eq = self.binary(BinOp::Eq, s.clone(), p, a.span)?;
             let hit = self.label("sw.hit");
             let next = self.label("sw.next");
@@ -2831,14 +3070,23 @@ impl Steel {
 
     /// 脱出。**段数が静的に分かっていれば `br` 一つになる。**
     fn escape(&mut self, x: &Escape) -> R<()> {
-        let Plan { depth, is_continue, payload, deferred, outward } = self.plan(x)?;
+        let Plan {
+            depth,
+            is_continue,
+            payload,
+            deferred,
+            outward,
+        } = self.plan(x)?;
         if is_continue {
             // **段を再開させる。** `break` の連なりの分だけ外へ出てから
             let idx = self
                 .stages
                 .len()
                 .checked_sub(depth.max(1))
-                .ok_or(SteelError { msg: "段が足りない".into(), span: x.span })?;
+                .ok_or(SteelError {
+                    msg: "段が足りない".into(),
+                    span: x.span,
+                })?;
             let _ = depth;
             let Some(cont) = self.stages[idx].cont.clone() else {
                 return err("`continue` の抜けた先がループではない", x.span);
@@ -2937,7 +3185,11 @@ impl Steel {
                     Some(Operand::Value(_)) => {
                         err("`continue` の被演算子は作用素式か虚無だけ", x.span)
                     }
-                    None => Ok(Plan { depth: 1, is_continue: true, ..Plan::default() }),
+                    None => Ok(Plan {
+                        depth: 1,
+                        is_continue: true,
+                        ..Plan::default()
+                    }),
                 }
             }
             EscapeKind::Flow { name, args } => {
@@ -2950,17 +3202,16 @@ impl Steel {
                 // **本体を使用位置で読み直す。** 積み荷は使用位置のもの
                 let b = self.plan(&body)?;
                 let o = inner(self, x)?;
-                Ok(Plan { payload: o.payload, ..b })
+                Ok(Plan {
+                    payload: o.payload,
+                    ..b
+                })
             }
         }
     }
 
     /// `$repeat(作用素, 回数)` — **回数が組み立て時に決まれば畳む。**
-    fn plan_repeat(
-        &mut self,
-        args: &[FlowArg],
-        x: &Escape,
-    ) -> R<Plan> {
+    fn plan_repeat(&mut self, args: &[FlowArg], x: &Escape) -> R<Plan> {
         let [FlowArg::Escape(op), FlowArg::Value(n)] = args else {
             return err("`$repeat` は作用素と回数を取る", x.span);
         };
@@ -2977,14 +3228,21 @@ impl Steel {
         let chained = matches!(&x.operand, Some(Operand::Escape(_)));
         let o = match &x.operand {
             Some(Operand::Escape(i)) => self.plan(i)?,
-            Some(Operand::Value(v)) => Plan { payload: Some(v.clone()), ..Plan::default() },
+            Some(Operand::Value(v)) => Plan {
+                payload: Some(v.clone()),
+                ..Plan::default()
+            },
             None => Plan::default(),
         };
         let left = b.depth * times as usize;
         Ok(Plan {
             depth: left + o.depth,
             // 繋いだなら**内側が種類を決める**
-            is_continue: if chained { o.is_continue } else { b.is_continue },
+            is_continue: if chained {
+                o.is_continue
+            } else {
+                b.is_continue
+            },
             payload: o.payload,
             deferred: if chained { o.deferred } else { b.deferred },
             // **内側の印は左の段数だけ後ろへずれる**
@@ -2995,13 +3253,16 @@ impl Steel {
     /// 式の指す**枠**（値そのものではない）。書き戻しに要る。
     fn slot(&mut self, e: &Expr) -> R<(String, ValueType)> {
         match &e.kind {
-            ExprKind::Name(n) => self
-                .addr(n)
-                .ok_or(SteelError { msg: format!("知らない名前 `{n}`"), span: e.span }),
+            ExprKind::Name(n) => self.addr(n).ok_or(SteelError {
+                msg: format!("知らない名前 `{n}`"),
+                span: e.span,
+            }),
             ExprKind::Paren(v) if v.len() == 1 => self.slot(&v[0]),
             ExprKind::Field { base, name } => {
                 let b = self.expr(base)?;
-                let Some(b) = b else { return err("受け手に値が無い", base.span) };
+                let Some(b) = b else {
+                    return err("受け手に値が無い", base.span);
+                };
                 let ValueType::Named(sname) = &b.ty else {
                     return err("欄を持つのは構造体だけ", base.span);
                 };
@@ -3021,13 +3282,7 @@ impl Steel {
     }
 
     /// `a.push(v)` `a.pop()` `a.clear()` — **場所を書き換える。**
-    fn mutating_method(
-        &mut self,
-        base: &Expr,
-        name: &str,
-        args: &[Expr],
-        span: Span,
-    ) -> R<Region> {
+    fn mutating_method(&mut self, base: &Expr, name: &str, args: &[Expr], span: Span) -> R<Region> {
         let (slot, ty) = self.slot(base)?;
         if !is_heap(&ty) {
             return err("押し引きできるのは集合体だけ", base.span);
@@ -3050,13 +3305,17 @@ impl Steel {
             if name != "remove" {
                 return err(format!("`{name}` は hash に使えない"), span);
             }
-            let ValueType::Hash(kt, vt) = &ty else { unreachable!() };
+            let ValueType::Hash(kt, vt) = &ty else {
+                unreachable!()
+            };
             let (kt, vt) = ((**kt).clone(), (**vt).clone());
             let Some(a) = args.first() else {
                 return err("`remove` は鍵を一つ取る", span);
             };
             let k = self.expr(a)?;
-            let Some(k) = k else { return err("鍵に値が無い", a.span) };
+            let Some(k) = k else {
+                return err("鍵に値が無い", a.span);
+            };
             let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
             let stem = self.hash_fns(&ty)?;
             let r = self.tmp();
@@ -3068,7 +3327,10 @@ impl Steel {
             let v = self.tmp();
             self.emit(&format!("{v} = extractvalue {{ {}, i1 }} {r}, 0", ity(&vt)));
             let ok = self.tmp();
-            self.emit(&format!("{ok} = extractvalue {{ {}, i1 }} {r}, 1", ity(&vt)));
+            self.emit(&format!(
+                "{ok} = extractvalue {{ {}, i1 }} {r}, 1",
+                ity(&vt)
+            ));
             return Ok(Some(Val { ok, v, ty: vt }));
         }
         // **写像の `remove` は鍵で抜く。** 添字ではない
@@ -3082,13 +3344,17 @@ impl Steel {
             if name != "remove" {
                 return err(format!("`{name}` は写像に使えない"), span);
             }
-            let ValueType::Map(kt, vt) = &ty else { unreachable!() };
+            let ValueType::Map(kt, vt) = &ty else {
+                unreachable!()
+            };
             let (kt, vt) = ((**kt).clone(), (**vt).clone());
             let Some(a) = args.first() else {
                 return err("`remove` は鍵を一つ取る", span);
             };
             let k = self.expr(a)?;
-            let Some(k) = k else { return err("鍵に値が無い", a.span) };
+            let Some(k) = k else {
+                return err("鍵に値が無い", a.span);
+            };
             let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
             let f = self.map_find_fn(&kt)?;
             let r = self.tmp();
@@ -3148,7 +3414,9 @@ impl Steel {
                     return err("`push` は値を一つ取る", span);
                 };
                 let v = self.expr(a)?;
-                let Some(v) = v else { return err("押す値が無い", a.span) };
+                let Some(v) = v else {
+                    return err("押す値が無い", a.span);
+                };
                 // **集合体は自分の要素の型を知っている**（C-94）
                 let c = if is_heap(&el) {
                     self.deep_copy(&v.v.clone(), &el)
@@ -3179,7 +3447,11 @@ impl Steel {
                 let out = self.tmp();
                 self.emit(&format!("{out} = load {}, ptr {g}", ity(&el)));
                 self.emit(&format!("store i64 {safe}, ptr {cur}"));
-                Ok(Some(Val { ok: some, v: out, ty: el }))
+                Ok(Some(Val {
+                    ok: some,
+                    v: out,
+                    ty: el,
+                }))
             }
             // `a.insert(i, v)` — **枠の外なら何も起きない**（paradox）
             "insert" => {
@@ -3237,7 +3509,9 @@ impl Steel {
                     return err("`remove` は添字を一つ取る", span);
                 };
                 let i = self.expr(ia)?;
-                let Some(i) = i else { return err("`remove` の添字に値が無い", ia.span) };
+                let Some(i) = i else {
+                    return err("`remove` の添字に値が無い", ia.span);
+                };
                 let idx = self.widen64(&i);
                 let n = self.coll_len(&cur);
                 let (ok, safe) = self.bounds(&cur, &idx);
@@ -3276,12 +3550,10 @@ impl Steel {
         match &e.kind {
             ExprKind::Int(t) => t.parse().ok(),
             ExprKind::Paren(v) if v.len() == 1 => self.const_int(&v[0]),
-            ExprKind::Call { callee, args } if args.is_empty() => {
-                match &callee.kind {
-                    ExprKind::Name(n) if n == "getdepth" => Some(self.stages.len() as i128),
-                    _ => None,
-                }
-            }
+            ExprKind::Call { callee, args } if args.is_empty() => match &callee.kind {
+                ExprKind::Name(n) if n == "getdepth" => Some(self.stages.len() as i128),
+                _ => None,
+            },
             ExprKind::Binary { op, lhs, rhs } => {
                 let (a, b) = (self.const_int(lhs)?, self.const_int(rhs)?);
                 match op {
@@ -3303,7 +3575,10 @@ impl Steel {
         // **書き換えるメンバ関数は場所を要る。** 伸ばすと置き場が変わりうるので、
         // 新しい置き場を**元の枠へ書き戻さねばならない**
         if let ExprKind::Field { base, name } = &callee.kind {
-            if matches!(name.as_str(), "push" | "pop" | "clear" | "insert" | "remove") {
+            if matches!(
+                name.as_str(),
+                "push" | "pop" | "clear" | "insert" | "remove"
+            ) {
                 return self.mutating_method(base, name, args, span);
             }
         }
@@ -3316,7 +3591,9 @@ impl Steel {
         // 集合体のメンバ関数
         if let ExprKind::Field { base, name } = &callee.kind {
             let b = self.expr(base)?;
-            let Some(b) = b else { return err("受け手に値が無い", base.span) };
+            let Some(b) = b else {
+                return err("受け手に値が無い", base.span);
+            };
             // **数のメンバ関数**（S-23）。LLVM の命令へ落ちる
             if crate::interp::is_num_method(name) {
                 return self.num_method(b, name, args, span).map(Some);
@@ -3327,16 +3604,24 @@ impl Steel {
             return match name.as_str() {
                 "len" => {
                     let n = self.coll_len(&b.v.clone());
-                    Ok(Some(Val { ok: b.ok, v: n, ty: ValueType::I64 }))
+                    Ok(Some(Val {
+                        ok: b.ok,
+                        v: n,
+                        ty: ValueType::I64,
+                    }))
                 }
                 "has" if is_hash(&b.ty) => {
-                    let ValueType::Hash(kt, _) = &b.ty else { unreachable!() };
+                    let ValueType::Hash(kt, _) = &b.ty else {
+                        unreachable!()
+                    };
                     let kt = (**kt).clone();
                     let Some(a) = args.first() else {
                         return err("`has` は鍵を一つ取る", span);
                     };
                     let k = self.expr(a)?;
-                    let Some(k) = k else { return err("鍵に値が無い", a.span) };
+                    let Some(k) = k else {
+                        return err("鍵に値が無い", a.span);
+                    };
                     let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
                     let stem = self.hash_fns(&b.ty.clone())?;
                     let at = self.tmp();
@@ -3347,11 +3632,17 @@ impl Steel {
                     ));
                     let hit = self.tmp();
                     self.emit(&format!("{hit} = icmp sge i64 {at}, 0"));
-                    Ok(Some(Val { ok: b.ok, v: hit, ty: ValueType::U1 }))
+                    Ok(Some(Val {
+                        ok: b.ok,
+                        v: hit,
+                        ty: ValueType::U1,
+                    }))
                 }
                 // `h.keys()` — **入れた順**（C-98）。穴は飛ばす
                 "keys" if is_hash(&b.ty) => {
-                    let ValueType::Hash(kt, _) = &b.ty else { unreachable!() };
+                    let ValueType::Hash(kt, _) = &b.ty else {
+                        unreachable!()
+                    };
                     let kt = (**kt).clone();
                     let at_ty = ValueType::Array(Box::new(kt.clone()));
                     let live = self.coll_len(&b.v.clone());
@@ -3422,17 +3713,25 @@ impl Steel {
                     self.emit(&format!("store i64 {i2}, ptr {ix}"));
                     self.br(&head);
                     self.place(&done);
-                    Ok(Some(Val { ok: b.ok, v: arr, ty: at_ty }))
+                    Ok(Some(Val {
+                        ok: b.ok,
+                        v: arr,
+                        ty: at_ty,
+                    }))
                 }
                 // `m.has(k)` — **引くだけ。値は取り出さない**
                 "has" if is_map(&b.ty) => {
-                    let ValueType::Map(kt, _) = &b.ty else { unreachable!() };
+                    let ValueType::Map(kt, _) = &b.ty else {
+                        unreachable!()
+                    };
                     let kt = (**kt).clone();
                     let Some(a) = args.first() else {
                         return err("`has` は鍵を一つ取る", span);
                     };
                     let k = self.expr(a)?;
-                    let Some(k) = k else { return err("鍵に値が無い", a.span) };
+                    let Some(k) = k else {
+                        return err("鍵に値が無い", a.span);
+                    };
                     let kc = self.conv(&k.v.clone(), &k.ty.clone(), &kt);
                     let f = self.map_find_fn(&kt)?;
                     let r = self.tmp();
@@ -3444,13 +3743,19 @@ impl Steel {
                     let hit = self.tmp();
                     self.emit(&format!("{hit} = extractvalue {{ i64, i1 }} {r}, 1"));
                     // **`u1` は `i1` である。** 広げない
-                    Ok(Some(Val { ok: b.ok, v: hit, ty: ValueType::U1 }))
+                    Ok(Some(Val {
+                        ok: b.ok,
+                        v: hit,
+                        ty: ValueType::U1,
+                    }))
                 }
                 // `m.keys()` — **鍵の配列を作る。** 並びは鍵の順（既にそうなっている）
                 //
                 // **確保が呼び出しとして書かれている**（C-6）。高いことが見える
                 "keys" if is_map(&b.ty) => {
-                    let ValueType::Map(kt, _) = &b.ty else { unreachable!() };
+                    let ValueType::Map(kt, _) = &b.ty else {
+                        unreachable!()
+                    };
                     let kt = (**kt).clone();
                     let at = ValueType::Array(Box::new(kt.clone()));
                     let n = self.coll_len(&b.v.clone());
@@ -3493,7 +3798,11 @@ impl Steel {
                         self.br(&head);
                         self.place(&done);
                     }
-                    Ok(Some(Val { ok: b.ok, v: arr, ty: at }))
+                    Ok(Some(Val {
+                        ok: b.ok,
+                        v: arr,
+                        ty: at,
+                    }))
                 }
                 _ => err(format!("`{name}` は STEEL がまだ扱えない"), span),
             };
@@ -3532,7 +3841,9 @@ impl Steel {
             // **引数の型が式の中まで届く**（C-100）
             self.want = Some(ty.clone());
             let v = self.expr(a)?;
-            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            let Some(v) = v else {
+                return err("引数に値が無い", a.span);
+            };
             // **値引数は深く複製する**（C-20）。
             let c = if is_heap(&ty) {
                 self.deep_copy(&v.v.clone(), &ty)
@@ -3547,8 +3858,10 @@ impl Steel {
             Some(t) => self.resolve(&t.value),
             None => ValueType::I64,
         };
-        let sig: Vec<String> =
-            vals.iter().map(|(t, v, ok)| format!("{t} {v}, i1 {ok}")).collect();
+        let sig: Vec<String> = vals
+            .iter()
+            .map(|(t, v, ok)| format!("{t} {v}, i1 {ok}"))
+            .collect();
         let rsig = self.ret_sig_of(name, &ret);
         let t = self.tmp();
         self.emit(&format!(
@@ -3564,7 +3877,11 @@ impl Steel {
         if self.outward_fns.contains(name) {
             let n = self.tmp();
             self.emit(&format!("{n} = extractvalue {rsig} {t}, 2"));
-            let val = Val { ok: ok.clone(), v: v.clone(), ty: ret.clone() };
+            let val = Val {
+                ok: ok.clone(),
+                v: v.clone(),
+                ty: ret.clone(),
+            };
             self.resume_outward(&n, val, span)?;
         }
         Ok(Some(Val { ok, v, ty: ret }))
@@ -3609,23 +3926,22 @@ impl Steel {
         };
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
-            if width(&p.ty.value).is_none()
-                && !is_float(&p.ty.value)
-                && !is_heap(&p.ty.value)
-            {
+            if width(&p.ty.value).is_none() && !is_float(&p.ty.value) && !is_heap(&p.ty.value) {
                 return err("STEEL はまだ数と集合体の引数しか扱えない", p.span);
             }
             let pt = self.resolve(&p.ty.value);
-            let abi = if p.ty.is_alias { "ptr".to_string() } else { ity(&pt) };
+            let abi = if p.ty.is_alias {
+                "ptr".to_string()
+            } else {
+                ity(&pt)
+            };
             params.push(format!("{abi} %p{i}, i1 %pok{i}"));
         }
 
         // 可変な集合体の別名からは、grow や欄への代入で確保が呼び出し元へ逃げる。
         // その関数だけは場を戻さない（S-21）。読み取り専用の別名と数の別名は戻せる。
         let keeps_arena = f.params.iter().any(|p| {
-            p.ty.is_alias
-                && p.kind == BindKind::Var
-                && is_heap(&self.resolve(&p.ty.value))
+            p.ty.is_alias && p.kind == BindKind::Var && is_heap(&self.resolve(&p.ty.value))
         });
         let mark = if keeps_arena {
             None
@@ -3699,7 +4015,10 @@ impl Steel {
         let a = self.tmp();
         self.emit(&format!("{a} = insertvalue {sig} undef, i1 {out_ok}, 0"));
         let b = self.tmp();
-        self.emit(&format!("{b} = insertvalue {sig} {a}, {} {conv}, 1", ity(&ret)));
+        self.emit(&format!(
+            "{b} = insertvalue {sig} {a}, {} {conv}, 1",
+            ity(&ret)
+        ));
         let last = match self.esc_slot.clone() {
             Some(slot) => {
                 // **残りの段送りを持ち帰る。** 零なら普通の返りである
@@ -4199,8 +4518,10 @@ pub fn compile(prog: &Program) -> R<String> {
     let code = s.tmp();
     s.emit(&format!("{code} = select i1 {}, i32 {t}, i32 0", top.ok));
     s.emit(&format!("ret i32 {code}"));
-    out.push_str(&format!("define i32 @main() {{\nentry:\n{}{}}}\n", s.head, s.body));
-
+    out.push_str(&format!(
+        "define i32 @main() {{\nentry:\n{}{}}}\n",
+        s.head, s.body
+    ));
 
     // **宣言と定数は最後に集める。** 組み立ての途中で増えるので
     let mut head = String::from("; Vaak — STEEL（LLVM IR）\n");
@@ -4307,7 +4628,9 @@ impl Steel {
                 b.ty.clone()
             });
             let v = self.expr(a)?;
-            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            let Some(v) = v else {
+                return err("引数に値が無い", a.span);
+            };
             av.push(v);
         }
         let ty = b.ty.clone();
@@ -4337,13 +4660,20 @@ impl Steel {
         let a0 = av.first().map(|v| (t.clone(), v.v.clone()));
         let a1 = av.get(1).map(|v| (t.clone(), v.v.clone()));
         let need2 = |a: &Option<(String, String)>| -> R<(String, String)> {
-            a.clone().ok_or(SteelError { msg: format!("`{name}` の引数が足りない"), span })
+            a.clone().ok_or(SteelError {
+                msg: format!("`{name}` の引数が足りない"),
+                span,
+            })
         };
 
         let raw = match name {
-            "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "round" | "exp" | "log2"
-            | "log10" | "sin" | "cos" | "tan" => {
-                let n = if name == "abs" { "fabs".to_string() } else { name.to_string() };
+            "abs" | "sqrt" | "floor" | "ceil" | "trunc" | "round" | "exp" | "log2" | "log10"
+            | "sin" | "cos" | "tan" => {
+                let n = if name == "abs" {
+                    "fabs".to_string()
+                } else {
+                    name.to_string()
+                };
                 self.intr(&one(&n), &t, &[x])
             }
             // `ln` は LLVM では `log` である
@@ -4375,7 +4705,11 @@ impl Steel {
         // **非有限は値にしない**（C-84）
         let fin = self.finite(&raw, &b.ty.clone());
         let ok = self.both_ok(&ok, &fin);
-        Ok(Val { ok, v: raw, ty: b.ty })
+        Ok(Val {
+            ok,
+            v: raw,
+            ty: b.ty,
+        })
     }
 
     fn int_method(
@@ -4393,7 +4727,10 @@ impl Steel {
         let y = || -> R<(String, String)> {
             av.first()
                 .map(|v| (t.clone(), v.v.clone()))
-                .ok_or(SteelError { msg: format!("`{name}` は値を一つ取る"), span })
+                .ok_or(SteelError {
+                    msg: format!("`{name}` は値を一つ取る"),
+                    span,
+                })
         };
         // 数える系は `i64` を返す
         let count = |me: &mut Self, v: String| -> Val {
@@ -4404,7 +4741,11 @@ impl Steel {
                 me.emit(&format!("{z} = zext i{w} {v} to i64"));
                 z
             };
-            Val { ok: ok.clone(), v: out, ty: ValueType::I64 }
+            Val {
+                ok: ok.clone(),
+                v: out,
+                ty: ValueType::I64,
+            }
         };
 
         let raw = match name {
@@ -4457,11 +4798,16 @@ impl Steel {
             }
             // **`fshl` / `fshr` は幅で割った余りだけ回す。** 自分で丸めなくてよい
             "rotate_left" | "rotate_right" => {
-                let n = av
-                    .first()
-                    .ok_or(SteelError { msg: format!("`{name}` は桁数を一つ取る"), span })?;
+                let n = av.first().ok_or(SteelError {
+                    msg: format!("`{name}` は桁数を一つ取る"),
+                    span,
+                })?;
                 let nn = self.conv(&n.v.clone(), &n.ty.clone(), &b.ty.clone());
-                let f = if name == "rotate_left" { "fshl" } else { "fshr" };
+                let f = if name == "rotate_left" {
+                    "fshl"
+                } else {
+                    "fshr"
+                };
                 self.intr(
                     &format!("@llvm.{f}.i{w}"),
                     &t,
@@ -4469,7 +4815,11 @@ impl Steel {
                 )
             }
             "saturating_add" | "saturating_sub" => {
-                let op = if name == "saturating_add" { "add" } else { "sub" };
+                let op = if name == "saturating_add" {
+                    "add"
+                } else {
+                    "sub"
+                };
                 let n = if sg { "s" } else { "u" };
                 self.intr(&format!("@llvm.{n}{op}.sat.i{w}"), &t, &[x, y()?])
             }
@@ -4498,16 +4848,24 @@ impl Steel {
                 self.need(&format!("declare {dt} @llvm.{cmin}.{dt}({dt}, {dt})"));
                 self.need(&format!("declare {dt} @llvm.{cmax}.{dt}({dt}, {dt})"));
                 let c1 = self.tmp();
-                self.emit(&format!("{c1} = call {dt} @llvm.{cmin}.{dt}({dt} {m}, {dt} {lo})"));
+                self.emit(&format!(
+                    "{c1} = call {dt} @llvm.{cmin}.{dt}({dt} {m}, {dt} {lo})"
+                ));
                 let c2 = self.tmp();
-                self.emit(&format!("{c2} = call {dt} @llvm.{cmax}.{dt}({dt} {c1}, {dt} {hi})"));
+                self.emit(&format!(
+                    "{c2} = call {dt} @llvm.{cmax}.{dt}({dt} {c1}, {dt} {hi})"
+                ));
                 let out = self.tmp();
                 self.emit(&format!("{out} = trunc {dt} {c2} to i{w}"));
                 out
             }
             _ => return err(format!("`{name}` は整数に使えない"), span),
         };
-        Ok(Val { ok, v: raw, ty: b.ty })
+        Ok(Val {
+            ok,
+            v: raw,
+            ty: b.ty,
+        })
     }
 }
 
@@ -4561,7 +4919,9 @@ impl Steel {
         }
 
         let count = self.expr(n)?;
-        let Some(count) = count else { return err("`$repeat` の回数に値が無い", n.span) };
+        let Some(count) = count else {
+            return err("`$repeat` の回数に値が無い", n.span);
+        };
         let times = self.widen64(&count);
 
         // **被演算子が作用素式なら鎖として繋ぐ**（C-101）。
@@ -4583,10 +4943,17 @@ impl Steel {
                 None => None,
             },
         };
-        let is_continue = if chained { tail.is_continue } else { is_continue };
+        let is_continue = if chained {
+            tail.is_continue
+        } else {
+            is_continue
+        };
 
         let here = self.stages.len();
-        let vty = payload.as_ref().map(|v| v.ty.clone()).unwrap_or(ValueType::I64);
+        let vty = payload
+            .as_ref()
+            .map(|v| v.ty.clone())
+            .unwrap_or(ValueType::I64);
         // 零段のときの値を置く枡
         let slot = self.alloca("i128");
         let ok_slot = self.alloca("i1");
@@ -4637,7 +5004,10 @@ impl Steel {
         let pick = self.label("rep.pick");
         self.cbr(&none, &zero, &pick);
         self.place(&pick);
-        self.emit(&format!("switch i64 {t}, label %{over} [ {} ]", arms.join(" ")));
+        self.emit(&format!(
+            "switch i64 {t}, label %{over} [ {} ]",
+            arms.join(" ")
+        ));
         self.done = true;
 
         for (k, l) in labels {
@@ -4759,7 +5129,9 @@ fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
             go(cond);
             go(body);
         }
-        ExprKind::NFor { start, count, body, .. } => {
+        ExprKind::NFor {
+            start, count, body, ..
+        } => {
             go(start);
             go(count);
             go(body);
@@ -4815,7 +5187,10 @@ impl Steel {
             arms.push(format!("i64 {k}, label %{l}"));
             labels.push((k, l));
         }
-        self.emit(&format!("switch i64 {n}, label %{over} [ {} ]", arms.join(" ")));
+        self.emit(&format!(
+            "switch i64 {n}, label %{over} [ {} ]",
+            arms.join(" ")
+        ));
         self.done = true;
         for (k, l) in labels {
             self.place(&l);
@@ -4861,7 +5236,10 @@ impl Steel {
         let vals = self.tmp();
         self.emit(&format!("{vals} = call ptr @vaak.map.vals(ptr {})", m.v));
         let vp = self.tmp();
-        self.emit(&format!("{vp} = getelementptr {}, ptr {vals}, i64 {at}", ity(&vt)));
+        self.emit(&format!(
+            "{vp} = getelementptr {}, ptr {vals}, i64 {at}",
+            ity(&vt)
+        ));
         let out = self.rmw(op, &vp, &vt, r, span)?;
         self.emit(&format!("store {} {out}, ptr {vp}", ity(&vt)));
         Ok(())
@@ -4889,7 +5267,9 @@ impl Steel {
         let ents = self.hash_entries(&h.v.clone());
         let ent = self.hash_ent_ty(&h.ty.clone());
         let vp = self.tmp();
-        self.emit(&format!("{vp} = getelementptr {ent}, ptr {ents}, i64 {at}, i32 1"));
+        self.emit(&format!(
+            "{vp} = getelementptr {ent}, ptr {ents}, i64 {at}, i32 1"
+        ));
         let out = self.rmw(op, &vp, &vt, r, span)?;
         self.emit(&format!("store {} {out}, ptr {vp}", ity(&vt)));
         Ok(())
@@ -4940,11 +5320,20 @@ impl Steel {
             ExprKind::Name(n) => self.written.get(n).cloned(),
             ExprKind::Paren(v) if v.len() == 1 => return self.static_recv_type(&v[0]),
             ExprKind::Field { base, name } => {
-                let Some(t) = self.static_recv_type(base)? else { return Ok(None) };
+                let Some(t) = self.static_recv_type(base)? else {
+                    return Ok(None);
+                };
                 // 欄を辿るときだけは剥がす——構造体でなければ欄が無い
-                let ValueType::Named(sn) = self.resolve(&t) else { return Ok(None) };
-                let Some(fields) = self.fields_of(&sn) else { return Ok(None) };
-                fields.iter().find(|(f, _)| f == name).map(|(_, t)| t.clone())
+                let ValueType::Named(sn) = self.resolve(&t) else {
+                    return Ok(None);
+                };
+                let Some(fields) = self.fields_of(&sn) else {
+                    return Ok(None);
+                };
+                fields
+                    .iter()
+                    .find(|(f, _)| f == name)
+                    .map(|(_, t)| t.clone())
             }
             _ => None,
         })
@@ -4977,7 +5366,9 @@ impl Steel {
             }
             self.want = Some(ty.clone());
             let v = self.expr(a)?;
-            let Some(v) = v else { return err("引数に値が無い", a.span) };
+            let Some(v) = v else {
+                return err("引数に値が無い", a.span);
+            };
             let c = if is_heap(&ty) {
                 self.deep_copy(&v.v.clone(), &ty)
             } else {
@@ -4991,8 +5382,10 @@ impl Steel {
             None => ValueType::I64,
         };
         let rsig = self.ret_sig_of(key, &ret);
-        let sig: Vec<String> =
-            vals.iter().map(|(t, v, ok)| format!("{t} {v}, i1 {ok}")).collect();
+        let sig: Vec<String> = vals
+            .iter()
+            .map(|(t, v, ok)| format!("{t} {v}, i1 {ok}"))
+            .collect();
         let t = self.tmp();
         self.emit(&format!(
             "{t} = call {rsig} @vaak_{}({})",
@@ -5006,7 +5399,11 @@ impl Steel {
         if self.outward_fns.contains(key) {
             let n = self.tmp();
             self.emit(&format!("{n} = extractvalue {rsig} {t}, 2"));
-            let val = Val { ok: ok.clone(), v: v.clone(), ty: ret.clone() };
+            let val = Val {
+                ok: ok.clone(),
+                v: v.clone(),
+                ty: ret.clone(),
+            };
             self.resume_outward(&n, val, span)?;
         }
         Ok(Some(Val { ok, v, ty: ret }))

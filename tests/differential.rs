@@ -255,9 +255,7 @@ fn alias_引数は呼び出し元と同じセルを指す() {
 #[test]
 fn 値引数は呼び出し元のセルを指さない() {
     same("fn set (var x : i64) { x := 9; }; var a := 1; set(a); a");
-    same(
-        "fn set (var x : i64 array) { x[0] := 9; }; var a := [1]; set(a); a[0]",
-    );
+    same("fn set (var x : i64 array) { x[0] := 9; }; var a := [1]; set(a); a[0]");
     // 後の引数が元のセルを書いても、先の値引数は評価時点の複製。
     same(
         "fn set (var x : i64 alias) { x := 9; 0 } -> i64;
@@ -268,9 +266,7 @@ fn 値引数は呼び出し元のセルを指さない() {
 
 #[test]
 fn 同じセルに_alias_引数が二つ届くと誤りになる() {
-    same(
-        "fn f (a : i64 alias, b : i64 alias) { a } -> i64; var p := 1; f(p, p);",
-    );
+    same("fn f (a : i64 alias, b : i64 alias) { a } -> i64; var p := 1; f(p, p);");
     same(
         "fn f (a : i64 alias, b : i64 alias) { a } -> i64;
          var p := 1; var q : i64 alias &= p; f(p, q);",
@@ -284,9 +280,7 @@ fn const_別名は同じセルへのほかの経路も凍らせる() {
     same("var a := [1]; { const b : i64 array alias &= a; a[0] := 2; }; a[0]");
     same("var a := 1; { const b : i64 alias &= a; break; }; a := 2; a");
     same("var a := 1; loop { const b : i64 alias &= a; break; }; a := 2; a");
-    same(
-        "var a := 1; nfor (i, 0, 2) { const b : i64 alias &= a; continue; }; a := 2; a",
-    );
+    same("var a := 1; nfor (i, 0, 2) { const b : i64 alias &= a; continue; }; a := 2; a");
     same("fn f (const x : i64 alias) { x := 2; }; var a := 1; f(a); a");
     same("fn f (const x : i64 alias) { x; }; var a := 1; f(a); a := 2; a");
     same("fn f (const x : i64 alias) { break; }; var a := 1; f(a); a := 2; a");
@@ -406,8 +400,7 @@ fn 入れ子の置き場の数値幅は右辺の途中まで届く() {
 
 #[test]
 fn 可変メソッドの引数がレシーバを変えても変更を失わない() {
-    let source =
-        "fn add (var xs : i64 array alias) { xs.push(2); 3 } -> i64;
+    let source = "fn add (var xs : i64 array alias) { xs.push(2); 3 } -> i64;
          var xs := [1]; xs.push(add(xs)); xs[1] * 10 + xs[2]";
     let reference = vaak::interp::run(source);
     let vm = vaak::vm::run(source);
@@ -426,8 +419,7 @@ fn 名前の可変メソッドはセル上の配列を直接育てる() {
 
 #[test]
 fn 利用者定義メソッドの追加_alias_引数は呼び出し元のセルを指す() {
-    let source =
-        "struct P { var value : i64 := 0; };
+    let source = "struct P { var value : i64 := 0; };
          fn P.set (self, var target : i64 alias) { target := 9; };
          var p := new P ( );
          var target := 1;
@@ -537,7 +529,9 @@ fn hashも二つの実装で一致する() {
 /// 浮動小数の鍵は**数の順**に並び、`-0.0` は `0.0` と同じ鍵である（C-99）。
 #[test]
 fn 浮動小数の鍵も二つの実装で一致する() {
-    同じ("var m : f64 i64 map := ( 1.0 => 1, 0.0 - 2.0 => 2, 3.0 => 3 ); var k := m.keys(); k[0]");
+    同じ(
+        "var m : f64 i64 map := ( 1.0 => 1, 0.0 - 2.0 => 2, 3.0 => 3 ); var k := m.keys(); k[0]",
+    );
     同じ("var m : f64 i64 map := ( 1.0 => 1, 0.0 - 2.0 => 2 ); var k := m.keys(); k[0] < k[1]");
     同じ("var m := new f64 i64 map ( ); m[0.0] := 1; m[(0.0 - 1.0) * 0.0] := 2; m.len()");
     同じ("var h := new f64 i64 hash ( ); h[0.0] := 1; h[(0.0 - 1.0) * 0.0] := 2; h.len()");
@@ -575,7 +569,9 @@ fn 文脈の型は演算の中まで届く() {
     同じ("var x : i64 := 100 * 3 / 2; x");
     同じ("100 * 3 / 2");
     // **名前で書いても同じ答えになる**（これが揃っていなかった）
-    同じ("var a : u8 := 100; var b : u8 := 3; var c : u8 := 2; var x : u8 := 0; x := a * b / c; x");
+    同じ(
+        "var a : u8 := 100; var b : u8 := 3; var c : u8 := 2; var x : u8 := 0; x := a * b / c; x",
+    );
     // **添字は `i64` のまま。** 外の型は届かない
     同じ("var a := new i64 array(300, 0); a[299] := 7; var x : i64 := 0; x := a[299]; x");
     // **比較は左右で揃う。** 外の型は届かない
@@ -663,8 +659,10 @@ fn 十進以外の表記() {
 #[test]
 fn 包み型は関数の返りでも剥がれる() {
     同じ("wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId; mk(7) -> i64");
-    同じ("wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId;
-          fn use2 (h : NodeId) { (h -> i64) * 2 } -> i64; use2(mk(21))");
+    同じ(
+        "wrap NodeId = i64; fn mk (n : i64) { new NodeId(n) } -> NodeId;
+          fn use2 (h : NodeId) { (h -> i64) * 2 } -> i64; use2(mk(21))",
+    );
     同じ("wrap M = i64; var a : M array := [ new M(1), new M(2) ]; (a[1] ?? new M(0)) -> i64");
 }
 
@@ -714,7 +712,9 @@ fn 遅延した被演算子() {
     同じ("nfor (i, 0, 10) { if (i < 3) continue break i fi; }");
     同じ("nfor (i, 0, 10) { continue continue; }");
     同じ("var s := 0; loop { s += 1; if (s > 2) break s fi; continue break s }");
-    同じ("var s := 0; var i := 0; while (i < 9) { i += 1; if (i > 2) break i fi; continue break i }");
+    同じ(
+        "var s := 0; var i := 0; while (i < 9) { i += 1; if (i > 2) break i fi; continue break i }",
+    );
     同じ("var s := 0; nfor (i, 0, 5) { if (i == 2) continue break i fi; s += 1; }");
     同じ("nfor (i, 0, 10) { { break continue break i; }; }");
     同じ("var s := 0; nfor (i, 0, 3) { { break continue; }; s += 1; }; s");
@@ -790,5 +790,7 @@ fn 利用者定義のメンバ関数() {
     同じ("struct Q { var a : i64 array; }; fn Q.first (self) { self.a[0] ?? 0 } -> i64; var q := new Q ( a := new i64 array(2, 9) ); q.first()");
     同じ("struct Q { var a : i64 array; }; fn Q.add (var self, v : i64) { self.a.push(v); }; var q := new Q ( a := new i64 array(0, 0) ); q.add(5); q.add(7); q.a[1] ?? 0");
     同じ("struct A { let v : i64; }; struct B { let v : i64; }; fn A.get (self) { self.v * 10 } -> i64; fn B.get (self) { self.v } -> i64; let a := new A ( v := 4 ); let b := new B ( v := 7 ); a.get() + b.get()");
-    同じ("struct P { var a : i64 array; }; var p := new P ( a := new i64 array(3, 1) ); p.a.len()");
+    同じ(
+        "struct P { var a : i64 array; }; var p := new P ( a := new i64 array(3, 1) ); p.a.len()",
+    );
 }

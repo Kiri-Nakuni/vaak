@@ -105,9 +105,19 @@ pub enum Op {
     SetIndex(Span),
     SetField(u32, Span),
     /// 脱出。段数・`outward` のビット列・積み荷の有無。
-    Break { stages: u32, outward: u64, payload: bool, span: Span },
+    Break {
+        stages: u32,
+        outward: u64,
+        payload: bool,
+        span: Span,
+    },
     /// 再開。**段数を持つ**——`break continue` は二段抜けてから再開する（C-70）
-    Continue { stages: u32, outward: u64, deferred: Option<u32>, span: Span },
+    Continue {
+        stages: u32,
+        outward: u64,
+        deferred: Option<u32>,
+        span: Span,
+    },
     /// 段数が実行時に決まる脱出（`$repeat`）。上に回数がある。
     ///
     /// **`resume` は作用素が `continue` か。** 見ないと再開が離脱になる
@@ -271,11 +281,17 @@ pub fn compile_with_host(
     for (i, f) in fns.iter().enumerate() {
         let key = fn_key(f);
         c.out.fn_index.insert(key.clone(), i as u32 + 1);
-        c.fn_aliases.insert(key.clone(), f.params.iter().map(|p| p.ty.is_alias).collect());
+        c.fn_aliases.insert(
+            key.clone(),
+            f.params.iter().map(|p| p.ty.is_alias).collect(),
+        );
         c.fn_param_types
             .insert(key, f.params.iter().map(|p| p.ty.value.clone()).collect());
         if f.owner.is_some()
-            && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false)
+            && f.params
+                .first()
+                .map(|p| p.kind == BindKind::Var)
+                .unwrap_or(false)
         {
             c.var_self.insert(f.name.clone());
         }
@@ -400,7 +416,10 @@ struct CompiledPlace {
 
 impl Compiler {
     fn err<T>(&self, msg: impl Into<String>, span: Span) -> Result<T, CompileError> {
-        Err(CompileError { msg: msg.into(), span })
+        Err(CompileError {
+            msg: msg.into(),
+            span,
+        })
     }
 
     fn emit(&mut self, op: Op) -> usize {
@@ -415,10 +434,9 @@ impl Compiler {
     fn patch(&mut self, at: usize) {
         let target = self.here();
         match &mut self.chunk.ops[at] {
-            Op::Jump(t)
-            | Op::JumpIfFalse(t)
-            | Op::JumpIfParadox(t)
-            | Op::JumpIfValue(t) => *t = target,
+            Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfParadox(t) | Op::JumpIfValue(t) => {
+                *t = target
+            }
             _ => unreachable!(),
         }
     }
@@ -471,7 +489,10 @@ impl Compiler {
         }
         let s = self.chunk.nslots;
         self.chunk.nslots += 1;
-        self.scopes.last_mut().unwrap().insert(n.to_string(), (s, None));
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(n.to_string(), (s, None));
         Ok(s)
     }
 
@@ -545,7 +566,10 @@ impl Compiler {
             }
         }
         self.chunk.self_is_var = f.owner.is_some()
-            && f.params.first().map(|p| p.kind == BindKind::Var).unwrap_or(false);
+            && f.params
+                .first()
+                .map(|p| p.kind == BindKind::Var)
+                .unwrap_or(false);
         if let ExprKind::Block(items) = &f.body.kind {
             self.collect(items);
             // **返り値の型が本体の中まで届く**（C-100）
@@ -593,15 +617,19 @@ impl Compiler {
             // **リテラルは置かれた場所の型を受け取る**（C-21）。
             // 演算の途中でも同じである（C-100）
             ExprKind::Int(s) => {
-                let v = crate::interp::parse_int_pub(s, e.span)
-                    .map_err(|x| CompileError { msg: x.msg, span: x.span })?;
+                let v = crate::interp::parse_int_pub(s, e.span).map_err(|x| CompileError {
+                    msg: x.msg,
+                    span: x.span,
+                })?;
                 let v = crate::interp::coerce_lit_pub(v, &want);
                 let k = self.konst(v);
                 self.emit(Op::Const(k));
             }
             ExprKind::Float(s) => {
-                let v = crate::interp::parse_float_pub(s, e.span)
-                    .map_err(|x| CompileError { msg: x.msg, span: x.span })?;
+                let v = crate::interp::parse_float_pub(s, e.span).map_err(|x| CompileError {
+                    msg: x.msg,
+                    span: x.span,
+                })?;
                 let v = crate::interp::coerce_lit_pub(v, &want);
                 let k = self.konst(v);
                 self.emit(Op::Const(k));
@@ -752,9 +780,12 @@ impl Compiler {
             ExprKind::If(i) => self.if_expr(i, want, e.span)?,
             ExprKind::Loop(b) => self.loop_expr(None, b, e.span)?,
             ExprKind::While { cond, body } => self.while_expr(cond, body, e.span)?,
-            ExprKind::NFor { name, start, count, body } => {
-                self.nfor(name, start, count, body, e.span)?
-            }
+            ExprKind::NFor {
+                name,
+                start,
+                count,
+                body,
+            } => self.nfor(name, start, count, body, e.span)?,
             ExprKind::Switch { subject, arms } => self.switch(subject, arms, e.span)?,
 
             ExprKind::Escape(esc) => self.escape(esc, e.span)?,
@@ -819,7 +850,11 @@ impl Compiler {
         // **右は左に揃う**（C-21：暗黙変換は無い）。
         // 左が名前なら注釈の型が分かるので、それを使う
         let left_ty = self.static_type(lhs);
-        let for_lhs = if cmp { left_ty.clone() } else { want.or(left_ty.clone()) };
+        let for_lhs = if cmp {
+            left_ty.clone()
+        } else {
+            want.or(left_ty.clone())
+        };
         self.want = for_lhs.clone();
         self.expr(lhs)?;
         self.emit(Op::NeedValue(lhs.span));
@@ -935,7 +970,9 @@ impl Compiler {
             // 一段の `a[i]` は場所を heap に作らず、セルへ直接触れる。
             // 添字はそれでも右辺より先に一度だけ評価して、値スタックに保つ。
             ExprKind::Index { base, index } if matches!(base.kind, ExprKind::Name(_)) => {
-                let ExprKind::Name(name) = &base.kind else { unreachable!() };
+                let ExprKind::Name(name) = &base.kind else {
+                    unreachable!()
+                };
                 let Some(root) = self.lookup(name) else {
                     return self.err(format!("知らない名前 `{name}`"), base.span);
                 };
@@ -987,7 +1024,10 @@ impl Compiler {
                     return self.err(format!("知らない名前 `{name}`"), e.span);
                 };
                 self.emit(Op::PlaceRoot(root, e.span));
-                Ok(CompiledPlace { root, touch: PlaceTouch::Root })
+                Ok(CompiledPlace {
+                    root,
+                    touch: PlaceTouch::Root,
+                })
             }
             ExprKind::Field { base, name } => {
                 let mut place = self.compile_place(base)?;
@@ -1295,12 +1335,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn if_expr(
-        &mut self,
-        i: &If,
-        want: Option<ValueType>,
-        span: Span,
-    ) -> Result<(), CompileError> {
+    fn if_expr(&mut self, i: &If, want: Option<ValueType>, span: Span) -> Result<(), CompileError> {
         let mut ends = Vec::new();
         for (c, b) in &i.arms {
             // **条件は `u1`。** 外の型は届かない
@@ -1417,7 +1452,7 @@ impl Compiler {
             self.emit(Op::Bin(BinOp::Eq, a.span));
             let j = self.emit(Op::JumpIfFalse(0));
             self.emit(Op::Pop); // 被照合体を捨てる
-            // **腕も領域である**（C-82）。`if` の分岐と同じ理由で正規化する
+                                // **腕も領域である**（C-82）。`if` の分岐と同じ理由で正規化する
             self.emit(Op::RegionBegin);
             self.expr(&a.value)?;
             self.emit(Op::EndRegion(a.span));
@@ -1444,7 +1479,10 @@ impl Compiler {
 
 /// 第一引数が `var self` か（S-1）。**破壊するなら書き戻す。**
 fn is_var_self(p: &Program2, idx: u32) -> bool {
-    p.chunks.get(idx as usize).map(|c| c.self_is_var).unwrap_or(false)
+    p.chunks
+        .get(idx as usize)
+        .map(|c| c.self_is_var)
+        .unwrap_or(false)
 }
 
 fn is_destructive(name: &str) -> bool {
@@ -1456,7 +1494,13 @@ impl Compiler {
     fn escape(&mut self, esc: &Escape, span: Span) -> Result<(), CompileError> {
         let shape = self.shape(esc)?;
         match shape {
-            Shape::Static { stages, outward, kind, payload, deferred } => {
+            Shape::Static {
+                stages,
+                outward,
+                kind,
+                payload,
+                deferred,
+            } => {
                 if let Some(p) = &payload {
                     self.expr(p)?;
                     self.emit(Op::NeedValue(p.span));
@@ -1482,7 +1526,12 @@ impl Compiler {
                             }
                             None => None,
                         };
-                        self.emit(Op::Continue { stages, outward, deferred: d, span });
+                        self.emit(Op::Continue {
+                            stages,
+                            outward,
+                            deferred: d,
+                            span,
+                        });
                     }
                 }
             }
@@ -1532,15 +1581,19 @@ impl Compiler {
                 let base = if *outward { 1u64 } else { 0 };
                 match &esc.operand {
                     Some(Operand::Escape(inner)) => match self.shape(inner)? {
-                        Shape::Static { stages, outward: m, kind, payload, deferred } => {
-                            Shape::Static {
-                                stages: stages + 1,
-                                outward: (m << 1) | base,
-                                kind,
-                                payload,
-                                deferred,
-                            }
-                        }
+                        Shape::Static {
+                            stages,
+                            outward: m,
+                            kind,
+                            payload,
+                            deferred,
+                        } => Shape::Static {
+                            stages: stages + 1,
+                            outward: (m << 1) | base,
+                            kind,
+                            payload,
+                            deferred,
+                        },
                         d => d,
                     },
                     Some(Operand::Value(v)) => Shape::Static {
@@ -1589,7 +1642,13 @@ impl Compiler {
                     let (mut extra, mut extra_outward, mut deferred) = (0u32, 0u64, None);
                     if let Some(Operand::Escape(i)) = &esc.operand {
                         match self.shape(i)? {
-                            Shape::Static { stages, outward, kind: k, payload: pp, deferred: d } => {
+                            Shape::Static {
+                                stages,
+                                outward,
+                                kind: k,
+                                payload: pp,
+                                deferred: d,
+                            } => {
                                 extra = stages;
                                 extra_outward = outward;
                                 kind = k;
@@ -1682,9 +1741,18 @@ impl Slot {
         match self {
             Slot::Value(v) => Ok(v),
             // **消費されなかった paradox**（C-46）
-            Slot::Paradox(sp) => Err(RtErr { msg: "消費されなかった paradox".into(), span: sp }),
-            Slot::Cell(_) => Err(RtErr { msg: "セル参照は値ではない".into(), span }),
-            Slot::Place(_) => Err(RtErr { msg: "代入先の経路は値ではない".into(), span }),
+            Slot::Paradox(sp) => Err(RtErr {
+                msg: "消費されなかった paradox".into(),
+                span: sp,
+            }),
+            Slot::Cell(_) => Err(RtErr {
+                msg: "セル参照は値ではない".into(),
+                span,
+            }),
+            Slot::Place(_) => Err(RtErr {
+                msg: "代入先の経路は値ではない".into(),
+                span,
+            }),
         }
     }
     fn from_eval(e: crate::interp::Eval, span: Span) -> Result<Slot, RtErr> {
@@ -1692,9 +1760,10 @@ impl Slot {
             crate::interp::Eval::Value(v) => Ok(Slot::Value(v)),
             crate::interp::Eval::Paradox(sp) => Ok(Slot::Paradox(sp)),
             crate::interp::Eval::Akasha => Ok(Slot::Paradox(span)),
-            crate::interp::Eval::Escape(_) => {
-                Err(RtErr { msg: "ここで脱出は起きない".into(), span })
-            }
+            crate::interp::Eval::Escape(_) => Err(RtErr {
+                msg: "ここで脱出は起きない".into(),
+                span,
+            }),
         }
     }
 }
@@ -1928,10 +1997,11 @@ impl Vm<'_> {
         }
         let out = self.run();
         // 走り終わってから**取り出す**。写さない——セルはもう要らない
-        host.extend(
-            (0..n)
-                .map(|i| self.arena.take(CellId((base + i) as u32)).unwrap_or(Value::I64(0))),
-        );
+        host.extend((0..n).map(|i| {
+            self.arena
+                .take(CellId((base + i) as u32))
+                .unwrap_or(Value::I64(0))
+        }));
         let ev = match out {
             Ok(Slot::Value(v)) => Ok(crate::interp::Eval::Value(v)),
             Ok(Slot::Paradox(sp)) => Ok(crate::interp::Eval::Paradox(sp)),
@@ -1984,9 +2054,7 @@ impl Program2 {
                         None => return None,
                     }
                 }
-                Op::StoreIndex(x, touch, _) | Op::UpdateIndex(x, touch, _, _)
-                    if *x == slot =>
-                {
+                Op::StoreIndex(x, touch, _) | Op::UpdateIndex(x, touch, _, _) if *x == slot => {
                     if *touch == NO_HOST_TOUCH {
                         return None;
                     }
@@ -1995,9 +2063,7 @@ impl Program2 {
                         None => return None,
                     }
                 }
-                Op::StorePlace(x, touch, _) | Op::UpdatePlace(x, touch, _, _)
-                    if *x == slot =>
-                {
+                Op::StorePlace(x, touch, _) | Op::UpdatePlace(x, touch, _, _) if *x == slot => {
                     if *touch == NO_HOST_TOUCH {
                         return None;
                     }
@@ -2006,9 +2072,7 @@ impl Program2 {
                         None => return None,
                     }
                 }
-                Op::LoadPlace(x, touch, _, _) | Op::LoadPlaceLen(x, touch, _)
-                    if *x == slot =>
-                {
+                Op::LoadPlace(x, touch, _, _) | Op::LoadPlaceLen(x, touch, _) if *x == slot => {
                     if *touch == NO_HOST_TOUCH {
                         return None;
                     }
@@ -2025,7 +2089,10 @@ impl Program2 {
                 | Op::StoreExact(x)
                 | Op::Freeze(x)
                 | Op::Declare(x)
-                    if *x == slot => return None,
+                    if *x == slot =>
+                {
+                    return None
+                }
                 Op::MutMethod(x, _, _, _) if *x == slot => return None,
                 Op::LoadField(x, _, _) if *x == slot => return None,
                 Op::Alias(a, b) if *a == slot || *b == slot => return None,
@@ -2127,11 +2194,17 @@ impl<'a> Vm<'a> {
     ///
     /// **フレーム自身が一段目**なので、中の段の数に 1 を足す。
     fn depth(&self) -> i64 {
-        self.frames.last().map(|f| f.stages.len() as i64 + 1).unwrap_or(1)
+        self.frames
+            .last()
+            .map(|f| f.stages.len() as i64 + 1)
+            .unwrap_or(1)
     }
 
     fn err<T>(&self, msg: impl Into<String>, span: Span) -> Result<T, RtErr> {
-        Err(RtErr { msg: msg.into(), span })
+        Err(RtErr {
+            msg: msg.into(),
+            span,
+        })
     }
 
     fn pop(&mut self) -> Slot {
@@ -2233,7 +2306,10 @@ impl<'a> Vm<'a> {
             .arena
             .get(cell)
             .and_then(|root| crate::interp::get_index(root, &index))
-            .ok_or_else(|| RtErr { msg: "経路がたどれない".into(), span })?;
+            .ok_or_else(|| RtErr {
+                msg: "経路がたどれない".into(),
+                span,
+            })?;
         let value = self.updated_value(current, op, rhs, span)?;
         self.store_resolved_index(slot, index, value, span)
     }
@@ -2245,17 +2321,14 @@ impl<'a> Vm<'a> {
         rhs: Value,
         span: Span,
     ) -> Result<Value, RtErr> {
-        match arith_pub(op, current, rhs, span)
-            .map_err(|e| RtErr { msg: e.msg, span: e.span })?
-        {
+        match arith_pub(op, current, rhs, span).map_err(|e| RtErr {
+            msg: e.msg,
+            span: e.span,
+        })? {
             crate::interp::Eval::Value(value) => Ok(value),
-            crate::interp::Eval::Paradox(at) => {
-                self.err("消費されなかった paradox", at)
-            }
+            crate::interp::Eval::Paradox(at) => self.err("消費されなかった paradox", at),
             crate::interp::Eval::Akasha => self.err("複合代入に値が無い", span),
-            crate::interp::Eval::Escape(_) => {
-                self.err("複合代入の途中で脱出した", span)
-            }
+            crate::interp::Eval::Escape(_) => self.err("複合代入の途中で脱出した", span),
         }
     }
 }
@@ -2300,7 +2373,11 @@ impl<'a> Vm<'a> {
             }
             Op::Paradox(sp) => self.stack.push(Slot::Paradox(sp)),
             Op::Dup => {
-                let t = self.stack.last().cloned().unwrap_or(Slot::Paradox(Span::NONE));
+                let t = self
+                    .stack
+                    .last()
+                    .cloned()
+                    .unwrap_or(Slot::Paradox(Span::NONE));
                 self.stack.push(t);
             }
             Op::Pop => {
@@ -2321,7 +2398,10 @@ impl<'a> Vm<'a> {
                 let v = self.pop().value(Span::NONE)?;
                 let c = self.cell(s);
                 if self.frozen.contains(&c) {
-                    return self.err("凍っているセルには書けない（`const` の別名がある）", Span::NONE);
+                    return self.err(
+                        "凍っているセルには書けない（`const` の別名がある）",
+                        Span::NONE,
+                    );
                 }
                 let target = self
                     .arena
@@ -2417,14 +2497,19 @@ impl<'a> Vm<'a> {
             }
             Op::Un(o, sp) => {
                 let v = self.pop().value(sp)?;
-                let r = crate::interp::unary_pub(o, v, sp)
-                    .map_err(|e| RtErr { msg: e.msg, span: e.span })?;
+                let r = crate::interp::unary_pub(o, v, sp).map_err(|e| RtErr {
+                    msg: e.msg,
+                    span: e.span,
+                })?;
                 self.stack.push(Slot::Value(r));
             }
             Op::Bin(o, sp) => {
                 let b = self.pop().value(sp)?;
                 let a = self.pop().value(sp)?;
-                let r = arith_pub(o, a, b, sp).map_err(|e| RtErr { msg: e.msg, span: e.span })?;
+                let r = arith_pub(o, a, b, sp).map_err(|e| RtErr {
+                    msg: e.msg,
+                    span: e.span,
+                })?;
                 self.stack.push(Slot::from_eval(r, sp)?);
             }
             Op::MakeArray(n) => {
@@ -2432,7 +2517,10 @@ impl<'a> Vm<'a> {
                     // 回数と値から作る
                     let fill = self.pop().value(Span::NONE)?;
                     let cnt = self.pop().value(Span::NONE)?.as_int().unwrap_or(0).max(0);
-                    self.stack.push(Slot::Value(Value::array(fill.type_of(), vec![fill; cnt as usize])));
+                    self.stack.push(Slot::Value(Value::array(
+                        fill.type_of(),
+                        vec![fill; cnt as usize],
+                    )));
                 } else {
                     let mut items = Vec::with_capacity(n as usize);
                     for _ in 0..n {
@@ -2503,7 +2591,8 @@ impl<'a> Vm<'a> {
                     Slot::Place(place) => *place,
                     _ => return self.err("欄の前に代入先の経路が無い", sp),
                 };
-                self.stack.push(Slot::Place(Box::new(push_step(place, Step::Field(name)))));
+                self.stack
+                    .push(Slot::Place(Box::new(push_step(place, Step::Field(name)))));
             }
             Op::PlaceIndex(sp) => {
                 let index = self.pop().value(sp)?;
@@ -2514,7 +2603,8 @@ impl<'a> Vm<'a> {
                 let Some(step) = place_index_step(&index) else {
                     return self.err("添字にできない値", sp);
                 };
-                self.stack.push(Slot::Place(Box::new(push_step(place, step))));
+                self.stack
+                    .push(Slot::Place(Box::new(push_step(place, step))));
             }
             Op::LoadPlace(_, _, missing_is_paradox, sp) => {
                 let place = match self.pop() {
@@ -2526,9 +2616,7 @@ impl<'a> Vm<'a> {
                     Err(PlaceReadError::Missing) if missing_is_paradox => {
                         self.stack.push(Slot::Paradox(sp));
                     }
-                    Err(PlaceReadError::Unbound) => {
-                        return self.err("まだ束縛されていない", sp)
-                    }
+                    Err(PlaceReadError::Unbound) => return self.err("まだ束縛されていない", sp),
                     Err(PlaceReadError::Intermediate) | Err(PlaceReadError::Missing) => {
                         return self.err("経路がたどれない", sp)
                     }
@@ -2664,7 +2752,10 @@ impl<'a> Vm<'a> {
                     let params = self.p.chunks[idx as usize].params.clone();
                     if params.len() != args.len() + 1 {
                         return self.err(
-                            format!("`{name}` は引数を {} 個取る", params.len().saturating_sub(1)),
+                            format!(
+                                "`{name}` は引数を {} 個取る",
+                                params.len().saturating_sub(1)
+                            ),
                             sp,
                         );
                     }
@@ -2696,16 +2787,20 @@ impl<'a> Vm<'a> {
                 let args: Vec<Value> = args.into_iter().map(|(value, _)| value).collect();
                 if is_destructive(&name) {
                     let mut cur = recv;
-                    let out = write_method_pub(&mut cur, &name, &args, sp)
-                        .map_err(|e| RtErr { msg: e.msg, span: e.span })?;
+                    let out = write_method_pub(&mut cur, &name, &args, sp).map_err(|e| RtErr {
+                        msg: e.msg,
+                        span: e.span,
+                    })?;
                     self.stack.push(Slot::Value(cur));
                     self.stack.push(Slot::from_eval(out, sp)?);
                     // 結果とレシーバを入れ替えて、書き戻しに備える
                     let n = self.stack.len();
                     self.stack.swap(n - 1, n - 2);
                 } else {
-                    let out = read_method_pub(&recv, &name, &args, sp)
-                        .map_err(|e| RtErr { msg: e.msg, span: e.span })?;
+                    let out = read_method_pub(&recv, &name, &args, sp).map_err(|e| RtErr {
+                        msg: e.msg,
+                        span: e.span,
+                    })?;
                     self.stack.push(Slot::from_eval(out, sp)?);
                 }
             }
@@ -2723,8 +2818,10 @@ impl<'a> Vm<'a> {
                 let Some(cur) = self.arena.get_mut(cell) else {
                     return self.err("まだ束縛されていない", sp);
                 };
-                let out = write_method_pub(cur, &name, &args, sp)
-                    .map_err(|e| RtErr { msg: e.msg, span: e.span })?;
+                let out = write_method_pub(cur, &name, &args, sp).map_err(|e| RtErr {
+                    msg: e.msg,
+                    span: e.span,
+                })?;
                 self.stack.push(Slot::from_eval(out, sp)?);
             }
             Op::Call(idx, argc, sp) => {
@@ -2742,9 +2839,7 @@ impl<'a> Vm<'a> {
                     if is_alias {
                         let cell = match a {
                             Slot::Cell(cell) => cell,
-                            _ => {
-                                return self.err("`alias` 引数に渡せるのは名前だけ", sp)
-                            }
+                            _ => return self.err("`alias` 引数に渡せるのは名前だけ", sp),
                         };
                         // 名前が違っても、実際のセルが同じなら二つの別名である（C-87）。
                         if aliases.contains(&cell) {
@@ -2834,8 +2929,17 @@ impl<'a> Vm<'a> {
             }
             Op::NForBegin(slot, sp) => return self.nfor_begin(slot, sp),
             Op::NForNext(top, sp) => return self.nfor_next(top, sp),
-            Op::Break { stages, outward, payload, span } => {
-                let p = if payload { Some(self.pop().value(span)?) } else { None };
+            Op::Break {
+                stages,
+                outward,
+                payload,
+                span,
+            } => {
+                let p = if payload {
+                    Some(self.pop().value(span)?)
+                } else {
+                    None
+                };
                 return Ok(Some(Esc {
                     kind: EKind::Break,
                     stages,
@@ -2855,7 +2959,11 @@ impl<'a> Vm<'a> {
                 span,
             } => {
                 let n = self.pop().value(span)?.as_int().unwrap_or(0);
-                let p = if payload { Some(self.pop().value(span)?) } else { None };
+                let p = if payload {
+                    Some(self.pop().value(span)?)
+                } else {
+                    None
+                };
                 // `n` が 0 以下なら作用素を一つも重ねない（C-75 の 5）。
                 // **被演算子の分は残る**（C-101）
                 let times = n.max(0) as u32;
@@ -2868,7 +2976,11 @@ impl<'a> Vm<'a> {
                     return Ok(None);
                 }
                 return Ok(Some(Esc {
-                    kind: if resume { EKind::Continue } else { EKind::Break },
+                    kind: if resume {
+                        EKind::Continue
+                    } else {
+                        EKind::Break
+                    },
                     stages,
                     // **内側の印は左の段数だけ後ろへずれる**（C-101）
                     outward: extra_outward << times,
@@ -2877,7 +2989,12 @@ impl<'a> Vm<'a> {
                     span,
                 }));
             }
-            Op::Continue { stages, outward, deferred, span } => {
+            Op::Continue {
+                stages,
+                outward,
+                deferred,
+                span,
+            } => {
                 return Ok(Some(Esc {
                     kind: EKind::Continue,
                     // **段数を捨てない。** `break continue` は二段抜けてから再開する
@@ -2886,7 +3003,7 @@ impl<'a> Vm<'a> {
                     payload: None,
                     deferred,
                     span,
-                }))
+                }));
             }
         }
         Ok(None)
@@ -3011,7 +3128,9 @@ impl<'a> Vm<'a> {
             return Ok(None);
         }
         // 次の周回の束縛。**`i` は周回ごとに新しい**
-        let cell = self.arena.alloc(Some(crate::interp::wrap_like(&sample, s0.wrapping_add(k))));
+        let cell = self
+            .arena
+            .alloc(Some(crate::interp::wrap_like(&sample, s0.wrapping_add(k))));
         let f = self.frames.last_mut().unwrap();
         f.cells[slot as usize] = cell;
         f.pc = match pending {
@@ -3251,7 +3370,10 @@ pub fn sizes() -> Vec<(&'static str, usize)> {
         ("Op", size_of::<Op>()),
         ("Esc", size_of::<Esc>()),
         ("RtErr", size_of::<RtErr>()),
-        ("Result<Option<Esc>,RtErr>", size_of::<Result<Option<Esc>, RtErr>>()),
+        (
+            "Result<Option<Esc>,RtErr>",
+            size_of::<Result<Option<Esc>, RtErr>>(),
+        ),
         ("Eval", size_of::<crate::interp::Eval>()),
         ("ValueType", size_of::<ValueType>()),
     ]
@@ -3312,10 +3434,8 @@ mod runner_tests {
 
     #[test]
     fn 脱出で終わった関数のセル表もrunnerへ戻す() {
-        let syntax = crate::parser::parse(
-            "fn f (x : i64) { break x + 1; } -> i64; f(41)",
-        )
-        .expect("parse");
+        let syntax =
+            crate::parser::parse("fn f (x : i64) { break x + 1; } -> i64; f(41)").expect("parse");
         let program = compile(&syntax).expect("compile");
         let mut runner = Runner::new();
 

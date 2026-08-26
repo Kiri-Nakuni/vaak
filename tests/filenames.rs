@@ -25,7 +25,10 @@ fn 使えない文字を含まない() {
     let files = tracked();
     let bad: Vec<_> = files
         .iter()
-        .filter(|p| p.chars().any(|c| ":<>\"|?*".contains(c) || (c as u32) < 0x20))
+        .filter(|p| {
+            p.chars()
+                .any(|c| ":<>\"|?*".contains(c) || (c as u32) < 0x20)
+        })
         .collect();
     assert!(bad.is_empty(), "Windows で開けない名前: {bad:?}");
 }
@@ -46,8 +49,8 @@ fn 末尾が点や空白でない() {
 #[test]
 fn 予約名を使わない() {
     const RESERVED: &[&str] = &[
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
-        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
     ];
     let files = tracked();
     let bad: Vec<_> = files

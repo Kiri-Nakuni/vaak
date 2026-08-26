@@ -74,7 +74,10 @@ fn run_str(src: &str) -> i32 {
             return Status::Static as i32;
         }
     };
-    let mut errs: Vec<String> = crate::check::check(&prog).into_iter().map(|e| e.msg).collect();
+    let mut errs: Vec<String> = crate::check::check(&prog)
+        .into_iter()
+        .map(|e| e.msg)
+        .collect();
     errs.extend(crate::types::check_types(&prog).into_iter().map(|e| e.msg));
     if !errs.is_empty() {
         set_out(errs.join("\n"));

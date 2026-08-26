@@ -29,8 +29,7 @@ fn const別名は一つの字句境界につき一度だけ凍らせる() {
 
 #[test]
 fn 入れ子代入は根をloadして書き戻す命令列へ戻らない() {
-    let source =
-        "struct Item { var value : i64 := 0; };
+    let source = "struct Item { var value : i64 := 0; };
          var items : Item array := new Item array(8, new Item());
          items[3].value := 9;
          0";
@@ -38,13 +37,26 @@ fn 入れ子代入は根をloadして書き戻す命令列へ戻らない() {
     let program = vaak::vm::compile(&syntax).expect("VM 組み立て");
     let ops = &program.chunks[program.top as usize].ops;
 
-    assert!(ops.iter().any(|op| matches!(op, Op::PlaceRoot(..))), "根を実セルへ解く");
-    assert!(ops.iter().any(|op| matches!(op, Op::PlaceIndex(..))), "添字を経路へ足す");
-    assert!(ops.iter().any(|op| matches!(op, Op::PlaceField(..))), "欄を経路へ足す");
-    assert!(ops.iter().any(|op| matches!(op, Op::StorePlace(..))), "末端へ直接書く");
+    assert!(
+        ops.iter().any(|op| matches!(op, Op::PlaceRoot(..))),
+        "根を実セルへ解く"
+    );
+    assert!(
+        ops.iter().any(|op| matches!(op, Op::PlaceIndex(..))),
+        "添字を経路へ足す"
+    );
+    assert!(
+        ops.iter().any(|op| matches!(op, Op::PlaceField(..))),
+        "欄を経路へ足す"
+    );
+    assert!(
+        ops.iter().any(|op| matches!(op, Op::StorePlace(..))),
+        "末端へ直接書く"
+    );
 
     assert!(
-        !ops.iter().any(|op| matches!(op, Op::SetIndex(..) | Op::SetField(..))),
+        !ops.iter()
+            .any(|op| matches!(op, Op::SetIndex(..) | Op::SetField(..))),
         "根まで集合体を組み直す旧経路へ戻ると、反復が O(N²) になる: {ops:?}"
     );
     // この台本で `items` を値として読む必要はない。旧実装は書き戻しのためだけに
@@ -57,8 +69,7 @@ fn 入れ子代入は根をloadして書き戻す命令列へ戻らない() {
 
 #[test]
 fn 一段の添字代入は経路を確保せず直接セルへ書く() {
-    let syntax = vaak::parser::parse("var values := [1, 2]; values[0] += 3; 0")
-        .expect("構文");
+    let syntax = vaak::parser::parse("var values := [1, 2]; values[0] += 3; 0").expect("構文");
     let program = vaak::vm::compile(&syntax).expect("VM 組み立て");
     let ops = &program.chunks[program.top as usize].ops;
 

@@ -1,5 +1,5 @@
 use std::process::ExitCode;
-use vaak::interp::{Interp, Eval};
+use vaak::interp::{Eval, Interp};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);

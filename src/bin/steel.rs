@@ -63,7 +63,10 @@ fn main() -> ExitCode {
         .find(|w| w[0] == "-o")
         .map(|w| w[1].clone())
         .unwrap_or_else(|| stem.to_string());
-    match std::process::Command::new("clang").args(["-O2", "-o", &out, &ll]).status() {
+    match std::process::Command::new("clang")
+        .args(["-O2", "-o", &out, &ll])
+        .status()
+    {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
         Err(e) => {

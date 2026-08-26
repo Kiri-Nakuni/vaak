@@ -36,11 +36,14 @@ fn sexp(e: &Expr) -> String {
         }
         ExprKind::Escape(esc) => esc_s(esc),
         ExprKind::Decl(d) => {
-            let mut s = format!("({}", match d.kind {
-                BindKind::Var => "var",
-                BindKind::Let => "let",
-                BindKind::Const => "const",
-            });
+            let mut s = format!(
+                "({}",
+                match d.kind {
+                    BindKind::Var => "var",
+                    BindKind::Let => "let",
+                    BindKind::Const => "const",
+                }
+            );
             for b in &d.bindings {
                 match &b.init {
                     BindInit::Value(e) => s.push_str(&format!(" [{} := {}]", b.name, sexp(e))),
@@ -51,19 +54,29 @@ fn sexp(e: &Expr) -> String {
         }
         ExprKind::FnDecl(f) => format!(
             "(fn {}{} {}{})",
-            match &f.owner { Some(t) => format!("{t}.{}", f.name), None => f.name.clone() },
-            f.params.iter().map(|p| format!(" {}", p.name)).collect::<String>(),
+            match &f.owner {
+                Some(t) => format!("{t}.{}", f.name),
+                None => f.name.clone(),
+            },
+            f.params
+                .iter()
+                .map(|p| format!(" {}", p.name))
+                .collect::<String>(),
             sexp(&f.body),
-            f.ret.as_ref().map(|t| format!(" -> {}", ty(&t.value))).unwrap_or_default()
+            f.ret
+                .as_ref()
+                .map(|t| format!(" -> {}", ty(&t.value)))
+                .unwrap_or_default()
         ),
         ExprKind::FlowDecl(f) => format!("(flow {} {})", f.name, esc_s(&f.body)),
         ExprKind::StructDecl(s) => format!("(struct {})", s.name),
         ExprKind::WrapDecl(w) => format!("(wrap {})", w.name),
         ExprKind::Construct { ty: t, args } => {
             let a = match args {
-                CtorArgs::Named(v) => {
-                    v.iter().map(|(n, e)| format!(" [{n} {}]", sexp(e))).collect::<String>()
-                }
+                CtorArgs::Named(v) => v
+                    .iter()
+                    .map(|(n, e)| format!(" [{n} {}]", sexp(e)))
+                    .collect::<String>(),
                 CtorArgs::Positional(v) => items(v),
             };
             format!("(new {}{a})", ty(&t.value))
@@ -80,8 +93,18 @@ fn sexp(e: &Expr) -> String {
         }
         ExprKind::Loop(b) => format!("(loop {})", sexp(b)),
         ExprKind::While { cond, body } => format!("(while {} {})", sexp(cond), sexp(body)),
-        ExprKind::NFor { name, start, count, body } => {
-            format!("(nfor {name} {} {} {})", sexp(start), sexp(count), sexp(body))
+        ExprKind::NFor {
+            name,
+            start,
+            count,
+            body,
+        } => {
+            format!(
+                "(nfor {name} {} {} {})",
+                sexp(start),
+                sexp(count),
+                sexp(body)
+            )
         }
         ExprKind::Switch { subject, arms } => {
             let mut s = format!("(switch {}", sexp(subject));
@@ -135,26 +158,58 @@ fn un(o: UnOp) -> &'static str {
 fn bin(o: BinOp) -> &'static str {
     use BinOp::*;
     match o {
-        Add => "+", Sub => "-", Mul => "*", Div => "/", Mod => "mod",
-        Shl => "<<", Shr => ">>", BitAnd => "&", BitXor => "^", BitOr => "|",
-        Lt => "<", Le => "<=", Gt => ">", Ge => ">=", Eq => "==", Ne => "!=",
-        And => "&&", Or => "||", Coalesce => "??", Feed => "|>",
+        Add => "+",
+        Sub => "-",
+        Mul => "*",
+        Div => "/",
+        Mod => "mod",
+        Shl => "<<",
+        Shr => ">>",
+        BitAnd => "&",
+        BitXor => "^",
+        BitOr => "|",
+        Lt => "<",
+        Le => "<=",
+        Gt => ">",
+        Ge => ">=",
+        Eq => "==",
+        Ne => "!=",
+        And => "&&",
+        Or => "||",
+        Coalesce => "??",
+        Feed => "|>",
     }
 }
 
 fn asn(o: AssignOp) -> &'static str {
     use AssignOp::*;
     match o {
-        Set => ":=", Alias => "&=", Add => "+=", Sub => "-=", Mul => "*=",
-        Div => "/=", Mod => "mod=", Shl => "<<=", Shr => ">>=", BitXor => "^=", BitOr => "|=",
+        Set => ":=",
+        Alias => "&=",
+        Add => "+=",
+        Sub => "-=",
+        Mul => "*=",
+        Div => "/=",
+        Mod => "mod=",
+        Shl => "<<=",
+        Shr => ">>=",
+        BitXor => "^=",
+        BitOr => "|=",
     }
 }
 
 fn ty(t: &ValueType) -> String {
     use ValueType::*;
     match t {
-        U1 => "u1".into(), U8 => "u8".into(), U16 => "u16".into(), U32 => "u32".into(),
-        I32 => "i32".into(), I64 => "i64".into(), F32 => "f32".into(), F64 => "f64".into(), F80 => "f80".into(),
+        U1 => "u1".into(),
+        U8 => "u8".into(),
+        U16 => "u16".into(),
+        U32 => "u32".into(),
+        I32 => "i32".into(),
+        I64 => "i64".into(),
+        F32 => "f32".into(),
+        F64 => "f64".into(),
+        F80 => "f80".into(),
         Str => "str".into(),
         Array(i) => format!("{} array", ty(i)),
         Map(k, v) => format!("{} {} map", ty(k), ty(v)),
@@ -244,7 +299,10 @@ fn if_の分岐は_e0_で_セミコロンを吸う() {
 
 #[test]
 fn switch_の腕は_e6_で_セミコロンを吸わない() {
-    all("let x := switch (a) case 1 => 10;", "(; (let [x := (switch (paren a) [1 => 10])]))");
+    all(
+        "let x := switch (a) case 1 => 10;",
+        "(; (let [x := (switch (paren a) [1 => 10])]))",
+    );
     bad("switch (x) case 1 => foo; case 2 => bar");
     all(
         "switch (x) case 1 => foo case 2 => bar",
@@ -276,7 +334,10 @@ fn 入れ子の_switch_は内側が_case_を食う() {
 #[test]
 fn ループ() {
     all("loop { };", "(; (loop (block)))");
-    all("while (m) { m /= 10; }", "(while (paren m) (block (; (/= m 10))))");
+    all(
+        "while (m) { m /= 10; }",
+        "(while (paren m) (block (; (/= m 10))))",
+    );
     all("nfor (i, 0, 10) { };", "(; (nfor i 0 10 (block)))");
 }
 
@@ -286,10 +347,13 @@ fn ループ() {
 fn 脱出の形() {
     all("continue continue;", "(; (continue (continue)))");
     all("break continue;", "(; (break (continue)))");
-    all("break outward break break;", "(; (break-outward (break (break))))");
+    all(
+        "break outward break break;",
+        "(; (break-outward (break (break))))",
+    );
     all("$return i;", "(; ($return i))");
     all("$repeat(break, n);", "(; ($repeat((break) n)))");
-    bad("continue 1;");   // continue は値を取れない
+    bad("continue 1;"); // continue は値を取れない
     bad("break outward;"); // outward は脱出を要求する
 }
 
@@ -297,7 +361,10 @@ fn 脱出の形() {
 
 #[test]
 fn 宣言と代入は束縛種の有無で分かれる() {
-    all("var x := 5; var y := 6;", "(; (var [x := 5])) (; (var [y := 6]))");
+    all(
+        "var x := 5; var y := 6;",
+        "(; (var [x := 5])) (; (var [y := 6]))",
+    );
     all("x := 5;", "(; (:= x 5))");
     all("var b &= a;", "(; (var [b &= a]))");
     bad("var e &= a[0];"); // &= の右辺は名前だけ
@@ -313,14 +380,23 @@ fn 関数() {
 #[test]
 fn 型は逆ポーランド() {
     all("var a : i64 array := x;", "(; (var [a := x]))");
-    all("fn f () { } -> str i64 map;", "(; (fn f (block) -> str i64 map))");
-    all("fn f () { } -> str i64 array map;", "(; (fn f (block) -> str i64 array map))");
+    all(
+        "fn f () { } -> str i64 map;",
+        "(; (fn f (block) -> str i64 map))",
+    );
+    all(
+        "fn f () { } -> str i64 array map;",
+        "(; (fn f (block) -> str i64 array map))",
+    );
     bad("fn f () { } -> i64 array map;"); // map は 2 つ取るが 1 つしか無い
 }
 
 #[test]
 fn 構築() {
-    all("new Point ( x := 1, y := 2 );", "(; (new Point [x 1] [y 2]))");
+    all(
+        "new Point ( x := 1, y := 2 );",
+        "(; (new Point [x 1] [y 2]))",
+    );
     all("new i64 array ( 10, 0 );", "(; (new i64 array 10 0))");
     all("new str i64 map ( );", "(; (new str i64 map))");
 }

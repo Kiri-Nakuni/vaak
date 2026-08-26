@@ -28,7 +28,10 @@ fn bad(src: &str, needle: &str) {
 fn 暗黙の数値変換は無い() {
     ok("var a : i64 := 1; var b : i64 := 2; a + b;");
     bad("var a : i64 := 1; var b : u8 := 2; a + b;", "型が合わない");
-    bad("var a : i64 := 1; var b : f64 := 1.0; a + b;", "型が合わない");
+    bad(
+        "var a : i64 := 1; var b : f64 := 1.0; a + b;",
+        "型が合わない",
+    );
 }
 
 #[test]
@@ -103,7 +106,10 @@ fn 分岐は同じ型でなければならない() {
 #[test]
 fn coalesce_は左右が同じ型() {
     ok("var m : str i64 map := ( \"a\" => 1 ); m[\"a\"] ?? 0;");
-    bad("var m : str i64 map := ( \"a\" => 1 ); m[\"a\"] ?? 1.0;", "型が合わない");
+    bad(
+        "var m : str i64 map := ( \"a\" => 1 ); m[\"a\"] ?? 1.0;",
+        "型が合わない",
+    );
 }
 
 #[test]
@@ -123,17 +129,29 @@ fn 関数の引数と返り値() {
 #[test]
 fn 添字と欄() {
     ok("var xs : i64 array := [1, 2]; var a : i64 := xs[0];");
-    bad("var xs : i64 array := [1, 2]; var a : u8 := xs[0];", "型が合わない");
+    bad(
+        "var xs : i64 array := [1, 2]; var a : u8 := xs[0];",
+        "型が合わない",
+    );
     ok("var s : str := \"ab\"; var b : u8 := s[0];");
     ok("var m : str i64 map := ( \"a\" => 1 ); var v : i64 := m[\"a\"];");
-    bad("var m : str i64 map := ( \"a\" => 1 ); m[1];", "型が合わない");
+    bad(
+        "var m : str i64 map := ( \"a\" => 1 ); m[1];",
+        "型が合わない",
+    );
 }
 
 #[test]
 fn 構造体の欄() {
     ok("struct P { var x : i64 := 0; }; var p := new P ( x := 1 ); var a : i64 := p.x;");
-    bad("struct P { var x : i64 := 0; }; new P ( x := 1.0 );", "型が合わない");
-    bad("struct P { var x : i64 := 0; }; new P ( y := 1 );", "欄 `y` は無い");
+    bad(
+        "struct P { var x : i64 := 0; }; new P ( x := 1.0 );",
+        "型が合わない",
+    );
+    bad(
+        "struct P { var x : i64 := 0; }; new P ( y := 1 );",
+        "欄 `y` は無い",
+    );
     bad("struct P { var x : i64; }; new P ( );", "欄 `x` に値が無い");
 }
 
@@ -142,7 +160,10 @@ fn 配列と写像のリテラル() {
     ok("var xs : u8 array := [1, 2, 3];");
     bad("var xs : i64 array := [1, 1.0];", "型が合わない");
     ok("var m : str i64 map := ( \"a\" => 1, \"b\" => 2 );");
-    bad("var m : str i64 map := ( \"a\" => 1, 2 => 2 );", "型が合わない");
+    bad(
+        "var m : str i64 map := ( \"a\" => 1, 2 => 2 );",
+        "型が合わない",
+    );
 }
 
 #[test]
@@ -205,6 +226,9 @@ let pos := find(xs, 42) ?? -1;
 fn 注釈は集合体の中まで届く() {
     // C-94：`i32 array` と書いたなら、要素も `i32`
     ok("var a : i32 array := [1, 2, 3]; var x : i32 := a[0];");
-    bad("var a : i32 array := [1]; var x : i64 := a[0];", "型が合わない");
+    bad(
+        "var a : i32 array := [1]; var x : i64 := a[0];",
+        "型が合わない",
+    );
     ok("var m : str i32 map := ( \"a\" => 1 ); var v : i32 := m[\"a\"];");
 }
