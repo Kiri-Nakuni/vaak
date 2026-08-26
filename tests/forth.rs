@@ -119,7 +119,6 @@ fn forthをsteelへ翻訳できる() {
 }
 
 #[test]
-#[ignore = "STEEL は grow した alias 配列の記述子を呼び出し元へ共有していない"]
 fn steelのalias引数から伸ばした配列が呼び出し元に残る() {
     let program = parse(
         "fn push_one (var stack : i64 array alias) { stack.push(42); };

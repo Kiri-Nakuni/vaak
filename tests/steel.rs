@@ -76,6 +76,8 @@ t!(除算, "100 / 7");
 t!(剰余は非負, "0 - 7 mod 3");
 t!(剰余は非負2, "7 mod 3");
 t!(零で割ると畳まれる, "( 1 / 0 ) ?? 42");
+t!(論理積は右辺を短絡する, "(0 && (1 / 0)) ?? true");
+t!(論理和は右辺を短絡する, "(1 || (1 / 0)) ?? false");
 t!(比較, "if (3 < 5) 1 else 0 fi");
 t!(否定はビット反転, "! 0");
 t!(u1の否定は論理, "! (1 == 2)");
@@ -97,6 +99,9 @@ t!(switch, "switch (2) case 1 => 10 case 2 => 20 case 3 => 30");
 t!(switchは外れると畳まれる, "switch (9) case 1 => 10 ?? 77");
 t!(coalesce左が値, "5 ?? 9");
 t!(coalesce右が緩い, "( 1 / 0 ) ?? 20 + 3");
+t!(集合体返り値のparadoxはnullを写さない,
+   "fn missing () { if (false) [1] fi } -> i64 array;
+    let values := missing() ?? [42]; values[0]");
 t!(関数, "fn add (a : i64, b : i64) { a + b } -> i64; add(20, 22)");
 t!(再帰, "fn f (n : i64) { if (n < 2) n else f(n - 1) + f(n - 2) fi } -> i64; f(10)");
 t!(関数から脱出, "fn f (n : i64) { nfor (i, 0, n) { if (i == 3) break break i; fi; }; 0 } -> i64; f(10)");

@@ -135,6 +135,13 @@ STEEL は `alias` 引数にも集合体の記述子を値で渡していまし�
 誤った実行結果を速く測っても性能比較にはならないため、**STEEL native のForthベンチ値は記録しません。**
 最小再現は `tests/forth.rs` の ignored 試験に残しました。
 
+### 2026-08-26 再観測
+
+上の0という値は当時の棄却記録として残す。現在のS-21実装ではalias引数へ呼び出し元のセルを渡し、
+可変集合体aliasを持つ関数のarenaを保つため、同じ最小再現は参照実装・VM・STEEL nativeのすべてで42に
+なった。staleになっていた`#[ignore]`を外し、通常gateへ戻した。したがって専用stack型をalias不一致の
+回避策として足す案は採らない。主例全体のSTEEL性能比較は別の測定器がまだ無いため、未測定のままである。
+
 ## 書いて分かったこと
 
 ### 書きやすかったところ
@@ -188,8 +195,8 @@ cargo run --release --bin vaak -- examples/vaak/07-Forth.vaak
 cargo test --release --test forth
 # 参照実装 = 42、VM = 42、誤りはparadox、STEELのLLVM IR生成成功
 
-# clang が使える環境で、既知のSTEEL native差を再現する。修正前は 0 != 42 で失敗する
-cargo test --release --test forth -- --ignored --nocapture
+# clang が使える環境ではalias-growも通常gateでnative実行する
+cargo test --release --locked --test forth
 ```
 
 Windows環境で一度は `clang` 22.1.8 によるリンクと実行まで確認できました。その後の新しいshellでは

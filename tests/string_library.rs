@@ -246,7 +246,7 @@ fn steelでもpure_vaak実装をnative実行できる() {
         let pieces := str_split(upper, "X") ?? new str array(0, "");
         let joined := str_join(pieces, "-") ?? "";
         let hyphen := str_find_byte(joined, 45, 0) ?? -1;
-        if (str_utf8_valid(joined) && str_eq(joined, "A-Aあ") && hyphen == 1) 42 else 0 fi
+        if (str_utf8_valid(joined) && str_eq(joined, "A--あ") && hyphen == 1) 42 else 0 fi
     "#;
     let src = checked(body);
     let prog = vaak::parser::parse(&src).expect("構文");

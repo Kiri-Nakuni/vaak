@@ -194,8 +194,7 @@ fn 不正入力と長さ違いは変更前に拒否する() {
 }
 
 #[test]
-#[ignore = "STEEL nativeは負長constructorのcoalesceで現在42でなく48を返す"]
-fn steelの負長constructor回収は参照実装とvmに一致していない() {
+fn steelの負長constructor回収は参照実装とvmに一致する() {
     reference_and_vm(NEGATIVE_CONSTRUCTOR_FALLBACK, "値 42");
     steel_native(NEGATIVE_CONSTRUCTOR_FALLBACK, 42);
 }

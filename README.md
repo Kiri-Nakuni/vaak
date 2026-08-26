@@ -119,11 +119,12 @@ signal 11、再現commandをignored棄却記録として保持しています。
 cargo test --release --locked --no-fail-fast -- --test-threads=1
 ```
 
-`codex3/stdlib-dense-bitset`の2026-08-25 checkpointでは841件中833 passed、6 failed、2 ignoredです。
-6件は既知のSTEEL native配列共有問題に由来するgraph 3件、heap 1件、ASCII I/O 1件、string 1件で、
-JSON/JSONLの24件、DenseBitSetの通常7件、参照実装・VMの回帰試験は通過しています。ignoredの一件は既存の
-STEEL alias配列共有、もう一件は負長bitset constructorの`??`回収が42でなく48になる再現fixtureです。
-既知失敗を成功扱いせず、backend修正時に同じfixtureで解消を確認します。
+`codex2/steel-short-circuit-fixes`の2026-08-26 checkpointでは844 passed、0 failed、0 ignoredです。
+旧checkpointのgraph 3件、heap、ASCII I/O、stringのnative失敗は、STEELが`&&` / `||`の右辺を常に
+評価していたことが主因でした。集合体返値がparadoxのときnull仮値を深い複製していたSIGSEGVも防ぎ、
+負長bitset constructorとalias-growのignored fixtureを通常gateへ戻しています。string fixtureだけは
+非重複全置換後の正しい値`A--あ`に対して試験が`A-Aあ`を期待していたため、期待値を修正しました。
+修正前の失敗値と性能上の棄却理由は実験文書に残しています。
 
 ## 文書の地図
 

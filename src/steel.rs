@@ -1614,6 +1614,9 @@ impl Steel {
                     // **どちらも同じ場所に置かれる**（C-100）
                     return self.coalesce(lhs, rhs, want, e.span).map(Some);
                 }
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    return self.logical(*op, lhs, rhs, e.span).map(Some);
+                }
                 // **`|>` は構文の水準の糖衣**（C-15）。`x |> f(a)` は `f(x, a)`
                 if *op == BinOp::Feed {
                     let ExprKind::Call { callee, args } = &rhs.kind else {
@@ -2547,6 +2550,61 @@ impl Steel {
         self.emit(&format!("{raw} = load i128, ptr {slot}"));
         let v = self.from_slot(&raw, &ty);
         Ok(Val { ok, v, ty })
+    }
+
+    /// `&&` / `||` — **必要なときだけ右辺を評価する**（C-62）。
+    ///
+    /// LLVM の `and` / `or` へ直接落とすだけでは、右辺にある除算・脱出・書き換えまで
+    /// 先に実行してしまう。値を選ぶのではなく、評価する制御流そのものを分ける。
+    fn logical(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> R<Val> {
+        self.want = None;
+        let l = self.expr(lhs)?;
+        let Some(l) = l else { return err("`&&` `||` の左に値が無い", span) };
+
+        let value_slot = self.alloca("i1");
+        let ok_slot = self.alloca("i1");
+        self.emit(&format!("store i1 false, ptr {value_slot}"));
+        self.emit(&format!("store i1 false, ptr {ok_slot}"));
+
+        let inspect = self.label("logical.left");
+        let short = self.label("logical.short");
+        let right = self.label("logical.right");
+        let done = self.label("logical.done");
+        // 左辺が paradox なら右辺を評価せず、そのまま伝播する。
+        self.cbr(&l.ok.clone(), &inspect, &done);
+
+        self.place(&inspect);
+        let left = self.nonzero(&l);
+        let take_right = if op == BinOp::And {
+            left
+        } else {
+            let inverted = self.tmp();
+            self.emit(&format!("{inverted} = xor i1 {left}, true"));
+            inverted
+        };
+        self.cbr(&take_right, &right, &short);
+
+        self.place(&short);
+        let short_value = if op == BinOp::Or { "true" } else { "false" };
+        self.emit(&format!("store i1 {short_value}, ptr {value_slot}"));
+        self.emit(&format!("store i1 true, ptr {ok_slot}"));
+        self.br(&done);
+
+        self.place(&right);
+        self.want = None;
+        let r = self.expr(rhs)?;
+        let Some(r) = r else { return err("`&&` `||` の右に値が無い", span) };
+        let right_value = self.nonzero(&r);
+        self.emit(&format!("store i1 {right_value}, ptr {value_slot}"));
+        self.emit(&format!("store i1 {}, ptr {ok_slot}", r.ok));
+        self.br(&done);
+
+        self.place(&done);
+        let ok = self.tmp();
+        self.emit(&format!("{ok} = load i1, ptr {ok_slot}"));
+        let v = self.tmp();
+        self.emit(&format!("{v} = load i1, ptr {value_slot}"));
+        Ok(Val { ok, v, ty: ValueType::U1 })
     }
 }
 
@@ -3660,11 +3718,22 @@ impl Steel {
         // **返り値は呼び出し側の領域へ移る**（C-90 の表）。
         // 印の下へ写してから、印を戻す——**領域は高々一つの値**（C-14）なので一つだけ
         let mut out_ok = out.ok.clone();
-        let conv = if keeps_arena && is_heap(&ret) && is_heap(&out.ty) {
-            // 場を保つ場合も、返り値は別の自己完結した値である（C-20）。
-            // 解放を挟まないので、一度の深い複製で足りる。
-            self.deep_copy(&out.v.clone(), &ret)
-        } else if is_heap(&ret) && is_heap(&out.ty) {
+        let conv = if is_heap(&ret) && is_heap(&out.ty) {
+            // paradox の仮値は null である。値が無い側では深い複製を呼ばない。
+            // 呼べば `ok = false` を返す前に null を読んで落ちてしまう。
+            let slot = self.alloca("ptr");
+            let value = self.label("ret.value");
+            let empty = self.label("ret.paradox");
+            let done = self.label("ret.done");
+            self.cbr(&out_ok.clone(), &value, &empty);
+
+            self.place(&value);
+            if keeps_arena {
+                // 場を保つ場合も、返り値は別の自己完結した値である（C-20）。
+                // 解放を挟まないので、一度の深い複製で足りる。
+                let copied = self.deep_copy(&out.v.clone(), &ret);
+                self.emit(&format!("store ptr {copied}, ptr {slot}"));
+            } else {
             // **二段で写す**（C-90 の表：「返り値は呼び出し側の領域へ移る」）。
             //
             // 1. 印より上へ深く写す（**逃がす**）
@@ -3677,16 +3746,30 @@ impl Steel {
             // 重ならないことは数えれば分かる：
             // 逃がした先は元の頂より上、書き込む先は印から深さの分だけ。
             // **深さは元の頂と印の差を越えない**ので、届かない。
-            let f = self.copy_fn(&ret);
-            let up = self.tmp();
-            self.emit(&format!("{up} = call ptr {f}(ptr {})", out.v));
-            self.emit(&format!(
-                "call void @vaak.release(i64 {})",
-                mark.as_ref().expect("場を戻せる関数")
-            ));
-            let down = self.tmp();
-            self.emit(&format!("{down} = call ptr {f}(ptr {up})"));
-            down
+                let f = self.copy_fn(&ret);
+                let up = self.tmp();
+                self.emit(&format!("{up} = call ptr {f}(ptr {})", out.v));
+                self.emit(&format!(
+                    "call void @vaak.release(i64 {})",
+                    mark.as_ref().expect("場を戻せる関数")
+                ));
+                let down = self.tmp();
+                self.emit(&format!("{down} = call ptr {f}(ptr {up})"));
+                self.emit(&format!("store ptr {down}, ptr {slot}"));
+            }
+            self.br(&done);
+
+            self.place(&empty);
+            if let Some(mark) = &mark {
+                self.emit(&format!("call void @vaak.release(i64 {mark})"));
+            }
+            self.emit(&format!("store ptr null, ptr {slot}"));
+            self.br(&done);
+
+            self.place(&done);
+            let copied = self.tmp();
+            self.emit(&format!("{copied} = load ptr, ptr {slot}"));
+            copied
         } else {
             let converted = self.conv_value(out.clone(), &ret);
             out_ok = converted.ok;
